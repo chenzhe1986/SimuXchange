@@ -10,8 +10,8 @@
 //!   → 登录成功：回复 Logon 确认 + 下发平台信息/平台状态
 //!   → 进入正常工作期：
 //!       - 双方按约定间隔互发心跳，证明“我还活着”
-//!       - 收到委托(100101) → 按策略回送确认/成交/拒绝回报
-//!       - 收到撤单(190007) → 统一回撤单失败(290008)
+//!       - 收到新订单(1xxx01，28 种业务) → 按策略回送确认/成交/拒绝回报
+//!       - 收到撤单(190007) → 在途单按原单业务回撤单成功(2xxx02)，否则回撤单失败(290008)
 //!   → 结束：柜台注销 / 连接断开 / 心跳超时 / 网关停止
 //!   → 清理：从连接表移除，记录日志
 //! ```
@@ -28,11 +28,11 @@ use crate::config::{PlatformConfig, StrategyConfig};
 use crate::event::{ConnInfo, EngineEvent};
 use crate::orderbook::{OrderBook, OrderEntry, OrderStatus, OrderUpdate};
 use super::protocol::{
-    self as protocol, exec_type, msg_type, ord_status, CancelReject, ExecRptCashAck,
-    ExecRptCashTrade, Logon, Logout, NewOrderCash, OrderCancelRequest,
+    self as protocol, exec_type, msg_type, ord_status, CancelReject, ExecRptAck,
+    ExecRptTrade, Logon, Logout, NewOrder, OrderCancelRequest,
 };
 use crate::stats::PlatformStats;
-use super::strategy::{self as strategy, ReportKind};
+use super::strategy::{self as strategy, biz_info_by_appl_id, ReportKind};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -396,8 +396,10 @@ pub async fn handle_conn(
             }
             // “if logged_on”是匹配守卫：只有登录后才接受委托/撤单，
             // 未登录时会落入下面的 other 分支被忽略
-            msg_type::NEW_ORDER_CASH if logged_on => {
-                handle_new_order(&ctx, &tx, &body, conn_id).await;
+            // 4.5.1 新订单：28 种业务消息类型统一分发（m 绑定实际消息类型，
+            // handle_new_order 按业务解码委托并选回报报文类型）
+            m if logged_on && NewOrder::is_new_order(m) => {
+                handle_new_order(m, &ctx, &tx, &body, conn_id).await;
             }
             msg_type::ORDER_CANCEL_REQUEST if logged_on => {
                 handle_cancel(&ctx, &tx, &body).await;
@@ -431,16 +433,22 @@ pub async fn handle_conn(
     ctx.log("info", format!("柜台 {} 会话结束", peer));
 }
 
-/// 处理新订单(100101)：核心业务入口。
+/// 处理新订单（4.5.1，MsgType=1xxx01，共 28 种业务消息类型）：核心业务入口。
 ///
-/// 流程：解析委托 → 计入统计 → 让 strategy 模块按平台配置的策略
-/// 生成“回报计划”（每条含：延迟毫秒数 + 编码好的报文 + 类型 + 描述）
+/// 流程：按消息类型解析委托 → 计入统计 → 让 strategy 模块按业务特征表
+/// （BizInfo）生成“回报计划”（每条含：延迟毫秒数 + 编码好的报文 + 类型 + 描述）
 /// → 按计划逐条发送给柜台。
-async fn handle_new_order(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8], conn_id: u64) {
-    let order = match NewOrderCash::decode(body) {
+async fn handle_new_order(
+    mt: u32,
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    body: &[u8],
+    conn_id: u64,
+) {
+    let order = match NewOrder::decode(mt, body) {
         Ok(o) => o,
         Err(e) => {
-            ctx.log("error", format!("新订单(100101)解析失败: {}", e));
+            ctx.log("error", format!("新订单({})解析失败: {}", mt, e));
             return;
         }
     };
@@ -449,12 +457,14 @@ async fn handle_new_order(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[
     ctx.log(
         "info",
         format!(
-            "收到委托 ClOrdID={} 证券={} 方向={} 价格={:.4} 数量={}",
-            order.cl_ord_id,
-            order.security_id,
-            side_name(order.side),
-            order.price as f64 / 10000.0,
-            order.order_qty / 100
+            "收到委托 MsgType={} ApplID={} ClOrdID={} 证券={} 方向={} 价格={:.4} 数量={}",
+            mt,
+            order.common.appl_id,
+            order.common.cl_ord_id,
+            order.common.security_id,
+            side_name(order.common.side),
+            order.common.price as f64 / 10000.0,
+            order.common.order_qty / 100
         ),
     );
 
@@ -463,29 +473,31 @@ async fn handle_new_order(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[
     // 哪个连接（手动回复成交/拒单/撤单时按它定位发送通道）
     if let Some(ob) = &ctx.orders {
         ob.add(OrderEntry {
-            cl_ord_id: order.cl_ord_id.clone(),
+            cl_ord_id: order.common.cl_ord_id.clone(),
             order_id: String::new(),
-            security_id: order.security_id.clone(),
-            side: side_name(order.side).to_string(),
-            price: order.price as f64 / 10000.0,
-            qty: order.order_qty as f64 / 100.0,
+            security_id: order.common.security_id.clone(),
+            side: side_name(order.common.side).to_string(),
+            price: order.common.price as f64 / 10000.0,
+            qty: order.common.order_qty as f64 / 100.0,
             cum_qty: 0.0,
-            leaves_qty: order.order_qty as f64 / 100.0,
+            leaves_qty: order.common.order_qty as f64 / 100.0,
             status: OrderStatus::New,
-            ord_type: order.ord_type,
-            account: order.account_id.clone(),
-            branch: order.branch_id.clone(),
+            ord_type: order.common.ord_type,
+            account: order.common.account_id.clone(),
+            branch: order.common.branch_id.clone(),
             ts: chrono::Local::now().format("%H:%M:%S").to_string(),
             conn_id,
             // 协议回填字段：手动回复回报时与自动回报保持一致
             // （深市无 Pbu 分区机制，pbu 存申报交易单元，回报两字段共用）
-            pbu: order.submitting_pbu_id.clone(),
+            pbu: order.common.submitting_pbu_id.clone(),
             biz_id: 0,
             biz_pbu: String::new(),
-            owner_type: order.owner_type,
+            owner_type: order.common.owner_type,
             credit_tag: String::new(),
-            clearing_firm: order.clearing_firm.clone(),
-            user_info: order.user_info.clone(),
+            clearing_firm: order.common.clearing_firm.clone(),
+            user_info: order.common.user_info.clone(),
+            // 业务标识 = 委托的 ApplID：撤单成功/手动回复按它反查业务特征
+            biz: order.common.appl_id.clone(),
         });
     }
 
@@ -564,11 +576,20 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
         // cancel_inflight 只在原单存在且为在途时返回 true（并已置为已撤）
         if ob.cancel_inflight(&req.orig_cl_ord_id) {
             let entry = ob.find(&req.orig_cl_ord_id).expect("刚撤单成功的订单必然存在");
-            // 撤单成功回报：200102 执行报告，ExecType=4 / OrdStatus=4（已撤）
-            let cxl = ExecRptCashAck {
+            // 撤单成功回报：按原单业务（订单缓存里存的 ApplID）反查确认执行
+            // 报告报文类型（表 4-30：各业务撤单成功回各自的 2xxx02），
+            // ExecType=4 / OrdStatus=4（已撤）；查不到业务时按现货竞价兜底
+            let biz = biz_info_by_appl_id(&entry.biz)
+                .unwrap_or_else(|| strategy::biz_info(msg_type::NEW_ORDER_CASH));
+            let cxl = ExecRptAck {
+                msg_type: biz.ack_msg_type,
                 partition_no: ctx.cfg.partition_no,
                 report_index: ctx.stats.next_report_index(),
-                appl_id: if req.appl_id.is_empty() { "010".into() } else { req.appl_id.clone() },
+                appl_id: if req.appl_id.is_empty() {
+                    biz.appl_id.into()
+                } else {
+                    req.appl_id.clone()
+                },
                 reporting_pbu_id: req.submitting_pbu_id.clone(),
                 submitting_pbu_id: req.submitting_pbu_id.clone(),
                 security_id: req.security_id.clone(),
@@ -598,18 +619,15 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
                 account_id: entry.account.clone(),
                 branch_id: entry.branch.clone(),
                 order_restrictions: String::new(),
-                stop_px: 0,
-                min_qty: 0,
-                max_price_levels: 0,
-                time_in_force: 0,
-                cash_margin: 0,
+                // 撤单成功回报无业务扩展字段（表 4-30 扩展仅订单响应使用）
+                extend: Default::default(),
             };
             let _ = tx.send(cxl.encode()).await;
             ctx.log(
                 "info",
                 format!(
-                    "收到撤单请求 ClOrdID={} OrigClOrdID={}，原单在途，已回撤单成功(200102)",
-                    req.cl_ord_id, req.orig_cl_ord_id
+                    "收到撤单请求 ClOrdID={} OrigClOrdID={}，原单在途，已回撤单成功({})",
+                    req.cl_ord_id, req.orig_cl_ord_id, biz.ack_msg_type
                 ),
             );
             return;
@@ -664,7 +682,8 @@ pub enum ManualReportKind {
 
 /// 构造一笔手动回复报文（成交/拒单/撤单成功）。
 ///
-/// 返回（编码好的完整帧, 日志描述, 订单缓存同步更新）。
+/// 返回 Ok((编码好的完整帧, 日志描述, 订单缓存同步更新))；
+/// 业务不支持成交回报时返回 Err（表 3-4：ETF 申赎/认购/行权等无成交回报）。
 /// qty/price 用自然单位（股/元），内部换算成协议放大整数；不传时用
 /// 订单缓存里的值兜底：
 /// - 成交数量默认剩余量（即全部成交），超过剩余量也按剩余量算
@@ -682,9 +701,18 @@ pub fn build_manual_report(
     qty: Option<f64>,
     price: Option<f64>,
     reason: Option<i32>,
-) -> (Vec<u8>, String, OrderUpdate) {
+) -> Result<(Vec<u8>, String, OrderUpdate), String> {
+    // 按订单缓存的业务标识（深市 ApplID）反查业务特征，决定回报报文类型；
+    // 查不到（老缓存/沪市订单）时按现货竞价兜底
+    let biz = biz_info_by_appl_id(&entry.biz)
+        .unwrap_or_else(|| strategy::biz_info(msg_type::NEW_ORDER_CASH));
     match kind {
         ManualReportKind::Trade => {
+            // 无成交回报的业务（表 3-4）拒绝手动成交：模拟器不编造交易所
+            // 不会发的报文
+            let Some(trade_msg_type) = biz.trade_msg_type else {
+                return Err(format!("业务[{}]无成交回报（表3-4），不能手动回复成交", biz.name));
+            };
             // 成交数量钳制到 (0, 剩余量]：不传或超限都按剩余量全成
             let fill_shares = qty
                 .map(|q| q as i64)
@@ -693,10 +721,11 @@ pub fn build_manual_report(
             let fill_px = price.unwrap_or(entry.price).max(0.0001);
             let leaves = (entry.leaves_qty - fill_shares as f64).max(0.0);
             let filled = leaves == 0.0;
-            let trade = ExecRptCashTrade {
+            let trade = ExecRptTrade {
+                msg_type: trade_msg_type,
                 partition_no: cfg.partition_no,
                 report_index: stats.next_report_index(),
-                appl_id: "010".into(),
+                appl_id: biz.appl_id.into(),
                 reporting_pbu_id: entry.pbu.clone(),
                 submitting_pbu_id: entry.pbu.clone(),
                 security_id: entry.security_id.clone(),
@@ -721,11 +750,11 @@ pub fn build_manual_report(
                 side: side_byte(&entry.side),
                 account_id: entry.account.clone(),
                 branch_id: entry.branch.clone(),
-                cash_margin: 0,
+                extend: Default::default(),
             };
             let desc = format!(
-                "手动成交回报(200115) ClOrdID={} 价格={:.4} 数量={} 剩余={}",
-                entry.cl_ord_id, fill_px, fill_shares, leaves
+                "手动成交回报({}) ClOrdID={} 价格={:.4} 数量={} 剩余={}",
+                trade_msg_type, entry.cl_ord_id, fill_px, fill_shares, leaves
             );
             let update = OrderUpdate {
                 order_id: entry.order_id.clone(),
@@ -737,11 +766,11 @@ pub fn build_manual_report(
                     OrderStatus::Partial
                 },
             };
-            (trade.encode(), desc, update)
+            Ok((trade.encode(), desc, update))
         }
-        // 拒单/撤单成功共用确认报文骨架（200102），仅执行类型/状态/原因不同
+        // 拒单/撤单成功共用确认报文骨架（2xxx02），仅执行类型/状态/原因不同
         ManualReportKind::Reject | ManualReportKind::Cancel => {
-            let mut rpt = base_manual_ack(cfg, stats, entry);
+            let mut rpt = base_manual_ack(cfg, stats, entry, biz);
             match kind {
                 ManualReportKind::Reject => {
                     rpt.exec_type = exec_type::REJECT;
@@ -750,8 +779,8 @@ pub fn build_manual_report(
                     rpt.leaves_qty = 0;
                     rpt.cum_qty = (entry.cum_qty * 100.0).round() as i64;
                     let desc = format!(
-                        "手动拒单回报(200102) ClOrdID={} 原因代码={}",
-                        entry.cl_ord_id, rpt.ord_rej_reason
+                        "手动拒单回报({}) ClOrdID={} 原因代码={}",
+                        biz.ack_msg_type, entry.cl_ord_id, rpt.ord_rej_reason
                     );
                     let update = OrderUpdate {
                         order_id: entry.order_id.clone(),
@@ -759,7 +788,7 @@ pub fn build_manual_report(
                         leaves_qty: 0.0,
                         status: OrderStatus::Rejected,
                     };
-                    (rpt.encode(), desc, update)
+                    Ok((rpt.encode(), desc, update))
                 }
                 ManualReportKind::Cancel => {
                     rpt.exec_type = exec_type::CANCELLED;
@@ -769,14 +798,17 @@ pub fn build_manual_report(
                     rpt.orig_cl_ord_id = entry.cl_ord_id.clone();
                     rpt.leaves_qty = 0;
                     rpt.cum_qty = (entry.cum_qty * 100.0).round() as i64;
-                    let desc = format!("手动撤单成功回报(200102) ClOrdID={}", entry.cl_ord_id);
+                    let desc = format!(
+                        "手动撤单成功回报({}) ClOrdID={}",
+                        biz.ack_msg_type, entry.cl_ord_id
+                    );
                     let update = OrderUpdate {
                         order_id: entry.order_id.clone(),
                         cum_qty: entry.cum_qty,
                         leaves_qty: 0.0,
                         status: OrderStatus::Cancelled,
                     };
-                    (rpt.encode(), desc, update)
+                    Ok((rpt.encode(), desc, update))
                 }
                 ManualReportKind::Trade => unreachable!(),
             }
@@ -784,17 +816,20 @@ pub fn build_manual_report(
     }
 }
 
-/// 手动回报的公共骨架：把订单缓存里登记的信息回填进执行报告(200102)，
-/// 再补上新的回报序号/执行编号；执行类型/状态由调用方再改
+/// 手动回报的公共骨架：把订单缓存里登记的信息回填进确认执行报告（2xxx02），
+/// 再补上新的回报序号/执行编号；报文类型按业务特征（biz）选择；
+/// 执行类型/状态由调用方再改
 fn base_manual_ack(
     cfg: &PlatformConfig,
     stats: &PlatformStats,
     entry: &OrderEntry,
-) -> ExecRptCashAck {
-    ExecRptCashAck {
+    biz: strategy::BizInfo,
+) -> ExecRptAck {
+    ExecRptAck {
+        msg_type: biz.ack_msg_type,
         partition_no: cfg.partition_no,
         report_index: stats.next_report_index(),
-        appl_id: "010".into(),
+        appl_id: biz.appl_id.into(),
         reporting_pbu_id: entry.pbu.clone(),
         submitting_pbu_id: entry.pbu.clone(),
         security_id: entry.security_id.clone(),
@@ -819,11 +854,7 @@ fn base_manual_ack(
         account_id: entry.account.clone(),
         branch_id: entry.branch.clone(),
         order_restrictions: String::new(),
-        stop_px: 0,
-        min_qty: 0,
-        max_price_levels: 0,
-        time_in_force: 0,
-        cash_margin: 0,
+        extend: Default::default(),
     }
 }
 

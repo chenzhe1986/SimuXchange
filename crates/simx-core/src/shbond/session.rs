@@ -214,8 +214,7 @@ pub async fn handle_conn(
                 let _ = tx
                     .send(protocol::encode_exec_rpt_info(
                         ctx.cfg.platform_type,
-                        std::slice::from_ref(&pbu),
-                        &[ctx.cfg.partition_no as u32],
+                        &[(pbu.as_str(), &[ctx.cfg.partition_no as u32])],
                     ))
                     .await;
                 logged_on = true;
@@ -397,6 +396,7 @@ async fn handle_new_order(
             credit_tag: order.credit_tag.clone(),
             clearing_firm: order.clearing_firm.clone(),
             user_info: order.user_info.clone(),
+            biz: String::new(),
         });
     }
 

@@ -95,6 +95,9 @@ pub struct OrderEntry {
     pub clearing_firm: String,
     /// 用户私有信息（回报按规范回填上行值）
     pub user_info: String,
+    /// 业务标识：深市为委托报文的 ApplID（如 010 现货竞价/630 港股通，
+    /// 撤单成功回报/手动回复按它反查业务特征选报文类型）；沪市无此概念，恒为空串
+    pub biz: String,
 }
 
 /// 一条回报发出后要同步到订单缓存的状态更新。
@@ -217,6 +220,7 @@ mod tests {
             credit_tag: String::new(),
             clearing_firm: String::new(),
             user_info: String::new(),
+            biz: String::new(),
         }
     }
 

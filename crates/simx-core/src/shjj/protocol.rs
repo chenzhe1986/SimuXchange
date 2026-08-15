@@ -62,6 +62,14 @@ pub mod msg_type {
     pub const PLATFORM_STATE: u32 = 209;
     /// 分区执行报告结束 ExecRptEndOfStream（4.6.6）
     pub const EXEC_RPT_EOS: u32 = 210;
+    /// 注册处理申报（4.4.1）
+    pub const REGISTRATION: u32 = 301;
+    /// 注册处理执行回报（4.4.2）
+    pub const REGISTRATION_RPT: u32 = 302;
+    /// 网络密码服务申报（4.5.1）
+    pub const PWD_SERVICE: u32 = 306;
+    /// 网络密码服务申报响应（4.5.2）
+    pub const PWD_SERVICE_RSP: u32 = 308;
 }
 
 /// 执行类型 ExecType 取值（ASCII 字符）
@@ -100,8 +108,57 @@ pub mod platform_state {
     pub const CLOSE: u16 = 4;
 }
 
-/// 现货集中竞价业务的 BizID（新订单/撤单里的业务标识）
+// ---------------------------------------------------------------------------
+// 业务标识 BizID（表 3.2.1 业务类型表，新订单/撤单/回报里的业务标识）
+// ---------------------------------------------------------------------------
+
+/// 现货竞价交易：唯一支持部分成交、SetID 为 1-6,20（多分区）的业务
 pub const BIZ_ID_CASH_AUCTION: u32 = 100_010;
+/// 发行（ETF 认购可撤单，其他不可撤）
+pub const BIZ_ID_ISSUE: u32 = 300_010;
+/// 配股/科创板配售（不支持撤单，有成交确认）
+pub const BIZ_ID_RIGHTS: u32 = 300_020;
+/// 配转债（不支持撤单，有成交确认）
+pub const BIZ_ID_RIGHTS_BOND: u32 = 300_021;
+/// 要约预受
+pub const BIZ_ID_TENDER_ACCEPT: u32 = 300_030;
+/// 要约撤销
+pub const BIZ_ID_TENDER_CANCEL: u32 = 300_031;
+/// 开放式基金申购
+pub const BIZ_ID_FUND_SUB: u32 = 300_040;
+/// 开放式基金赎回
+pub const BIZ_ID_FUND_RED: u32 = 300_041;
+/// 开放式基金认购
+pub const BIZ_ID_FUND_SUB_ISSUE: u32 = 300_050;
+/// 开放式基金转托管（扩展字段 Custodian）
+pub const BIZ_ID_FUND_TRANSFER: u32 = 300_060;
+/// 开放式基金分红设置（扩展字段 DividendSelect）
+pub const BIZ_ID_FUND_DIVIDEND: u32 = 300_070;
+/// 开放式基金转换（扩展字段 DestSecurity）
+pub const BIZ_ID_FUND_CONVERT: u32 = 300_080;
+/// 余券划转（扩展字段 DestSecurity）
+pub const BIZ_ID_REMAIN_TRANSFER: u32 = 300_090;
+/// 还券划转（扩展字段 DestSecurity）
+pub const BIZ_ID_RETURN_TRANSFER: u32 = 300_091;
+/// 担保品划入（扩展字段 DestSecurity）
+pub const BIZ_ID_COLLATERAL_IN: u32 = 300_092;
+/// 担保品划出（扩展字段 DestSecurity）
+pub const BIZ_ID_COLLATERAL_OUT: u32 = 300_093;
+/// 券源划入（扩展字段 DestSecurity）
+pub const BIZ_ID_SEC_SRC_IN: u32 = 300_094;
+/// 券源划出（扩展字段 DestSecurity）
+pub const BIZ_ID_SEC_SRC_OUT: u32 = 300_095;
+/// 网络密码服务：不经 58 新订单申报，走 306/308 独立消息；不进执行报告流
+pub const BIZ_ID_PWD_SERVICE: u32 = 300_100;
+/// 指定登记：不经 58 新订单申报，走 301/302 注册处理；执行报告分区 992
+pub const BIZ_ID_DESIGNATION: u32 = 300_200;
+/// 指定撤销：同指定登记
+pub const BIZ_ID_DESIGNATION_CANCEL: u32 = 300_201;
+
+/// 除现货竞价外的业务共用执行报告分区（表 3.2.1 的 SetID 列）
+pub const SET_ID_OTHER_BIZ: u32 = 991;
+/// 注册处理（指定登记/指定撤销）的执行报告分区
+pub const SET_ID_DESIGNATION: u32 = 992;
 
 /// 校验和：从消息头到消息体结束所有字节按 uint8 累加（自然溢出），
 /// 规范附录一的 C 代码等价于无符号字节和 mod 256
@@ -347,17 +404,20 @@ pub fn encode_platform_state(platform_id: u16, state: u16) -> Vec<u8> {
 }
 
 /// 执行报告信息消息（MsgType=208）：登录成功后 TDGW 主动推送，
-/// 告知 OMS 有哪些回报 PBU 和分区（OMS 据此发起序号同步）
-pub fn encode_exec_rpt_info(platform_id: u16, pbus: &[String], set_ids: &[u32]) -> Vec<u8> {
+/// 告知 OMS 有哪些回报 PBU 和分区（OMS 据此发起序号同步）。
+///
+/// 4.6.3 定义的嵌套结构：PlatformID + NoGroups{Pbu + NoGroups{SetID}}，
+/// 每个 PBU 下各有一组分区号。调用方传 pbu_set_ids 的每一项为 (Pbu, 该 PBU 的分区列表)。
+pub fn encode_exec_rpt_info(platform_id: u16, pbu_set_ids: &[(&str, &[u32])]) -> Vec<u8> {
     let mut w = BodyWriter::new();
     w.u16(platform_id);
-    w.u16(pbus.len() as u16);
-    for p in pbus {
-        w.str(p, 8);
-    }
-    w.u16(set_ids.len() as u16);
-    for s in set_ids {
-        w.u32(*s);
+    w.u16(pbu_set_ids.len() as u16);
+    for &(pbu, set_ids) in pbu_set_ids {
+        w.str(pbu, 8);
+        w.u16(set_ids.len() as u16);
+        for s in set_ids {
+            w.u32(*s);
+        }
     }
     frame(msg_type::EXEC_RPT_INFO, &w.into_inner())
 }
@@ -421,13 +481,47 @@ pub fn encode_exec_rpt_sync_rsp(groups: &[SyncRspGroup]) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// 业务消息：股票现货竞价（BizID = 100010）
+// 业务消息：新订单（58）与执行报告（32/103 等）
 // ---------------------------------------------------------------------------
 
-/// 新订单申报（MsgType=58，125 字节）
+/// 新订单/执行报告的扩展字段（超集，仅本业务相关字段有值）。
+///
+/// 表 3.2.1 中带扩展字段的业务共 9 种（4.3.1.1~4.3.1.7）：
+/// - 转托管 300060：Custodian char[3]（目标方代理人销售人代码）
+/// - 分红设置 300070：DividendSelect char（U=红利转投 C=现金分红）
+/// - 转换 300080 / 余券 300090 / 还券 300091 / 担保品 300092/300093 /
+///   券源 300094/300095：DestSecurity char[12]（目标证券代码）
+/// 其余业务无扩展字段；执行报告（32）按 4.3.3.1 说明 2 同样携带。
+#[derive(Debug, Clone, Default)]
+pub struct ExtendFields {
+    /// 转托管目标方代理人（对方销售人代码 000-999，不足 3 位左补 0）
+    pub custodian: String, // char[3]
+    /// 分红方式：'U'=红利转投 'C'=现金分红
+    pub dividend_select: u8, // char
+    /// 目标基金/证券代码（转换与各类划转，前 6 位有效）
+    pub dest_security: String, // char[12]
+}
+
+/// 某业务扩展字段的字节总长度（表 3.2.1 + 4.3.1.1~4.3.1.7）；无扩展字段的业务返回 0
+pub fn extend_len(biz_id: u32) -> usize {
+    match biz_id {
+        BIZ_ID_FUND_TRANSFER => 3,
+        BIZ_ID_FUND_DIVIDEND => 1,
+        BIZ_ID_FUND_CONVERT
+        | BIZ_ID_REMAIN_TRANSFER
+        | BIZ_ID_RETURN_TRANSFER
+        | BIZ_ID_COLLATERAL_IN
+        | BIZ_ID_COLLATERAL_OUT
+        | BIZ_ID_SEC_SRC_IN
+        | BIZ_ID_SEC_SRC_OUT => 12,
+        _ => 0,
+    }
+}
+
+/// 新订单申报（MsgType=58，公共字段 125 字节，扩展字段按业务追加）
 #[derive(Debug, Clone, Default)]
 pub struct NewOrder {
-    pub biz_id: u32,           // 业务标识，现货竞价 = 100010
+    pub biz_id: u32,           // 业务标识（表 3.2.1，现货竞价 = 100010）
     pub biz_pbu: String,       // char[8] 业务交易单元
     pub cl_ord_id: String,     // char[10] 客户订单编号（10 位数字字母）
     pub security_id: String,   // char[12] 证券代码
@@ -443,14 +537,19 @@ pub struct NewOrder {
     pub clearing_firm: String, // char[8] 结算会员
     pub branch_id: String,     // char[8] 营业部代码
     pub user_info: String,     // char[32] 用户私有信息（下行回填，前 12 位有效）
+    /// 各业务扩展字段（4.3.1.1~4.3.1.7，超集，仅本业务相关字段有值）
+    pub extend: ExtendFields,
 }
 
 impl NewOrder {
+    /// 公共字段长度（不含扩展字段）
     pub const BODY_LEN: usize = 4 + 8 + 10 + 12 + 13 + 1 + 1 + 8 + 8 + 1 + 1 + 8 + 2 + 8 + 8 + 32;
 
+    /// 解码：先读公共字段，再按 BizID 读取对应业务的扩展字段。
+    /// 扩展字段“容忍缺失”：对端只发公共字段时剩余长度不足，跳过不报错。
     pub fn decode(body: &[u8]) -> io::Result<Self> {
         let mut r = BodyReader::new(body);
-        Ok(Self {
+        let mut o = Self {
             biz_id: r.u32()?,
             biz_pbu: r.str(8)?,
             cl_ord_id: r.str(10)?,
@@ -467,7 +566,34 @@ impl NewOrder {
             clearing_firm: r.str(8)?,
             branch_id: r.str(8)?,
             user_info: r.str(32)?,
-        })
+            extend: ExtendFields::default(),
+        };
+        // 4.3.1.1~4.3.1.7 按业务读取扩展字段
+        match o.biz_id {
+            BIZ_ID_FUND_TRANSFER => {
+                if r.remaining() >= 3 {
+                    o.extend.custodian = r.str(3)?;
+                }
+            }
+            BIZ_ID_FUND_DIVIDEND => {
+                if r.remaining() >= 1 {
+                    o.extend.dividend_select = r.ch()?;
+                }
+            }
+            BIZ_ID_FUND_CONVERT
+            | BIZ_ID_REMAIN_TRANSFER
+            | BIZ_ID_RETURN_TRANSFER
+            | BIZ_ID_COLLATERAL_IN
+            | BIZ_ID_COLLATERAL_OUT
+            | BIZ_ID_SEC_SRC_IN
+            | BIZ_ID_SEC_SRC_OUT => {
+                if r.remaining() >= 12 {
+                    o.extend.dest_security = r.str(12)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(o)
     }
 }
 
@@ -541,6 +667,24 @@ pub struct ExecRpt {
     pub trade_date: u32,          // date
     pub transact_time: u64,       // ntime
     pub user_info: String,        // char[32] 回填上行值
+    /// 各业务扩展字段（4.3.3.1 说明 2：与新订单对应业务的扩展字段一致）
+    pub extend: ExtendFields,
+}
+
+/// 把扩展字段按业务写入消息体尾部（4.3.1.1~4.3.1.7）；无扩展字段的业务不写
+pub fn write_extend(w: &mut BodyWriter, biz_id: u32, extend: &ExtendFields) {
+    match biz_id {
+        BIZ_ID_FUND_TRANSFER => w.str(&extend.custodian, 3),
+        BIZ_ID_FUND_DIVIDEND => w.ch(extend.dividend_select),
+        BIZ_ID_FUND_CONVERT
+        | BIZ_ID_REMAIN_TRANSFER
+        | BIZ_ID_RETURN_TRANSFER
+        | BIZ_ID_COLLATERAL_IN
+        | BIZ_ID_COLLATERAL_OUT
+        | BIZ_ID_SEC_SRC_IN
+        | BIZ_ID_SEC_SRC_OUT => w.str(&extend.dest_security, 12),
+        _ => {}
+    }
 }
 
 impl ExecRpt {
@@ -574,6 +718,7 @@ impl ExecRpt {
         w.u32(self.trade_date);
         w.u64(self.transact_time);
         w.str(&self.user_info, 32);
+        write_extend(&mut w, self.biz_id, &self.extend);
         frame(msg_type::EXEC_RPT, &w.into_inner())
     }
 }
@@ -708,6 +853,203 @@ impl OrderReject {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 注册处理（4.4）：301 申报 / 302 执行回报
+// ---------------------------------------------------------------------------
+
+/// 注册指令 DesignationInstruction 取值
+pub mod designation_instruction {
+    /// 1 = 指定交易登记
+    pub const REGISTER: u8 = b'1';
+    /// 2 = 指定交易撤销
+    pub const CANCEL: u8 = b'2';
+}
+
+/// 注册处理申报（MsgType=301，4.4.1）。
+///
+/// 仅支持两种组合（说明 1）：
+/// - 指定登记：SecurityID=799999，注册指令='1'，注册类型='1'
+/// - 指定撤销：SecurityID=799998，注册指令='2'，注册类型='1'
+#[derive(Debug, Clone, Default)]
+pub struct RegistrationOrder {
+    pub biz_id: u32,          // 业务编号，指定登记 300200 / 指定撤销 300201
+    pub biz_pbu: String,      // char[8] 业务 PBU 编号
+    pub cl_ord_id: String,    // char[10] 会员内部订单编号
+    pub security_id: String,  // char[12] 证券代码（799999 指定登记 / 799998 指定撤销）
+    pub account: String,      // char[13] 证券账户
+    pub owner_type: u8,       // 订单所有者类型，暂不启用
+    pub designation_instruction: u8, // 注册指令 '1'登记 '2'撤销
+    pub designation_trans_type: u8,  // 注册类型 '1'=新注册请求
+    pub orig_cl_ord_id: String,      // char[10] 原始订单编号，暂不启用
+    pub transact_time: u64,          // ntime 申报时间
+    pub branch_id: String,           // char[8] 营业部代码，暂不启用
+    pub user_info: String,           // char[32] 用户私有信息
+}
+
+impl RegistrationOrder {
+    pub const BODY_LEN: usize = 4 + 8 + 10 + 12 + 13 + 1 + 1 + 1 + 10 + 8 + 8 + 32;
+
+    pub fn decode(body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(Self {
+            biz_id: r.u32()?,
+            biz_pbu: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            security_id: r.str(12)?,
+            account: r.str(13)?,
+            owner_type: r.u8()?,
+            designation_instruction: r.ch()?,
+            designation_trans_type: r.ch()?,
+            orig_cl_ord_id: r.str(10)?,
+            transact_time: r.u64()?,
+            branch_id: r.str(8)?,
+            user_info: r.str(32)?,
+        })
+    }
+}
+
+/// 注册处理执行回报（MsgType=302，4.4.2）。
+///
+/// 与 32 执行报告同构：带 Pbu/SetID(=992)/ReportIndex，编入执行报告流；
+/// ExecType 与 OrdStatus 组合取值：0/0 申报成功、8/8 申报拒绝、4/4 撤单成功。
+#[derive(Debug, Clone, Default)]
+pub struct RegistrationRpt {
+    pub pbu: String,            // char[8] 登录或订阅 Pbu
+    pub set_id: u32,            // 平台内分区号（指定登记/撤销 = 992）
+    pub report_index: u64,      // 执行报告编号（分区内连续递增）
+    pub biz_id: u32,            // 业务编号
+    pub exec_type: u8,          // 执行类型 '0'成功 '4'撤单成功 '8'拒绝
+    pub biz_pbu: String,        // char[8] 业务 PBU 编号
+    pub cl_ord_id: String,      // char[10] 会员内部订单编号
+    pub security_id: String,    // char[12] 证券代码
+    pub account: String,        // char[13] 证券账户
+    pub owner_type: u8,         // 订单所有者类型，暂不启用
+    pub ord_status: u8,         // 订单状态 '0'新订单 '4'已撤销 '8'已拒绝
+    pub orig_cl_ord_id: String, // char[10] 仅撤单成功（ExecType=4）时有意义
+    pub branch_id: String,      // char[8] 营业部代码，暂不启用
+    pub ord_rej_reason: u32,    // 订单拒绝码，仅拒绝响应（ExecType=8）时有意义
+    pub ord_cnfm_id: String,    // char[16] 交易所订单编号，仅申报成功（ExecType=0）时有意义
+    pub orig_ord_cnfm_id: String, // char[16] 暂不启用
+    pub trade_date: u32,        // date 交易日期
+    pub transact_time: u64,     // ntime 回报时间
+    pub user_info: String,      // char[32] 用户私有信息
+}
+
+impl RegistrationRpt {
+    pub const BODY_LEN: usize = 8 + 4 + 8 + 4 + 1 + 8 + 10 + 12 + 13 + 1 + 1 + 10 + 8 + 4 + 16 + 16 + 4 + 8 + 32;
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.str(&self.pbu, 8);
+        w.u32(self.set_id);
+        w.u64(self.report_index);
+        w.u32(self.biz_id);
+        w.ch(self.exec_type);
+        w.str(&self.biz_pbu, 8);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.security_id, 12);
+        w.str(&self.account, 13);
+        w.u8(self.owner_type);
+        w.ch(self.ord_status);
+        w.str(&self.orig_cl_ord_id, 10);
+        w.str(&self.branch_id, 8);
+        w.u32(self.ord_rej_reason);
+        w.str(&self.ord_cnfm_id, 16);
+        w.str(&self.orig_ord_cnfm_id, 16);
+        w.u32(self.trade_date);
+        w.u64(self.transact_time);
+        w.str(&self.user_info, 32);
+        frame(msg_type::REGISTRATION_RPT, &w.into_inner())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 网络密码服务（4.5）：306 申报 / 308 申报响应
+// ---------------------------------------------------------------------------
+
+/// 网络密码服务申报（MsgType=306，4.5.1）。
+///
+/// Side 取值：'1'=激活 '2'=注销；SecurityID：A 股账户 799988、B 股账户 939988。
+/// 该业务不进行重单校验，响应（308）不进执行报告流（无 Pbu/SetID/ReportIndex）。
+#[derive(Debug, Clone, Default)]
+pub struct PasswordServiceOrder {
+    pub biz_id: u32,         // 业务编号，固定 300100
+    pub biz_pbu: String,     // char[8] 业务 PBU 编号
+    pub cl_ord_id: String,   // char[10] 会员内部订单编号
+    pub security_id: String, // char[12] 证券代码（799988 A 股 / 939988 B 股）
+    pub account: String,     // char[13] 证券账户
+    pub owner_type: u8,      // 订单所有者类型，暂不启用
+    pub transact_time: u64,  // ntime 申报时间
+    pub branch_id: String,   // char[8] 营业部代码，暂不启用
+    pub side: u8,            // '1'=激活 '2'=注销
+    pub validation_code: String, // char[8] 投资者注册获得的激活码，仅 Side=1 时有意义
+    pub user_info: String,   // char[32] 用户私有信息
+}
+
+impl PasswordServiceOrder {
+    pub const BODY_LEN: usize = 4 + 8 + 10 + 12 + 13 + 1 + 8 + 8 + 1 + 8 + 32;
+
+    pub fn decode(body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(Self {
+            biz_id: r.u32()?,
+            biz_pbu: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            security_id: r.str(12)?,
+            account: r.str(13)?,
+            owner_type: r.u8()?,
+            transact_time: r.u64()?,
+            branch_id: r.str(8)?,
+            side: r.ch()?,
+            validation_code: r.str(8)?,
+            user_info: r.str(32)?,
+        })
+    }
+}
+
+/// 网络密码服务申报响应（MsgType=308，4.5.2）。
+///
+/// 与 306 对称，但无 Pbu/SetID/ReportIndex——不进执行报告流
+/// （表 3.2.1 注 2：申报响应消息不进执行报告）；OrdRejReason 成功时返回 0。
+#[derive(Debug, Clone, Default)]
+pub struct PasswordServiceRsp {
+    pub biz_id: u32,            // 业务编号
+    pub biz_pbu: String,        // char[8] 业务 PBU 编号
+    pub cl_ord_id: String,      // char[10] 会员内部订单编号
+    pub security_id: String,    // char[12] 证券代码
+    pub account: String,        // char[13] 证券账户
+    pub owner_type: u8,         // 订单所有者类型，暂不启用
+    pub branch_id: String,      // char[8] 营业部代码，暂不启用
+    pub side: u8,               // '1'=激活 '2'=注销
+    pub validation_code: String, // char[8] 激活码
+    pub ord_rej_reason: u32,    // 订单拒绝码，申报成功响应时返回 0
+    pub trade_date: u32,        // date 交易日期
+    pub transact_time: u64,     // ntime 回报时间
+    pub user_info: String,      // char[32] 用户私有信息
+}
+
+impl PasswordServiceRsp {
+    pub const BODY_LEN: usize = 4 + 8 + 10 + 12 + 13 + 1 + 8 + 1 + 8 + 4 + 4 + 8 + 32;
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.u32(self.biz_id);
+        w.str(&self.biz_pbu, 8);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.security_id, 12);
+        w.str(&self.account, 13);
+        w.u8(self.owner_type);
+        w.str(&self.branch_id, 8);
+        w.ch(self.side);
+        w.str(&self.validation_code, 8);
+        w.u32(self.ord_rej_reason);
+        w.u32(self.trade_date);
+        w.u64(self.transact_time);
+        w.str(&self.user_info, 32);
+        frame(msg_type::PWD_SERVICE_RSP, &w.into_inner())
+    }
+}
+
 /// 消息类型中文名（报文解析展示与日志用）
 pub fn msg_type_name(mt: u32) -> &'static str {
     match mt {
@@ -725,6 +1067,10 @@ pub fn msg_type_name(mt: u32) -> &'static str {
         msg_type::EXEC_RPT_INFO => "执行报告信息 ExecRptInfo",
         msg_type::PLATFORM_STATE => "平台状态 PlatformState",
         msg_type::EXEC_RPT_EOS => "回报结束 ExecRptEOS",
+        msg_type::REGISTRATION => "注册处理申报 RegistrationOrder",
+        msg_type::REGISTRATION_RPT => "注册处理执行回报 RegistrationRpt",
+        msg_type::PWD_SERVICE => "网络密码服务申报 PasswordServiceOrder",
+        msg_type::PWD_SERVICE_RSP => "网络密码服务申报响应 PasswordServiceRsp",
         _ => "未知消息",
     }
 }
@@ -780,10 +1126,30 @@ fn fmt_scaled(v: i64, unit: i64) -> String {
     }
 }
 
-/// 业务标识：100010=股票现货竞价（其余原样显示）
+/// 业务标识中文名（表 3.2.1 业务类型表）
 fn biz_id_label(v: u32) -> String {
     match v {
         BIZ_ID_CASH_AUCTION => format!("{} (股票现货竞价)", v),
+        BIZ_ID_ISSUE => format!("{} (发行)", v),
+        BIZ_ID_RIGHTS => format!("{} (配股/科创板配售)", v),
+        BIZ_ID_RIGHTS_BOND => format!("{} (配转债)", v),
+        BIZ_ID_TENDER_ACCEPT => format!("{} (要约预受)", v),
+        BIZ_ID_TENDER_CANCEL => format!("{} (要约撤销)", v),
+        BIZ_ID_FUND_SUB => format!("{} (基金申购)", v),
+        BIZ_ID_FUND_RED => format!("{} (基金赎回)", v),
+        BIZ_ID_FUND_SUB_ISSUE => format!("{} (基金认购)", v),
+        BIZ_ID_FUND_TRANSFER => format!("{} (转托管)", v),
+        BIZ_ID_FUND_DIVIDEND => format!("{} (分红设置)", v),
+        BIZ_ID_FUND_CONVERT => format!("{} (转换)", v),
+        BIZ_ID_REMAIN_TRANSFER => format!("{} (余券划转)", v),
+        BIZ_ID_RETURN_TRANSFER => format!("{} (还券划转)", v),
+        BIZ_ID_COLLATERAL_IN => format!("{} (担保品划入)", v),
+        BIZ_ID_COLLATERAL_OUT => format!("{} (担保品划出)", v),
+        BIZ_ID_SEC_SRC_IN => format!("{} (券源划入)", v),
+        BIZ_ID_SEC_SRC_OUT => format!("{} (券源划出)", v),
+        BIZ_ID_PWD_SERVICE => format!("{} (网络密码服务)", v),
+        BIZ_ID_DESIGNATION => format!("{} (指定登记)", v),
+        BIZ_ID_DESIGNATION_CANCEL => format!("{} (指定撤销)", v),
         other => other.to_string(),
     }
 }
@@ -851,7 +1217,8 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
         }
         msg_type::HEARTBEAT => {}
         msg_type::NEW_ORDER => {
-            out.push(f("BizID", biz_id_label(r.u32()?)));
+            let biz_id = r.u32()?;
+            out.push(f("BizID", biz_id_label(biz_id)));
             out.push(f("BizPBU", r.str(8)?));
             out.push(f("ClOrdID", r.str(10)?));
             out.push(f("SecurityID", r.str(12)?));
@@ -867,6 +1234,31 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             out.push(f("ClearingFirm", r.str(8)?));
             out.push(f("BranchID", r.str(8)?));
             out.push(f("UserInfo", r.str(32)?));
+            // 4.3.1.1~4.3.1.7 各业务扩展字段（容忍缺失）
+            match biz_id {
+                BIZ_ID_FUND_TRANSFER => {
+                    if r.remaining() >= 3 {
+                        out.push(f("Custodian", r.str(3)?));
+                    }
+                }
+                BIZ_ID_FUND_DIVIDEND => {
+                    if r.remaining() >= 1 {
+                        out.push(f("DividendSelect", r.ch()?));
+                    }
+                }
+                BIZ_ID_FUND_CONVERT
+                | BIZ_ID_REMAIN_TRANSFER
+                | BIZ_ID_RETURN_TRANSFER
+                | BIZ_ID_COLLATERAL_IN
+                | BIZ_ID_COLLATERAL_OUT
+                | BIZ_ID_SEC_SRC_IN
+                | BIZ_ID_SEC_SRC_OUT => {
+                    if r.remaining() >= 12 {
+                        out.push(f("DestSecurity", r.str(12)?));
+                    }
+                }
+                _ => {}
+            }
         }
         msg_type::CANCEL_ORDER => {
             out.push(f("BizID", biz_id_label(r.u32()?)));
@@ -885,7 +1277,8 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             out.push(f("PBU", r.str(8)?));
             out.push(f("SetID", r.u32()?));
             out.push(f("ReportIndex", r.u64()?));
-            out.push(f("BizID", biz_id_label(r.u32()?)));
+            let biz_id = r.u32()?;
+            out.push(f("BizID", biz_id_label(biz_id)));
             out.push(f("ExecType", exec_type_label(r.ch()?)));
             out.push(f("BizPBU", r.str(8)?));
             out.push(f("ClOrdID", r.str(10)?));
@@ -910,6 +1303,31 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             out.push(f("TradeDate", fmt_sh_date(r.u32()?)));
             out.push(f("TransactTime", fmt_sh_time(r.u64()?)));
             out.push(f("UserInfo", r.str(32)?));
+            // 4.3.3.1 说明 2：扩展字段与新订单对应业务一致（容忍缺失）
+            match biz_id {
+                BIZ_ID_FUND_TRANSFER => {
+                    if r.remaining() >= 3 {
+                        out.push(f("Custodian", r.str(3)?));
+                    }
+                }
+                BIZ_ID_FUND_DIVIDEND => {
+                    if r.remaining() >= 1 {
+                        out.push(f("DividendSelect", r.ch()?));
+                    }
+                }
+                BIZ_ID_FUND_CONVERT
+                | BIZ_ID_REMAIN_TRANSFER
+                | BIZ_ID_RETURN_TRANSFER
+                | BIZ_ID_COLLATERAL_IN
+                | BIZ_ID_COLLATERAL_OUT
+                | BIZ_ID_SEC_SRC_IN
+                | BIZ_ID_SEC_SRC_OUT => {
+                    if r.remaining() >= 12 {
+                        out.push(f("DestSecurity", r.str(12)?));
+                    }
+                }
+                _ => {}
+            }
         }
         msg_type::CANCEL_REJECT => {
             out.push(f("PBU", r.str(8)?));
@@ -986,17 +1404,16 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             }
         }
         msg_type::EXEC_RPT_INFO => {
-            let platform_id = r.u16()?;
+            out.push(f("PlatformID", r.u16()?));
             let np = r.u16()?;
-            out.push(f("PlatformID", platform_id));
             out.push(f("NoPBUs", np));
             for i in 0..np {
                 out.push(f(format!("PBU[{}]", i + 1), r.str(8)?));
-            }
-            let ns = r.u16()?;
-            out.push(f("NoSetIDs", ns));
-            for i in 0..ns {
-                out.push(f(format!("SetID[{}]", i + 1), r.u32()?));
+                let ns = r.u16()?;
+                out.push(f(format!("PBU[{}].NoSetIDs", i + 1), ns));
+                for j in 0..ns {
+                    out.push(f(format!("PBU[{}].SetID[{}]", i + 1, j + 1), r.u32()?));
+                }
             }
         }
         msg_type::PLATFORM_STATE => {
@@ -1007,6 +1424,69 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             out.push(f("PBU", r.str(8)?));
             out.push(f("SetID", r.u32()?));
             out.push(f("EndReportIndex", r.u64()?));
+        }
+        msg_type::REGISTRATION => {
+            out.push(f("BizID", biz_id_label(r.u32()?)));
+            out.push(f("BizPBU", r.str(8)?));
+            out.push(f("ClOrdID", r.str(10)?));
+            out.push(f("SecurityID", r.str(12)?));
+            out.push(f("Account", r.str(13)?));
+            out.push(f("OwnerType", r.u8()?));
+            out.push(f("DesignationInstruction", r.ch()?));
+            out.push(f("DesignationTransType", r.ch()?));
+            out.push(f("OrigClOrdID", r.str(10)?));
+            out.push(f("TransactTime", fmt_sh_time(r.u64()?)));
+            out.push(f("BranchID", r.str(8)?));
+            out.push(f("UserInfo", r.str(32)?));
+        }
+        msg_type::REGISTRATION_RPT => {
+            out.push(f("PBU", r.str(8)?));
+            out.push(f("SetID", r.u32()?));
+            out.push(f("ReportIndex", r.u64()?));
+            out.push(f("BizID", biz_id_label(r.u32()?)));
+            out.push(f("ExecType", exec_type_label(r.ch()?)));
+            out.push(f("BizPBU", r.str(8)?));
+            out.push(f("ClOrdID", r.str(10)?));
+            out.push(f("SecurityID", r.str(12)?));
+            out.push(f("Account", r.str(13)?));
+            out.push(f("OwnerType", r.u8()?));
+            out.push(f("OrdStatus", ord_status_label(r.ch()?)));
+            out.push(f("OrigClOrdID", r.str(10)?));
+            out.push(f("BranchID", r.str(8)?));
+            out.push(f("OrdRejReason", r.u32()?));
+            out.push(f("OrdCnfmID", r.str(16)?));
+            out.push(f("OrigOrdCnfmID", r.str(16)?));
+            out.push(f("TradeDate", fmt_sh_date(r.u32()?)));
+            out.push(f("TransactTime", fmt_sh_time(r.u64()?)));
+            out.push(f("UserInfo", r.str(32)?));
+        }
+        msg_type::PWD_SERVICE => {
+            out.push(f("BizID", biz_id_label(r.u32()?)));
+            out.push(f("BizPBU", r.str(8)?));
+            out.push(f("ClOrdID", r.str(10)?));
+            out.push(f("SecurityID", r.str(12)?));
+            out.push(f("Account", r.str(13)?));
+            out.push(f("OwnerType", r.u8()?));
+            out.push(f("TransactTime", fmt_sh_time(r.u64()?)));
+            out.push(f("BranchID", r.str(8)?));
+            out.push(f("Side", r.ch()?));
+            out.push(f("ValidationCode", r.str(8)?));
+            out.push(f("UserInfo", r.str(32)?));
+        }
+        msg_type::PWD_SERVICE_RSP => {
+            out.push(f("BizID", biz_id_label(r.u32()?)));
+            out.push(f("BizPBU", r.str(8)?));
+            out.push(f("ClOrdID", r.str(10)?));
+            out.push(f("SecurityID", r.str(12)?));
+            out.push(f("Account", r.str(13)?));
+            out.push(f("OwnerType", r.u8()?));
+            out.push(f("BranchID", r.str(8)?));
+            out.push(f("Side", r.ch()?));
+            out.push(f("ValidationCode", r.str(8)?));
+            out.push(f("OrdRejReason", r.u32()?));
+            out.push(f("TradeDate", fmt_sh_date(r.u32()?)));
+            out.push(f("TransactTime", fmt_sh_time(r.u64()?)));
+            out.push(f("UserInfo", r.str(32)?));
         }
         // 其他消息类型：不逐字段解析（调用方只展示原始报文）
         _ => {}
@@ -1178,5 +1658,212 @@ mod tests {
             text: "OK".into(),
         }]);
         assert_eq!(rsp.len(), 16 + 2 + 96 + 4);
+    }
+
+    #[test]
+    fn test_exec_rpt_info_nested() {
+        // 4.6.3 嵌套结构：PlatformID + NoPBUs{Pbu + NoSetIDs{SetID}}
+        let f = encode_exec_rpt_info(0, &[("PBU00001", &[1, 2]), ("PBU00002", &[992])]);
+        let body = &f[16..f.len() - 4];
+        let mut r = BodyReader::new(body);
+        assert_eq!(r.u16().unwrap(), 0); // PlatformID
+        assert_eq!(r.u16().unwrap(), 2); // NoPBUs
+        assert_eq!(r.str(8).unwrap(), "PBU00001");
+        assert_eq!(r.u16().unwrap(), 2); // 第一个 PBU 下 2 个 SetID
+        assert_eq!(r.u32().unwrap(), 1);
+        assert_eq!(r.u32().unwrap(), 2);
+        assert_eq!(r.str(8).unwrap(), "PBU00002");
+        assert_eq!(r.u16().unwrap(), 1); // 第二个 PBU 下 1 个 SetID
+        assert_eq!(r.u32().unwrap(), 992);
+        assert_eq!(r.remaining(), 0);
+        // 解析展示也能读出嵌套字段
+        let fields = describe_fields(msg_type::EXEC_RPT_INFO, body);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"PBU[1].NoSetIDs"));
+        assert!(names.contains(&"PBU[1].SetID[2]"));
+        assert!(names.contains(&"PBU[2].SetID[1]"));
+    }
+
+    #[test]
+    fn test_extend_fields_roundtrip() {
+        // 转托管 300060：Custodian char[3]
+        let mut w = BodyWriter::new();
+        w.u32(BIZ_ID_FUND_TRANSFER);
+        w.str("PBU00001", 8);
+        w.str("A000000001", 10);
+        w.str("519888", 12);
+        w.str("B880000001", 13);
+        w.u8(1);
+        w.ch(b'1');
+        w.i64(0);
+        w.i64(100_000);
+        w.ch(b'2');
+        w.ch(b'0');
+        w.u64(930000001_0000);
+        w.str("", 2);
+        w.str("CF01", 8);
+        w.str("BR01", 8);
+        w.str("UINFO", 32);
+        w.str("123", 3); // Custodian
+        let body = w.into_inner();
+        assert_eq!(body.len(), NewOrder::BODY_LEN + 3);
+        let o = NewOrder::decode(&body).unwrap();
+        assert_eq!(o.extend.custodian, "123");
+        // 容忍缺失：只发公共字段也不报错
+        let o2 = NewOrder::decode(&body[..NewOrder::BODY_LEN]).unwrap();
+        assert_eq!(o2.extend.custodian, "");
+        // 分红设置 300070：DividendSelect char
+        let mut w = BodyWriter::new();
+        w.u32(BIZ_ID_FUND_DIVIDEND);
+        w.str("PBU00001", 8);
+        w.str("A000000001", 10);
+        w.str("519888", 12);
+        w.str("B880000001", 13);
+        w.u8(1);
+        w.ch(b'1');
+        w.i64(0);
+        w.i64(100_000);
+        w.ch(b'2');
+        w.ch(b'0');
+        w.u64(930000001_0000);
+        w.str("", 2);
+        w.str("CF01", 8);
+        w.str("BR01", 8);
+        w.str("UINFO", 32);
+        w.ch(b'U'); // 红利转投
+        let o3 = NewOrder::decode(&w.into_inner()).unwrap();
+        assert_eq!(o3.extend.dividend_select, b'U');
+        // 转换 300080：DestSecurity char[12]
+        let mut w = BodyWriter::new();
+        w.u32(BIZ_ID_FUND_CONVERT);
+        w.str("PBU00001", 8);
+        w.str("A000000001", 10);
+        w.str("519888", 12);
+        w.str("B880000001", 13);
+        w.u8(1);
+        w.ch(b'1');
+        w.i64(0);
+        w.i64(100_000);
+        w.ch(b'2');
+        w.ch(b'0');
+        w.u64(930000001_0000);
+        w.str("", 2);
+        w.str("CF01", 8);
+        w.str("BR01", 8);
+        w.str("UINFO", 32);
+        w.str("510050", 12); // 目标基金代码
+        let o4 = NewOrder::decode(&w.into_inner()).unwrap();
+        assert_eq!(o4.extend.dest_security, "510050");
+        // ExecRpt 扩展字段回填（4.3.3.1 说明 2）
+        let mut e = ExecRpt::default();
+        e.biz_id = BIZ_ID_FUND_TRANSFER;
+        e.extend.custodian = "123".into();
+        let f = e.encode();
+        let body = &f[16..f.len() - 4];
+        assert_eq!(body.len(), 213 + 3);
+        let fields = describe_fields(msg_type::EXEC_RPT, body);
+        let cs = fields.iter().find(|x| x.name == "Custodian").unwrap();
+        assert_eq!(cs.value, "123");
+    }
+
+    #[test]
+    fn test_registration_roundtrip() {
+        // 301 指定登记申报（4.4.1）：SecurityID=799999 指令'1' 类型'1'
+        let mut w = BodyWriter::new();
+        w.u32(BIZ_ID_DESIGNATION);
+        w.str("PBU00001", 8);
+        w.str("D000000001", 10);
+        w.str("799999", 12);
+        w.str("B880000001", 13);
+        w.u8(1);
+        w.ch(b'1'); // 指定交易登记
+        w.ch(b'1'); // 新注册请求
+        w.str("", 10);
+        w.u64(930000001_0000);
+        w.str("", 8);
+        w.str("UINFO", 32);
+        let body = w.into_inner();
+        assert_eq!(body.len(), RegistrationOrder::BODY_LEN);
+        let d = RegistrationOrder::decode(&body).unwrap();
+        assert_eq!(d.biz_id, BIZ_ID_DESIGNATION);
+        assert_eq!(d.security_id, "799999");
+        assert_eq!(d.designation_instruction, b'1');
+        assert_eq!(d.designation_trans_type, b'1');
+        let fields = describe_fields(msg_type::REGISTRATION, &body);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"DesignationInstruction"));
+        // 302 执行回报：168 字节消息体 + 16 头 + 4 尾
+        let r = RegistrationRpt {
+            pbu: "PBU00001".into(),
+            set_id: SET_ID_DESIGNATION,
+            report_index: 1,
+            biz_id: BIZ_ID_DESIGNATION,
+            exec_type: b'0',
+            biz_pbu: "PBU00001".into(),
+            cl_ord_id: "D000000001".into(),
+            security_id: "799999".into(),
+            account: "B880000001".into(),
+            owner_type: 1,
+            ord_status: b'0',
+            ord_cnfm_id: "0000000000000001".into(),
+            trade_date: 20260814,
+            transact_time: 930000001_0000,
+            user_info: "UINFO".into(),
+            ..Default::default()
+        };
+        let f = r.encode();
+        assert_eq!(f.len(), RegistrationRpt::BODY_LEN + 20);
+        let fields = describe_fields(msg_type::REGISTRATION_RPT, &f[16..f.len() - 4]);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"OrdCnfmID"));
+        assert!(names.contains(&"ExecType"));
+    }
+
+    #[test]
+    fn test_password_service_roundtrip() {
+        // 306 激活申报（4.5.1）：SecurityID=799988、Side='1'、带激活码
+        let mut w = BodyWriter::new();
+        w.u32(BIZ_ID_PWD_SERVICE);
+        w.str("PBU00001", 8);
+        w.str("P000000001", 10);
+        w.str("799988", 12);
+        w.str("B880000001", 13);
+        w.u8(1);
+        w.u64(930000001_0000);
+        w.str("", 8);
+        w.ch(b'1'); // 激活
+        w.str("ABCD1234", 8); // 激活码
+        w.str("UINFO", 32);
+        let body = w.into_inner();
+        assert_eq!(body.len(), PasswordServiceOrder::BODY_LEN);
+        let d = PasswordServiceOrder::decode(&body).unwrap();
+        assert_eq!(d.biz_id, BIZ_ID_PWD_SERVICE);
+        assert_eq!(d.security_id, "799988");
+        assert_eq!(d.side, b'1');
+        assert_eq!(d.validation_code, "ABCD1234");
+        let fields = describe_fields(msg_type::PWD_SERVICE, &body);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"ValidationCode"));
+        // 308 申报响应：113 字节消息体 + 16 头 + 4 尾，不进执行报告流
+        let r = PasswordServiceRsp {
+            biz_id: BIZ_ID_PWD_SERVICE,
+            biz_pbu: "PBU00001".into(),
+            cl_ord_id: "P000000001".into(),
+            security_id: "799988".into(),
+            account: "B880000001".into(),
+            owner_type: 1,
+            branch_id: String::new(),
+            side: b'1',
+            validation_code: "ABCD1234".into(),
+            ord_rej_reason: 0,
+            trade_date: 20260814,
+            transact_time: 930000001_0000,
+            user_info: "UINFO".into(),
+        };
+        let f = r.encode();
+        assert_eq!(f.len(), PasswordServiceRsp::BODY_LEN + 20);
+        let fields = describe_fields(msg_type::PWD_SERVICE_RSP, &f[16..f.len() - 4]);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"OrdRejReason"));
     }
 }

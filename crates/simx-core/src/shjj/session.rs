@@ -14,7 +14,9 @@
 //!   → 进入正常工作期：
 //!       - 双方按约定间隔互发心跳
 //!       - 收到委托(58) → 按策略回送确认(32)/成交(103)/拒绝(204)
-//!       - 收到撤单(61) → 统一回撤单失败(59)
+//!       - 收到撤单(61) → 按订单真实状态回撤单成功(32)或撤单失败(59)
+//!       - 收到注册处理申报(301) → 回注册处理执行回报(302)（SetID=992）
+//!       - 收到网络密码服务申报(306) → 回申报响应(308)（不进执行报告流）
 //!   → 结束：柜台注销 / 连接断开 / 心跳超时 / 网关停止
 //! ```
 //!
@@ -31,8 +33,11 @@ use crate::orderbook::{OrderEntry, OrderStatus, OrderUpdate};
 use crate::stats::PlatformStats;
 use crate::sz::session::{ManualReportKind, SessionCtx};
 use super::protocol::{
-    self as protocol, exec_type, msg_type, ord_status, platform_state,
-    CancelOrder, CancelReject, ExecRpt, Logon, Logout, NewOrder, SyncRspGroup, TradeRpt,
+    self as protocol, designation_instruction, exec_type, msg_type, ord_status, platform_state,
+    BIZ_ID_DESIGNATION, BIZ_ID_DESIGNATION_CANCEL, BIZ_ID_PWD_SERVICE, SET_ID_DESIGNATION,
+    CancelOrder, CancelReject, ExecRpt, ExtendFields, Logon, Logout, NewOrder, OrderReject,
+    PasswordServiceOrder, PasswordServiceRsp, RegistrationOrder, RegistrationRpt, SyncRspGroup,
+    TradeRpt,
 };
 use super::strategy::{self as strategy, PlannedReport, ReportKind};
 use std::net::SocketAddr;
@@ -214,8 +219,7 @@ pub async fn handle_conn(
                 let _ = tx
                     .send(protocol::encode_exec_rpt_info(
                         ctx.cfg.platform_type,
-                        std::slice::from_ref(&pbu),
-                        &[ctx.cfg.partition_no as u32],
+                        &[(pbu.as_str(), &[ctx.cfg.partition_no as u32])],
                     ))
                     .await;
                 logged_on = true;
@@ -265,6 +269,12 @@ pub async fn handle_conn(
             }
             msg_type::CANCEL_ORDER if logged_on => {
                 handle_cancel(&ctx, &tx, &body, &pbu).await;
+            }
+            msg_type::REGISTRATION if logged_on => {
+                handle_registration(&ctx, &tx, &body, &pbu).await;
+            }
+            msg_type::PWD_SERVICE if logged_on => {
+                handle_password_service(&ctx, &tx, &body).await;
             }
             other => {
                 if !logged_on {
@@ -356,6 +366,24 @@ async fn handle_new_order(
             return;
         }
     };
+    // 表 3.2.1 之外的未知业务：前置校验不通过，回申报拒绝(204) 错误码 4012
+    // （SecurityID 错误或者业务类型 BizID 错误），不登记订单缓存
+    if !strategy::is_known_biz(order.biz_id) {
+        ctx.stats.order_rejects.fetch_add(1, Ordering::Relaxed);
+        let rej = OrderReject {
+            biz_id: order.biz_id,
+            biz_pbu: order.biz_pbu.clone(),
+            cl_ord_id: order.cl_ord_id.clone(),
+            security_id: order.security_id.clone(),
+            ord_rej_reason: 4012,
+            trade_date: protocol::now_date(),
+            transact_time: protocol::now_ntime(),
+            user_info: order.user_info.clone(),
+        };
+        let _ = tx.send(rej.encode()).await;
+        ctx.log("warn", format!("未知业务 BizID={}，回申报拒绝(204) 4012", order.biz_id));
+        return;
+    }
     ctx.stats.orders.fetch_add(1, Ordering::Relaxed);
     // 协议整数还原：价格 ÷100000（5 位小数）、数量 ÷1000
     ctx.log(
@@ -397,6 +425,8 @@ async fn handle_new_order(
             credit_tag: order.credit_tag.clone(),
             clearing_firm: order.clearing_firm.clone(),
             user_info: order.user_info.clone(),
+            // 业务标识字符串：撤单/手动回复时按它反查业务特征（参照深市 ApplID 用法）
+            biz: order.biz_id.to_string(),
         });
     }
 
@@ -469,6 +499,14 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
         }
     };
     ctx.stats.cancels.fetch_add(1, Ordering::Relaxed);
+    // 表 3.2.1 业务特征：决定回报分区号与是否支持撤单
+    let biz = strategy::biz_info(req.biz_id);
+    let set_id = if biz.set_id == 0 { ctx.cfg.partition_no as u32 } else { biz.set_id };
+    // 表 3.2.1 撤单列不支持撤单的业务：直接回撤单失败
+    if !biz.allow_cancel {
+        send_cancel_reject(ctx, tx, &req, pbu, set_id).await;
+        return;
+    }
 
     // ---- 有订单缓存：先尝试按原单状态撤单 ----
     if let Some(ob) = &ctx.orders {
@@ -479,7 +517,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
                 // 撤单成功回报：32 执行报告，ExecType=4 / OrdStatus=4（已撤）
                 let cxl = ExecRpt {
                     pbu: pbu.to_string(),
-                    set_id: ctx.cfg.partition_no as u32,
+                    set_id,
                     report_index: ctx.stats.next_report_index() as u64,
                     biz_id: req.biz_id,
                     exec_type: exec_type::CANCELLED,
@@ -507,6 +545,8 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
                     trade_date: protocol::now_date(),
                     transact_time: protocol::now_ntime(),
                     user_info: req.user_info.clone(),
+                    // 4.3.3.1 说明 2：撤单成功响应的扩展字段与原单对应业务一致
+                    extend: ExtendFields::default(),
                 };
                 let _ = tx.send(cxl.encode()).await;
                 ctx.log(
@@ -521,10 +561,21 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
         }
     }
 
-    // ---- 撤单失败：未开启缓存 / 找不到原单 / 原单已是终态 ----
+    // ---- 撤单失败：不支持撤单 / 未开启缓存 / 找不到原单 / 原单已是终态 ----
+    send_cancel_reject(ctx, tx, &req, pbu, set_id).await;
+}
+
+/// 构造并发送撤单失败(59)：业务不支持撤单 / 未开启缓存 / 找不到原单 / 原单已是终态
+async fn send_cancel_reject(
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    req: &CancelOrder,
+    pbu: &str,
+    set_id: u32,
+) {
     let rej = CancelReject {
         pbu: pbu.to_string(),
-        set_id: ctx.cfg.partition_no as u32,
+        set_id,
         report_index: ctx.stats.next_report_index() as u64,
         biz_id: req.biz_id,
         biz_pbu: req.biz_pbu.clone(),
@@ -547,10 +598,123 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
     );
 }
 
+/// 处理注册处理申报(301)：回注册处理执行回报(302)。
+///
+/// 302 带 Pbu/SetID(=992)/ReportIndex，编入执行报告流（占回报序号）；
+/// 仅支持两种组合（4.4.1 说明 1）：
+/// - 指定登记：BizID=300200、SecurityID=799999、注册指令='1'、注册类型='1'
+/// - 指定撤销：BizID=300201、SecurityID=799998、注册指令='2'、注册类型='1'
+/// 组合校验不通过回 ExecType=8/OrdStatus=8 的拒绝响应（错误码 4012）。
+async fn handle_registration(
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    body: &[u8],
+    pbu: &str,
+) {
+    let req = match RegistrationOrder::decode(body) {
+        Ok(r) => r,
+        Err(e) => {
+            ctx.log("error", format!("注册处理申报(301)处理失败: {}", e));
+            return;
+        }
+    };
+    ctx.stats.orders.fetch_add(1, Ordering::Relaxed);
+    let ok = match req.biz_id {
+        BIZ_ID_DESIGNATION => {
+            req.security_id == "799999"
+                && req.designation_instruction == designation_instruction::REGISTER
+                && req.designation_trans_type == b'1'
+        }
+        BIZ_ID_DESIGNATION_CANCEL => {
+            req.security_id == "799998"
+                && req.designation_instruction == designation_instruction::CANCEL
+                && req.designation_trans_type == b'1'
+        }
+        _ => false,
+    };
+    let rpt = RegistrationRpt {
+        pbu: pbu.to_string(),
+        set_id: SET_ID_DESIGNATION,
+        report_index: ctx.stats.next_report_index() as u64,
+        biz_id: req.biz_id,
+        exec_type: if ok { exec_type::NEW } else { exec_type::REJECT },
+        biz_pbu: req.biz_pbu.clone(),
+        cl_ord_id: req.cl_ord_id.clone(),
+        security_id: req.security_id.clone(),
+        account: req.account.clone(),
+        owner_type: req.owner_type,
+        ord_status: if ok { ord_status::NEW } else { ord_status::REJECTED },
+        orig_cl_ord_id: String::new(),
+        branch_id: String::new(),
+        ord_rej_reason: if ok { 0 } else { 4012 }, // 组合不合法：SecurityID 或 BizID 错误
+        ord_cnfm_id: if ok { ctx.stats.next_order_id() } else { String::new() },
+        orig_ord_cnfm_id: String::new(),
+        trade_date: protocol::now_date(),
+        transact_time: protocol::now_ntime(),
+        user_info: req.user_info.clone(),
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到注册处理申报(301) BizID={} SecurityID={} 指令={} 类型={}，回执行回报(302) {}",
+            req.biz_id,
+            req.security_id,
+            req.designation_instruction as char,
+            req.designation_trans_type as char,
+            if ok { "申报成功" } else { "申报拒绝" }
+        ),
+    );
+}
+
+/// 处理网络密码服务申报(306)：回申报响应(308)。
+///
+/// 响应无 Pbu/SetID/ReportIndex，不进执行报告流（表 3.2.1 注 2），
+/// 也不占回报序号；OrdRejReason 成功时返回 0。该业务不进行重单校验。
+async fn handle_password_service(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) {
+    let req = match PasswordServiceOrder::decode(body) {
+        Ok(r) => r,
+        Err(e) => {
+            ctx.log("error", format!("网络密码服务申报(306)处理失败: {}", e));
+            return;
+        }
+    };
+    ctx.stats.orders.fetch_add(1, Ordering::Relaxed);
+    // 文档固定 BizID=300100，其余按业务错误拒绝（错误码 4012）
+    let ok = req.biz_id == BIZ_ID_PWD_SERVICE;
+    let rsp = PasswordServiceRsp {
+        biz_id: req.biz_id,
+        biz_pbu: req.biz_pbu.clone(),
+        cl_ord_id: req.cl_ord_id.clone(),
+        security_id: req.security_id.clone(),
+        account: req.account.clone(),
+        owner_type: req.owner_type,
+        branch_id: req.branch_id.clone(),
+        side: req.side,
+        validation_code: req.validation_code.clone(),
+        ord_rej_reason: if ok { 0 } else { 4012 },
+        trade_date: protocol::now_date(),
+        transact_time: protocol::now_ntime(),
+        user_info: req.user_info.clone(),
+    };
+    let _ = tx.send(rsp.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到网络密码服务申报(306) ClOrdID={} SecurityID={} Side={}，回申报响应(308) {}",
+            req.cl_ord_id,
+            req.security_id,
+            req.side as char,
+            if ok { "成功" } else { "拒绝" }
+        ),
+    );
+}
+
 /// 构造一笔手动回复报文（成交/拒单/撤单成功），与 sz::session 同构，
 /// 仅报文格式与放大倍数不同：价格放大 10 万倍、数量放大 1000 倍。
 ///
-/// 返回（编码好的完整帧, 日志描述, 订单缓存同步更新）。
+/// 返回（编码好的完整帧, 日志描述, 订单缓存同步更新）；
+/// 表 3.2.1 无成交确认的业务不允许手动回复成交（返回 Err）。
 /// qty/price 用自然单位（股/元）；成交数量默认剩余量（全成）、价格默认
 /// 委托价、拒单原因默认 1；订单缓存没登记过的协议特有字段用空串占位。
 pub fn build_manual_report(
@@ -561,9 +725,18 @@ pub fn build_manual_report(
     qty: Option<f64>,
     price: Option<f64>,
     reason: Option<i32>,
-) -> (Vec<u8>, String, OrderUpdate) {
+) -> Result<(Vec<u8>, String, OrderUpdate), String> {
     match kind {
         ManualReportKind::Trade => {
+            // 表 3.2.1 无成交确认的业务（如转托管/划转）不能手动回复成交：
+            // 这类业务只有申报响应，真实柜台不会收到成交回报
+            let biz = strategy::biz_info(entry.biz_id);
+            if !biz.allow_trade {
+                return Err(format!(
+                    "业务[{}]无成交回报（表 3.2.1），不能手动回复成交",
+                    biz.name
+                ));
+            }
             // 成交数量钳制到 (0, 剩余量]：不传或超限都按剩余量全成
             let fill_shares = qty
                 .map(|q| q as i64)
@@ -574,9 +747,11 @@ pub fn build_manual_report(
             let filled = leaves == 0.0;
             let last_px = (fill_px * 100000.0).round() as i64;
             let last_qty = fill_shares * 1000;
+            // 现货竞价用登录分区号，其余业务用表 3.2.1 固定 SetID
+            let set_id = if biz.set_id == 0 { cfg.partition_no as u32 } else { biz.set_id };
             let trade = TradeRpt {
                 pbu: entry.pbu.clone(),
-                set_id: cfg.partition_no as u32,
+                set_id,
                 report_index: stats.next_report_index() as u64,
                 biz_id: entry.biz_id,
                 exec_type: exec_type::TRADE,
@@ -625,7 +800,7 @@ pub fn build_manual_report(
                     OrderStatus::Partial
                 },
             };
-            (trade.encode(), desc, update)
+            Ok((trade.encode(), desc, update))
         }
         // 拒单/撤单成功共用执行报告骨架（32），仅执行类型/状态/原因不同
         ManualReportKind::Reject | ManualReportKind::Cancel => {
@@ -646,7 +821,7 @@ pub fn build_manual_report(
                         leaves_qty: 0.0,
                         status: OrderStatus::Rejected,
                     };
-                    (rpt.encode(), desc, update)
+                    Ok((rpt.encode(), desc, update))
                 }
                 ManualReportKind::Cancel => {
                     rpt.exec_type = exec_type::CANCELLED;
@@ -665,7 +840,7 @@ pub fn build_manual_report(
                         leaves_qty: 0.0,
                         status: OrderStatus::Cancelled,
                     };
-                    (rpt.encode(), desc, update)
+                    Ok((rpt.encode(), desc, update))
                 }
                 ManualReportKind::Trade => unreachable!(),
             }
@@ -680,9 +855,12 @@ fn base_manual_rpt(
     stats: &PlatformStats,
     entry: &OrderEntry,
 ) -> ExecRpt {
+    // 现货竞价用登录分区号，其余业务用表 3.2.1 固定 SetID
+    let biz = strategy::biz_info(entry.biz_id);
+    let set_id = if biz.set_id == 0 { cfg.partition_no as u32 } else { biz.set_id };
     ExecRpt {
         pbu: entry.pbu.clone(),
-        set_id: cfg.partition_no as u32,
+        set_id,
         report_index: stats.next_report_index() as u64,
         biz_id: entry.biz_id,
         exec_type: exec_type::NEW,
@@ -713,6 +891,8 @@ fn base_manual_rpt(
         trade_date: protocol::now_date(),
         transact_time: protocol::now_ntime(),
         user_info: entry.user_info.clone(),
+        // 手动回报无法还原扩展字段，按空值占位
+        extend: ExtendFields::default(),
     }
 }
 
@@ -738,7 +918,7 @@ fn side_name(side: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::orderbook::{OrderEntry, OrderStatus};
-    use crate::shjj::protocol::BIZ_ID_CASH_AUCTION;
+    use crate::shjj::protocol::{BIZ_ID_CASH_AUCTION, BIZ_ID_FUND_TRANSFER, BIZ_ID_RIGHTS};
 
     /// 模拟缓存里的一笔订单：已收到确认回报（order_id 已回填）
     fn sample_entry() -> OrderEntry {
@@ -765,6 +945,7 @@ mod tests {
             credit_tag: String::new(),
             clearing_firm: "CF01".into(),
             user_info: "UINFO".into(),
+            biz: String::new(),
         }
     }
 
@@ -783,7 +964,8 @@ mod tests {
             None,
             None,
             Some(1025),
-        );
+        )
+        .unwrap();
         // 帧 = 头16 + 消息体213 + 校验和4；MsgType = 32（申报响应/撤单成功执行报告）
         assert_eq!(frame.len(), 16 + 213 + 4);
         assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 32);
@@ -820,7 +1002,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 32);
         assert_eq!(frame[40], b'4', "ExecType 必须是 '4'（撤销成功）");
         assert_eq!(frame[120], b'4', "OrdStatus 必须是 '4'（已撤销）");
@@ -840,7 +1023,38 @@ mod tests {
             None,
             None,
             None,
+        )
+        .unwrap();
+        assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 103);
+        assert!(desc.contains("手动成交回报(103)"), "desc={}", desc);
+    }
+
+    /// 表 3.2.1 无成交确认的业务不能手动回复成交（参照深市同规则）
+    #[test]
+    fn manual_trade_rejected_for_no_trade_biz() {
+        let cfg = PlatformConfig::default();
+        let stats = PlatformStats::default();
+        // 转托管 300060：无成交确认，手动成交必须被拒绝
+        let mut entry = sample_entry();
+        entry.biz_id = BIZ_ID_FUND_TRANSFER;
+        let r = build_manual_report(
+            &cfg,
+            &stats,
+            &entry,
+            ManualReportKind::Trade,
+            None,
+            None,
+            None,
         );
+        assert!(r.is_err(), "转托管不应允许手动成交");
+        assert!(r.unwrap_err().contains("无成交回报"));
+        // 配股 300020：有成交确认，允许手动成交（MsgType=103）
+        let mut entry2 = sample_entry();
+        entry2.biz_id = BIZ_ID_RIGHTS;
+        let (frame, desc, _) = build_manual_report(
+            &cfg, &stats, &entry2, ManualReportKind::Trade, None, None, None,
+        )
+        .unwrap();
         assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 103);
         assert!(desc.contains("手动成交回报(103)"), "desc={}", desc);
     }

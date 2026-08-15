@@ -542,14 +542,17 @@ impl Engine {
         if kind == ManualReportKind::Trade && qty.is_some_and(|q| q <= 0.0) {
             return Err("成交数量必须大于 0".into());
         }
-        // 按网关分类调用对应协议的回报构造器（frame/desc/订单状态更新）
+        // 按网关分类调用对应协议的回报构造器（frame/desc/订单状态更新）；
+        // 深市按业务特征返回 Result（无成交回报的业务不允许手动成交）
         let (frame, desc, update) = match rp.category {
             GatewayCategory::Sz => session_sz::build_manual_report(
                 &rp.cfg, &rp.stats, &entry, kind, qty, price, reason,
-            ),
+            )
+            .map_err(|e| e)?,
             GatewayCategory::Shjj => session_shjj::build_manual_report(
                 &rp.cfg, &rp.stats, &entry, kind, qty, price, reason,
-            ),
+            )
+            .map_err(|e| e)?,
             GatewayCategory::Shbond => session_shbond::build_manual_report(
                 &rp.cfg, &rp.stats, &entry, kind, qty, price, reason,
             ),

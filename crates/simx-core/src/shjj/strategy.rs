@@ -10,6 +10,16 @@
 //! - 业务拒绝方式对应申报拒绝 OrderReject（MsgType=204）
 //! - 价格放大 10 万倍、数量放大 1000 倍（深交所是 1 万 / 100）
 //!
+//! # 多业务支持（表 3.2.1 业务类型表）
+//!
+//! 20 种业务共用同一套策略框架，通过 `biz_info` 业务特征表区分差异：
+//! - **回报分区号 SetID**：现货竞价（100010）用登录分区号（1-6,20 多分区），
+//!   其余业务固定 991（其他业务）/ 992（指定登记/指定撤销）
+//! - **有无成交确认**：仅 100010 / 300020 / 300021 有成交回报，
+//!   其余业务只回申报响应，成交类策略自动失效
+//! - **是否支持部分成交**：仅现货竞价支持；其余业务把
+//!   PartialSingle/PartialSplit/Custom 等部分成交策略降级为全部成交
+//!
 //! 七种策略与对应剧本：
 //! - FullSingle  全部成交（单笔）：1 确认 + 1 成交
 //! - FullSplit   全部成交（拆单）：1 确认 + N 成交（数量随机拆、价格阶梯）
@@ -23,6 +33,12 @@ use crate::config::{RejectVia, StrategyConfig, StrategyMode};
 use crate::orderbook::{OrderStatus, OrderUpdate};
 use super::protocol::{
     self as protocol, exec_type, ord_status, ExecRpt, NewOrder, OrderReject, TradeRpt,
+    BIZ_ID_CASH_AUCTION, BIZ_ID_COLLATERAL_IN, BIZ_ID_COLLATERAL_OUT, BIZ_ID_DESIGNATION,
+    BIZ_ID_DESIGNATION_CANCEL, BIZ_ID_FUND_CONVERT, BIZ_ID_FUND_DIVIDEND, BIZ_ID_FUND_RED,
+    BIZ_ID_FUND_SUB, BIZ_ID_FUND_SUB_ISSUE, BIZ_ID_FUND_TRANSFER, BIZ_ID_ISSUE,
+    BIZ_ID_PWD_SERVICE, BIZ_ID_REMAIN_TRANSFER, BIZ_ID_RETURN_TRANSFER, BIZ_ID_RIGHTS,
+    BIZ_ID_RIGHTS_BOND, BIZ_ID_SEC_SRC_IN, BIZ_ID_SEC_SRC_OUT, BIZ_ID_TENDER_ACCEPT,
+    BIZ_ID_TENDER_CANCEL, SET_ID_DESIGNATION, SET_ID_OTHER_BIZ,
 };
 use crate::stats::PlatformStats;
 use rand::Rng;
@@ -55,6 +71,137 @@ pub struct PlannedReport {
     pub cl_ord_id: String,
     /// 本条回报发出后要同步给订单缓存的更新（None = 无需更新）
     pub order_update: Option<OrderUpdate>,
+}
+
+/// 业务特征（表 3.2.1 业务类型表）：决定回报分区号、是否可撤单、是否有成交回报等
+#[derive(Debug, Clone, Copy)]
+pub struct BizInfo {
+    /// 业务名称（日志/展示用）
+    pub name: &'static str,
+    /// 业务标识 BizID（表 3.2.1）
+    pub biz_id: u32,
+    /// 回报分区号 SetID：现货竞价 0 = 用登录分区号（1-6,20 多分区），其余固定 991/992
+    pub set_id: u32,
+    /// 是否支持撤单（表 3.2.1 撤单列；300010 发行业务注 1 仅 ETF 认购可撤，
+    /// 模拟器简化按不可撤处理）
+    pub allow_cancel: bool,
+    /// 是否有成交确认（表 3.2.1 成交确认列）：无成交确认的业务只回申报响应
+    pub allow_trade: bool,
+    /// 是否支持部分成交（仅现货竞价 100010 支持；其余业务部分成交类策略降级为全部成交）
+    pub allow_partial: bool,
+}
+
+/// 业务特征表：按表 3.2.1 顺序映射 20 种业务。
+///
+/// 有成交确认的业务仅 3 种：100010 / 300020 / 300021；其余业务只回申报响应。
+pub fn biz_info(biz_id: u32) -> BizInfo {
+    match biz_id {
+        // 股票现货竞价：多分区（SetID 用登录分区号）、可撤单、有成交确认、唯一支持部分成交
+        BIZ_ID_CASH_AUCTION => BizInfo {
+            name: "股票现货竞价", biz_id, set_id: 0, allow_cancel: true, allow_trade: true, allow_partial: true,
+        },
+        // 发行：注 1 仅 ETF 认购可撤单，其他不可撤（模拟器简化按不可撤处理）
+        BIZ_ID_ISSUE => BizInfo {
+            name: "发行", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: false, allow_trade: false, allow_partial: false,
+        },
+        // 配股/科创板配售：不支持撤单、有成交确认
+        BIZ_ID_RIGHTS => BizInfo {
+            name: "配股/科创板配售", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: false, allow_trade: true, allow_partial: false,
+        },
+        // 配转债：不支持撤单、有成交确认
+        BIZ_ID_RIGHTS_BOND => BizInfo {
+            name: "配转债", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: false, allow_trade: true, allow_partial: false,
+        },
+        // 要约预受/要约撤销：可撤单、无成交确认
+        BIZ_ID_TENDER_ACCEPT => BizInfo {
+            name: "要约预受", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_TENDER_CANCEL => BizInfo {
+            name: "要约撤销", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        // 基金申购/赎回/认购：可撤单、无成交确认
+        BIZ_ID_FUND_SUB => BizInfo {
+            name: "基金申购", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_FUND_RED => BizInfo {
+            name: "基金赎回", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_FUND_SUB_ISSUE => BizInfo {
+            name: "基金认购", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        // 转托管/分红设置/转换：可撤单、无成交确认
+        BIZ_ID_FUND_TRANSFER => BizInfo {
+            name: "转托管", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_FUND_DIVIDEND => BizInfo {
+            name: "分红设置", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_FUND_CONVERT => BizInfo {
+            name: "转换", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        // 余券/还券/担保品/券源划转：可撤单、无成交确认
+        BIZ_ID_REMAIN_TRANSFER => BizInfo {
+            name: "余券划转", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_RETURN_TRANSFER => BizInfo {
+            name: "还券划转", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_COLLATERAL_IN => BizInfo {
+            name: "担保品划入", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_COLLATERAL_OUT => BizInfo {
+            name: "担保品划出", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_SEC_SRC_IN => BizInfo {
+            name: "券源划入", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_SEC_SRC_OUT => BizInfo {
+            name: "券源划出", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: true, allow_trade: false, allow_partial: false,
+        },
+        // 网络密码服务：注 2 不重单校验、响应不进执行报告流（不经过本策略框架）
+        BIZ_ID_PWD_SERVICE => BizInfo {
+            name: "网络密码服务", biz_id, set_id: SET_ID_OTHER_BIZ, allow_cancel: false, allow_trade: false, allow_partial: false,
+        },
+        // 指定登记/指定撤销：SetID=992、不可撤单、无成交确认
+        BIZ_ID_DESIGNATION => BizInfo {
+            name: "指定登记", biz_id, set_id: SET_ID_DESIGNATION, allow_cancel: false, allow_trade: false, allow_partial: false,
+        },
+        BIZ_ID_DESIGNATION_CANCEL => BizInfo {
+            name: "指定撤销", biz_id, set_id: SET_ID_DESIGNATION, allow_cancel: false, allow_trade: false, allow_partial: false,
+        },
+        // 未知业务：按现货竞价兜底（session 层会先拒绝未知 BizID，这里仅防御）
+        _ => BizInfo {
+            name: "未知业务", biz_id, set_id: 0, allow_cancel: true, allow_trade: true, allow_partial: true,
+        },
+    }
+}
+
+/// 是否为表 3.2.1 内的已知业务（未知 BizID 在 session 层回申报拒绝 204，错误码 4012）
+pub fn is_known_biz(biz_id: u32) -> bool {
+    matches!(
+        biz_id,
+        BIZ_ID_CASH_AUCTION
+            | BIZ_ID_ISSUE
+            | BIZ_ID_RIGHTS
+            | BIZ_ID_RIGHTS_BOND
+            | BIZ_ID_TENDER_ACCEPT
+            | BIZ_ID_TENDER_CANCEL
+            | BIZ_ID_FUND_SUB
+            | BIZ_ID_FUND_RED
+            | BIZ_ID_FUND_SUB_ISSUE
+            | BIZ_ID_FUND_TRANSFER
+            | BIZ_ID_FUND_DIVIDEND
+            | BIZ_ID_FUND_CONVERT
+            | BIZ_ID_REMAIN_TRANSFER
+            | BIZ_ID_RETURN_TRANSFER
+            | BIZ_ID_COLLATERAL_IN
+            | BIZ_ID_COLLATERAL_OUT
+            | BIZ_ID_SEC_SRC_IN
+            | BIZ_ID_SEC_SRC_OUT
+            | BIZ_ID_PWD_SERVICE
+            | BIZ_ID_DESIGNATION
+            | BIZ_ID_DESIGNATION_CANCEL
+    )
 }
 
 /// Qty N15(3)：协议中数量放大 1000 倍存储，1 股 = 1000
@@ -91,6 +238,9 @@ pub fn plan_reports(
     stats: &PlatformStats,
     pbu: &str,
 ) -> Vec<PlannedReport> {
+    let biz = biz_info(order.biz_id);
+    // 现货竞价用登录分区号（表 3.2.1 SetID 1-6,20 多分区），其余业务用表固定值 991/992
+    let set_id = if biz.set_id == 0 { partition_no as u32 } else { biz.set_id };
     let ord_cnfm_id = stats.next_order_id();
     let mut plans = Vec::new();
 
@@ -99,7 +249,7 @@ pub fn plan_reports(
         match st.reject_via {
             // 方式一：用执行报告(32)拒单，ExecType/OrdStatus 均为 '8'
             RejectVia::ExecutionReport => {
-                let mut rpt = base_ack(partition_no, order, stats, pbu, &ord_cnfm_id);
+                let mut rpt = base_ack(set_id, order, stats, pbu, &ord_cnfm_id);
                 rpt.exec_type = exec_type::REJECT;
                 rpt.ord_status = ord_status::REJECTED;
                 rpt.ord_rej_reason = st.reject_reason as u32;
@@ -156,7 +306,7 @@ pub fn plan_reports(
     }
 
     // ---- 确认回报：除拒单外所有策略都先发一条确认 ----
-    let ack = base_ack(partition_no, order, stats, pbu, &ord_cnfm_id);
+    let ack = base_ack(set_id, order, stats, pbu, &ord_cnfm_id);
     plans.push(PlannedReport {
         delay_ms: st.ack_delay.sample(),
         kind: ReportKind::Ack,
@@ -175,8 +325,12 @@ pub fn plan_reports(
         }),
     });
 
-    // ---- 成交回报：按策略算出的成交明细逐笔生成 ----
-    let fills = gen_fills(st, order);
+    // ---- 成交回报：仅表 3.2.1 有成交确认的业务生成（100010/300020/300021）。
+    // 其余业务订单保持“已报”挂单状态，由柜台后续撤销或等待人工处理 ----
+    if !biz.allow_trade {
+        return plans;
+    }
+    let fills = gen_fills(st, order, &biz);
     let total: i64 = order.order_qty;
     let mut cum: i64 = 0; // 累计已成交数量
     let n = fills.len();
@@ -191,7 +345,7 @@ pub fn plan_reports(
         };
         let trade = TradeRpt {
             pbu: pbu.to_string(),
-            set_id: partition_no as u32,
+            set_id,
             report_index: stats.next_report_index() as u64,
             biz_id: order.biz_id,
             exec_type: exec_type::TRADE,
@@ -251,7 +405,7 @@ pub fn plan_reports(
 /// 再填上交易所分配的订单确认编号/回报序号。
 /// 确认时尚未成交：剩余量 = 委托量，已撤量 = 0。
 fn base_ack(
-    partition_no: i32,
+    set_id: u32,
     order: &NewOrder,
     stats: &PlatformStats,
     pbu: &str,
@@ -259,7 +413,7 @@ fn base_ack(
 ) -> ExecRpt {
     ExecRpt {
         pbu: pbu.to_string(),
-        set_id: partition_no as u32,
+        set_id,
         report_index: stats.next_report_index() as u64,
         biz_id: order.biz_id,
         exec_type: exec_type::NEW,
@@ -286,14 +440,31 @@ fn base_ack(
         trade_date: protocol::now_date(),
         transact_time: protocol::now_ntime(),
         user_info: order.user_info.clone(),
+        // 4.3.3.1 说明 2：申报响应的扩展字段与新订单对应业务一致
+        extend: order.extend.clone(),
     }
 }
 
 /// 生成成交明细列表：每项为 (数量 raw, 价格 raw)，均为协议放大整数。
 /// 这里只决定“成交几笔、每笔多少股、什么价”，不管报文细节。
-fn gen_fills(st: &StrategyConfig, order: &NewOrder) -> Vec<(i64, i64)> {
+///
+/// 差异点：除现货竞价（100010）外的业务不支持部分成交，把
+/// PartialSingle/PartialSplit/Custom 降级为对应的全部成交策略。
+fn gen_fills(st: &StrategyConfig, order: &NewOrder, biz: &BizInfo) -> Vec<(i64, i64)> {
     let total_shares = order.order_qty / QTY_UNIT; // 委托股数
-    match st.mode {
+    // 非现货业务的部分成交降级：PartialSingle→FullSingle、PartialSplit→FullSplit、
+    // Custom→FullSingle（自定义明细可能出现“未成交完”的部分成交语义）
+    let mode = if biz.allow_partial {
+        st.mode
+    } else {
+        match st.mode {
+            StrategyMode::PartialSingle => StrategyMode::FullSingle,
+            StrategyMode::PartialSplit => StrategyMode::FullSplit,
+            StrategyMode::Custom => StrategyMode::FullSingle,
+            m => m,
+        }
+    };
+    match mode {
         // 全部成交（单笔）：一笔成交全部数量，价格就是委托价
         StrategyMode::FullSingle => {
             vec![(order.order_qty, order.price)]
@@ -531,5 +702,69 @@ mod tests {
     fn test_amount_raw() {
         // 10 元 × 100 股 = 1000 元 → N18(5) 表示为 100000000
         assert_eq!(amount_raw(px_raw(10.0), qty_raw(100)), 100_000_000);
+    }
+
+    #[test]
+    fn test_other_biz_set_id_fixed() {
+        // 非现货业务（300030 要约预受）：SetID 固定 991，不受登录分区号影响；
+        // 且无成交确认（表 3.2.1），FullSingle 也只回一条申报响应
+        let stats = PlatformStats::default();
+        let mut order = mk_order(1000, 10.0, b'1');
+        order.biz_id = protocol::BIZ_ID_TENDER_ACCEPT;
+        let cfg = mk_cfg(StrategyMode::FullSingle);
+        let plans = plan_reports(&cfg.strategy, 3, &order, &stats, "PBU1");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].kind, ReportKind::Ack);
+        let body = &plans[0].frame[16..plans[0].frame.len() - 4];
+        let mut r = protocol::BodyReader::new(body);
+        r.str(8).unwrap(); // PBU
+        assert_eq!(r.u32().unwrap(), SET_ID_OTHER_BIZ);
+        // 现货竞价仍用登录分区号（多分区 1-6,20）
+        let order2 = mk_order(1000, 10.0, b'1');
+        let plans2 = plan_reports(&cfg.strategy, 5, &order2, &stats, "PBU1");
+        let body2 = &plans2[0].frame[16..plans2[0].frame.len() - 4];
+        let mut r2 = protocol::BodyReader::new(body2);
+        r2.str(8).unwrap();
+        assert_eq!(r2.u32().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_gen_fills_degrade_for_other_biz() {
+        // 300020 配股/科创板配售：不支持部分成交，PartialSingle 降级为 FullSingle
+        let st = mk_cfg(StrategyMode::PartialSingle).strategy;
+        let mut order = mk_order(1000, 10.0, b'1');
+        order.biz_id = protocol::BIZ_ID_RIGHTS;
+        let fills = gen_fills(&st, &order, &biz_info(order.biz_id));
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].0, order.order_qty); // 一笔全量成交
+        // 现货竞价保持部分成交语义（数量小于全量）
+        let order2 = mk_order(1000, 10.0, b'1');
+        let fills2 = gen_fills(&st, &order2, &biz_info(order2.biz_id));
+        assert_eq!(fills2.len(), 1);
+        assert!(fills2[0].0 < order2.order_qty);
+    }
+
+    #[test]
+    fn test_biz_info_flags() {
+        // 现货：可撤、有成交、支持部分成交
+        let cash = biz_info(protocol::BIZ_ID_CASH_AUCTION);
+        assert!(cash.allow_cancel && cash.allow_trade && cash.allow_partial);
+        // 配股/配转债：有成交、不可撤、不支持部分成交
+        assert!(!biz_info(protocol::BIZ_ID_RIGHTS).allow_cancel);
+        assert!(biz_info(protocol::BIZ_ID_RIGHTS).allow_trade);
+        assert!(!biz_info(protocol::BIZ_ID_RIGHTS).allow_partial);
+        assert!(biz_info(protocol::BIZ_ID_RIGHTS_BOND).allow_trade);
+        // 要约预受：可撤、无成交
+        assert!(biz_info(protocol::BIZ_ID_TENDER_ACCEPT).allow_cancel);
+        assert!(!biz_info(protocol::BIZ_ID_TENDER_ACCEPT).allow_trade);
+        // 指定登记：SetID=992；其余非现货业务固定 991
+        assert_eq!(biz_info(protocol::BIZ_ID_DESIGNATION).set_id, SET_ID_DESIGNATION);
+        assert_eq!(biz_info(protocol::BIZ_ID_DESIGNATION_CANCEL).set_id, SET_ID_DESIGNATION);
+        assert_eq!(biz_info(protocol::BIZ_ID_FUND_SUB).set_id, SET_ID_OTHER_BIZ);
+        assert_eq!(biz_info(protocol::BIZ_ID_FUND_TRANSFER).set_id, SET_ID_OTHER_BIZ);
+        // 带扩展字段的业务（转托管/分红设置/转换）可撤单
+        assert!(biz_info(protocol::BIZ_ID_FUND_TRANSFER).allow_cancel);
+        assert!(biz_info(protocol::BIZ_ID_FUND_DIVIDEND).allow_cancel);
+        assert!(biz_info(protocol::BIZ_ID_FUND_CONVERT).allow_cancel);
     }
 }

@@ -1,4 +1,4 @@
-//! 上交所新债券平台 Binary 交易接口协议编解码（债券平台规格说明书 1.90 版）。
+//! 上交所新债券平台 Binary 交易接口协议编解码（债券平台规格说明书 1.93 版）。
 //!
 //! # 与深交所协议的关键差异
 //!
@@ -24,7 +24,7 @@
 //!
 //! 与竞价平台协议结构完全一致，仅业务取值不同：PlatformID=2（新债券平台）、
 //! 分区号 SetID 默认 801、BizID=1（债券现券竞价）或 2（债券质押式回购）、
-//! 协议版本最低 1.90、订单类型仅支持 '2'=限价。
+//! 协议版本最低 1.93、订单类型仅支持 '2'=限价。
 //!
 //! # 消息序号怎么填
 //!
@@ -354,16 +354,16 @@ pub fn encode_platform_state(platform_id: u16, state: u16) -> Vec<u8> {
 
 /// 执行报告信息消息（MsgType=208）：登录成功后 TDGW 主动推送，
 /// 告知 OMS 有哪些回报 PBU 和分区（OMS 据此发起序号同步）
-pub fn encode_exec_rpt_info(platform_id: u16, pbus: &[String], set_ids: &[u32]) -> Vec<u8> {
+pub fn encode_exec_rpt_info(platform_id: u16, pbu_set_ids: &[(&str, &[u32])]) -> Vec<u8> {
     let mut w = BodyWriter::new();
     w.u16(platform_id);
-    w.u16(pbus.len() as u16);
-    for p in pbus {
-        w.str(p, 8);
-    }
-    w.u16(set_ids.len() as u16);
-    for s in set_ids {
-        w.u32(*s);
+    w.u16(pbu_set_ids.len() as u16);
+    for &(pbu, set_ids) in pbu_set_ids {
+        w.str(pbu, 8);
+        w.u16(set_ids.len() as u16);
+        for s in set_ids {
+            w.u32(*s);
+        }
     }
     frame(msg_type::EXEC_RPT_INFO, &w.into_inner())
 }
@@ -993,17 +993,16 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             }
         }
         msg_type::EXEC_RPT_INFO => {
-            let platform_id = r.u16()?;
+            out.push(f("PlatformID", r.u16()?));
             let np = r.u16()?;
-            out.push(f("PlatformID", platform_id));
             out.push(f("NoPBUs", np));
             for i in 0..np {
                 out.push(f(format!("PBU[{}]", i + 1), r.str(8)?));
-            }
-            let ns = r.u16()?;
-            out.push(f("NoSetIDs", ns));
-            for i in 0..ns {
-                out.push(f(format!("SetID[{}]", i + 1), r.u32()?));
+                let ns = r.u16()?;
+                out.push(f(format!("PBU[{}].NoSetIDs", i + 1), ns));
+                for j in 0..ns {
+                    out.push(f(format!("PBU[{}].SetID[{}]", i + 1, j + 1), r.u32()?));
+                }
             }
         }
         msg_type::PLATFORM_STATE => {
