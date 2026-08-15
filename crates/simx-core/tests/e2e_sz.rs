@@ -102,15 +102,16 @@ async fn connect_and_logon(port: u16) -> TcpStream {
 }
 
 /// 拼一个最小可用的测试网关配置：一个网关下挂一个平台，策略由各测试自定
-fn test_gateway(port: u16, strategy: StrategyConfig) -> GatewayConfig {
+fn test_gateway(port: u16, platform_type: u16, strategy: StrategyConfig) -> GatewayConfig {
     GatewayConfig {
         id: String::new(),
         name: "测试网关".into(),
         platforms: vec![PlatformConfig {
             id: String::new(),
-            name: "现货集中竞价交易平台".into(),
+            name: "测试平台".into(),
             listen_host: "127.0.0.1".into(),
             port,
+            platform_type,
             strategy,
             ..Default::default()
         }],
@@ -130,6 +131,7 @@ async fn test_full_single_sync_flow() {
     let gw = engine
         .save_gateway(test_gateway(
             18101,
+            1,
             StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
         ))
         .await
@@ -205,6 +207,7 @@ async fn test_reject_and_ack_only_flow() {
     let gw = engine
         .save_gateway(test_gateway(
             18102,
+            1,
             StrategyConfig { mode: StrategyMode::Reject, ..Default::default() },
         ))
         .await
@@ -249,7 +252,7 @@ async fn test_split_trades_async_delay() {
         trade_delay: simx_core::config::DelayConfig { min_ms: 5, max_ms: 10 },
         ..Default::default()
     };
-    let gw = engine.save_gateway(test_gateway(18103, strategy)).await.unwrap();
+    let gw = engine.save_gateway(test_gateway(18103, 1, strategy)).await.unwrap();
     engine.start_gateway(&gw.id).await.unwrap();
 
     let mut stream = connect_and_logon(18103).await;
@@ -277,6 +280,249 @@ async fn test_split_trades_async_delay() {
         total_qty += last_qty;
     }
     assert_eq!(total_qty, 1000_00, "拆单成交数量之和应等于委托数量");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试四：平台校验——现货平台（平台号 1）上收到属于固定收益平台（平台号 6）
+/// 的债券回购委托（100201，ApplID=020），应回 20108 业务拒绝（表 3-3 / tgw_error.csv），
+/// 委托不进入受理流程（订单计数为 0，业务拒绝计数为 1）。
+#[tokio::test]
+async fn test_platform_mismatch_business_reject() {
+    let dir = std::env::temp_dir().join(format!("simx_test_plat_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18104,
+            1, // 现货集中竞价交易平台
+            StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+    let mut stream = connect_and_logon(18104).await;
+
+    // 构造债券通用质押式回购新订单（100201）：公共 89 字节 + 扩展 19 字节
+    let mut w = BodyWriter::new();
+    w.str("020", 3); // ApplID：固定收益交易平台业务
+    w.str("100001", 6); // SubmittingPBUID
+    w.str("000001", 8); // SecurityID
+    w.str("102", 4); // SecurityIDSource
+    w.u16(1); // OwnerType
+    w.str("01", 2); // ClearingFirm
+    w.i64(protocol::now_timestamp()); // TransactTime
+    w.str("", 8); // UserInfo
+    w.str("PLATREJ01", 10); // ClOrdID
+    w.str("0123456789AB", 12); // AccountID
+    w.str("0001", 4); // BranchID
+    w.str("", 4); // OrderRestrictions
+    w.ch(b'1'); // Side
+    w.ch(b'2'); // OrdType
+    w.i64(100_00); // OrderQty
+    w.i64(10_0000); // Price
+    w.i64(0); // StopPx
+    w.i64(0); // MinQty
+    w.u16(0); // MaxPriceLevels
+    w.ch(b'0'); // TimeInForce
+    stream
+        .write_all(&protocol::frame(msg_type::NEW_ORDER_BOND_REPO, &w.into_inner()))
+        .await
+        .unwrap();
+
+    // 期待收到业务拒绝（MsgType=4），逐字段校验
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::BUSINESS_REJECT, "平台不符应回业务拒绝");
+    assert_eq!(&body[0..3], b"020", "ApplID 应回填委托值");
+    let ref_msg_type = u32::from_be_bytes(body[37..41].try_into().unwrap());
+    assert_eq!(ref_msg_type, msg_type::NEW_ORDER_BOND_REPO, "RefMsgType 应是被拒消息类型");
+    assert_eq!(&body[41..51], b"PLATREJ01 ", "BusinessRejectRefID 应回填 ClOrdID");
+    let reason = u16::from_be_bytes(body[51..53].try_into().unwrap());
+    assert_eq!(reason, 20108, "拒单码应为 20108");
+    let lossy = String::from_utf8_lossy(&body[53..103]);
+    let text = lossy.trim_end_matches(char::from(0));
+    let text = text.trim_end();
+    assert!(text.contains("平台非法"), "拒单原因应参照 tgw_error.csv：{}", text);
+
+    // 统计校验：委托未入受理流程
+    let snap = engine.snapshot().await;
+    let p = &snap.gateways[0].platforms[0];
+    assert_eq!(p.stats.orders, 0, "平台不符的订单不应计入订单数");
+    assert_eq!(p.stats.business_rejects, 1, "应计入业务拒绝数");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试五：回报同步（5.2）——登录后发送回报同步请求，引擎无历史回报，
+/// 应逐分区回“回报结束消息”（5.4，MsgType=7）告知该分区回报已发送完毕。
+#[tokio::test]
+async fn test_report_sync_returns_report_finished() {
+    let dir = std::env::temp_dir().join(format!("simx_test_sync_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18105,
+            1,
+            StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+    let mut stream = connect_and_logon(18105).await;
+
+    // 回报同步请求：1 个分区（分区号 1，期望记录号 1）
+    let mut w = BodyWriter::new();
+    w.u32(1); // NoPartitions
+    w.i32(1); // PartitionNo
+    w.i64(1); // ReportIndex
+    stream
+        .write_all(&protocol::frame(msg_type::REPORT_SYNC, &w.into_inner()))
+        .await
+        .unwrap();
+
+    // 期待收到回报结束消息（MsgType=7）
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::REPORT_FINISHED, "回报同步后应回回报结束消息");
+    let partition_no = i32::from_be_bytes(body[0..4].try_into().unwrap());
+    let report_index = i64::from_be_bytes(body[4..12].try_into().unwrap());
+    let platform_id = u16::from_be_bytes(body[12..14].try_into().unwrap());
+    assert_eq!(partition_no, 1);
+    assert_eq!(report_index, 1);
+    assert_eq!(platform_id, 1, "PlatformID 应为本平台号");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试六：5.6 交易会话状态——固定收益交易平台（平台号 6）登录成功后，
+/// 除平台信息、平台状态外，还应收到交易会话状态消息（MsgType=10），
+/// MarketSegmentID 第一位表示平台号，应为 6。
+#[tokio::test]
+async fn test_fixed_income_session_status() {
+    let dir = std::env::temp_dir().join(format!("simx_test_sess_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18106,
+            6, // 固定收益交易平台
+            StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+
+    let mut stream = TcpStream::connect(("127.0.0.1", 18106)).await.expect("连接失败");
+    let logon = Logon {
+        sender_comp_id: "OMS_TEST".into(),
+        target_comp_id: "SIMX_TGW".into(),
+        heart_bt_int: 30,
+        password: String::new(),
+        default_appl_ver_id: "1.29".into(),
+    };
+    stream.write_all(&logon.encode()).await.unwrap();
+
+    // 登录应答、平台信息、平台状态、交易会话状态（固定收益平台独有）
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::LOGON);
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::PLATFORM_INFO);
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::PLATFORM_STATE);
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::TRADING_SESSION_STATUS, "固定收益平台登录后应收到交易会话状态");
+    // MarketID(8) 后即 MarketSegmentID(8)：首位为平台号 6
+    assert_eq!(&body[8..9], b"6", "MarketSegmentID 首位应为平台号");
+    // MarketID(8)+MarketSegmentID(8)+TradingSessionID(4)+TradingSessionSubID(4)+TradSesStatus(2)=26
+    let start = i64::from_be_bytes(body[26..34].try_into().unwrap());
+    let end = i64::from_be_bytes(body[34..42].try_into().unwrap());
+    assert!(start > 0 && end > start, "交易会话起止时间应有效");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试七：报价链路（4.6）——综合金融服务平台（平台号 2）上发协议交易报价
+/// （100505，ApplID=056）应收到报价状态回报（200506，状态=接受）；
+/// 若报价 ApplID 不属于本平台（如现货 010），则应回 20108 业务拒绝。
+#[tokio::test]
+async fn test_quote_platform2_accept_and_reject() {
+    let dir = std::env::temp_dir().join(format!("simx_test_quote_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18107,
+            2, // 综合金融服务平台
+            StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+    let mut stream = connect_and_logon(18107).await;
+
+    // 构造协议交易报价（100505）：公共 106 字节 + 协议扩展 207 字节（表 4-65）
+    let quote_frame = |appl_id: &str, quote_msg_id: &str| {
+        let mut w = BodyWriter::new();
+        w.str(appl_id, 3); // ApplID
+        w.str("100001", 6); // SubmittingPBUID
+        w.str("000001", 8); // SecurityID
+        w.str("102", 4); // SecurityIDSource
+        w.u16(1); // OwnerType
+        w.str("01", 2); // ClearingFirm
+        w.i64(protocol::now_timestamp()); // TransactTime
+        w.str("", 8); // UserInfo
+        w.str(quote_msg_id, 10); // QuoteMsgID
+        w.str("0123456789AB", 12); // AccountID
+        w.str("", 10); // QuoteReqID
+        w.ch(b'1'); // QuoteType
+        w.i64(12_3400); // BidPx
+        w.i64(12_3500); // OfferPx
+        w.i64(100_00); // BidSize
+        w.i64(100_00); // OfferSize
+        // ---- 4.6.1.2 协议交易扩展（表 4-65）----
+        w.str("0001", 4); // BranchID
+        w.str("", 10); // QuoteID
+        w.str("", 16); // QuoteRespID
+        w.ch(b'0'); // PrivateQuote
+        w.i64(0); // ValidUntilTime
+        w.ch(b'0'); // PriceType
+        w.ch(b'1'); // CashMargin
+        w.str("100002", 6); // CounterpartyPBUID
+        w.str("", 160); // Memo
+        protocol::frame(msg_type::QUOTE_AGREEMENT, &w.into_inner())
+    };
+
+    // 1) ApplID=056（协议交易报价，属于综合金融平台）→ 应被接受
+    stream
+        .write_all(&quote_frame("056", "QT00000001"))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::QUOTE_STATUS_AGREEMENT, "报价应回报价状态回报");
+    // QuoteStatus 位置：4+8+3+6+6+8+4+2+2+8+8+10+12+10 = 91
+    let status = u16::from_be_bytes(body[91..93].try_into().unwrap());
+    assert_eq!(status, 0, "报价状态应为接受");
+
+    // 2) ApplID=010（现货集中竞价，属于平台 1）→ 应回 20108 业务拒绝
+    stream
+        .write_all(&quote_frame("010", "QT00000002"))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::BUSINESS_REJECT, "平台不符的报价应回业务拒绝");
+    let ref_msg_type = u32::from_be_bytes(body[37..41].try_into().unwrap());
+    assert_eq!(ref_msg_type, msg_type::QUOTE_AGREEMENT);
+    assert_eq!(&body[41..51], b"QT00000002", "报价的业务层 ID 应为 QuoteMsgID（表 5-2）");
+    let reason = u16::from_be_bytes(body[51..53].try_into().unwrap());
+    assert_eq!(reason, 20108);
+
+    let snap = engine.snapshot().await;
+    let p = &snap.gateways[0].platforms[0];
+    assert_eq!(p.stats.business_rejects, 1);
 
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);

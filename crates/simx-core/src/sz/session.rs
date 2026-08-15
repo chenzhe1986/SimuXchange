@@ -28,8 +28,12 @@ use crate::config::{PlatformConfig, StrategyConfig};
 use crate::event::{ConnInfo, EngineEvent};
 use crate::orderbook::{OrderBook, OrderEntry, OrderStatus, OrderUpdate};
 use super::protocol::{
-    self as protocol, exec_type, msg_type, ord_status, CancelReject, ExecRptAck,
-    ExecRptTrade, Logon, Logout, NewOrder, OrderCancelRequest,
+    self as protocol, exec_type, msg_type, ord_status, BusinessReject, CancelReject,
+    Designation, DesignationReport, Evote, EvoteReport, ExecRptAck, ExecRptTrade,
+    IndicationOfInterest, IOIResponse, Logon, Logout, MarginQuery, MarginQueryResult,
+    MultilegExecRpt, MultilegOrder, NewOrder, OrderCancelRequest, PasswordService,
+    PasswordServiceReport, Quote, QuoteItem, QuoteRequest, QuoteRequestAck, QuoteResponse,
+    QuoteStatusReport, ReportSync, TcrAck, TradingSessionStatus, TradeCaptureReport,
 };
 use crate::stats::PlatformStats;
 use super::strategy::{self as strategy, biz_info_by_appl_id, ReportKind};
@@ -348,6 +352,11 @@ pub async fn handle_conn(
                 let _ = tx
                     .send(protocol::encode_platform_state(ctx.cfg.platform_type, 2))
                     .await;
+                // 5.6 交易会话状态：目前仅固定收益交易平台（平台号 6）提供
+                // 本消息（表 5-7），登录后下发一条，揭示当前所处交易会话
+                if ctx.cfg.platform_type == 6 {
+                    let _ = tx.send(encode_session_status()).await;
+                }
                 logged_on = true;
                 if let Some(c) = ctx.connections.lock().unwrap().get_mut(&conn_id) {
                     c.comp_id = logon.sender_comp_id.clone();
@@ -391,8 +400,33 @@ pub async fn handle_conn(
                 break;
             }
             msg_type::REPORT_SYNC => {
-                // 回报同步请求：模拟器不保存历史回报，记条日志即可
-                ctx.log("info", format!("柜台 {} 发送回报同步请求", peer));
+                // 回报同步请求（5.2）：OMS 登录后告知各分区期望的下一条回报记录号。
+                // 模拟器不保存历史回报，收到后逐分区回“回报结束消息”（5.4），
+                // 告知该分区回报已发送完毕（没有历史回报可补发）。
+                match ReportSync::decode(mt, &body) {
+                    Ok(rs) => {
+                        for p in &rs.partitions {
+                            let _ = tx
+                                .send(protocol::encode_report_finished(
+                                    p.partition_no,
+                                    p.report_index,
+                                    ctx.cfg.platform_type,
+                                ))
+                                .await;
+                        }
+                        ctx.log(
+                            "info",
+                            format!(
+                                "柜台 {} 发送回报同步请求（{} 个分区），已回回报结束消息",
+                                peer,
+                                rs.partitions.len()
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        ctx.log("warn", format!("回报同步请求解析失败: {}", e));
+                    }
+                }
             }
             // “if logged_on”是匹配守卫：只有登录后才接受委托/撤单，
             // 未登录时会落入下面的 other 分支被忽略
@@ -403,6 +437,42 @@ pub async fn handle_conn(
             }
             msg_type::ORDER_CANCEL_REQUEST if logged_on => {
                 handle_cancel(&ctx, &tx, &body).await;
+            }
+            // 4.6.1 报价 / 4.6.3 报价回复：回 4.6.2 报价状态回报（表 4-67 注 1/2）
+            m if logged_on && (Quote::is_quote(m) || QuoteResponse::is_quote_response(m)) => {
+                handle_quote(m, &ctx, &tx, &body).await;
+            }
+            // 4.7.1 询价请求：回 4.7.2 询价请求响应
+            m if logged_on && QuoteRequest::is_quote_request(m) => {
+                handle_quote_request(m, &ctx, &tx, &body).await;
+            }
+            // 4.8.1 意向申报：回 4.8.2 意向申报响应
+            m if logged_on && IndicationOfInterest::is_ioi(m) => {
+                handle_ioi(m, &ctx, &tx, &body).await;
+            }
+            // 4.9.1 成交申报：回 4.9.2 成交申报响应
+            m if logged_on && TradeCaptureReport::is_trade_capture_report(m) => {
+                handle_tcr(m, &ctx, &tx, &body).await;
+            }
+            // 4.10.1 注册：回 4.10.2 注册执行报告
+            m if logged_on && Designation::is_designation(m) => {
+                handle_designation(m, &ctx, &tx, &body).await;
+            }
+            // 4.11.1 投票：回 4.11.2 投票执行报告
+            m if logged_on && Evote::is_evote(m) => {
+                handle_evote(m, &ctx, &tx, &body).await;
+            }
+            // 4.12.1 密码服务：回 4.12.2 密码服务执行报告
+            m if logged_on && PasswordService::is_password_service(m) => {
+                handle_password_service(m, &ctx, &tx, &body).await;
+            }
+            // 4.13.1 保证金查询：回 4.13.2 保证金查询结果
+            m if logged_on && MarginQuery::is_margin_query(m) => {
+                handle_margin_query(m, &ctx, &tx, &body).await;
+            }
+            // 4.14.1 多腿订单：回 4.14.2 多腿订单执行报告
+            m if logged_on && MultilegOrder::is_multileg(m) => {
+                handle_multileg(m, &ctx, &tx, &body).await;
             }
             other => {
                 if !logged_on {
@@ -452,6 +522,22 @@ async fn handle_new_order(
             return;
         }
     };
+    // 平台校验（表 3-1/表 3-3）：委托的 ApplID 必须属于当前接入平台，
+    // 否则回 20108 业务拒绝（参照 tgw_error.csv），订单不进入受理流程
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &order.common.appl_id,
+        &order.common.cl_ord_id,
+        &order.common.submitting_pbu_id,
+        &order.common.security_id,
+        &order.common.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
     ctx.stats.orders.fetch_add(1, Ordering::Relaxed);
     // 日志里把协议的放大整数还原成人类可读的值：价格÷10000，数量÷100
     ctx.log(
@@ -569,6 +655,23 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
             return;
         }
     };
+    // 平台校验：撤单请求的 ApplID 属于当前平台才受理；空 ApplID 无法判断
+    // 所属平台，放行由订单缓存兜底。不符回 20108 业务拒绝（参照 tgw_error.csv）
+    if !req.appl_id.trim().is_empty()
+        && !reject_platform(
+            ctx,
+            tx,
+            msg_type::ORDER_CANCEL_REQUEST,
+            &req.appl_id,
+            &req.cl_ord_id,
+            &req.submitting_pbu_id,
+            &req.security_id,
+            &req.security_id_source,
+        )
+        .await
+    {
+        return;
+    }
     ctx.stats.cancels.fetch_add(1, Ordering::Relaxed);
 
     // ---- 有订单缓存：先尝试按原单状态撤单 ----
@@ -665,6 +768,858 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
             req.cl_ord_id, req.orig_cl_ord_id
         ),
     );
+}
+
+/// 业务拒绝原因文本（tgw_error.csv 20108：平台非法-委托申报的平台错误，
+/// 例如向现货集中竞价平台申报发行认购业务的委托）。字段宽 50 字节，
+/// 超长部分由编码器按字符边界自动截断。
+const BUSINESS_REJECT_PLATFORM_TEXT: &str =
+    "平台非法-委托申报的平台错误,例如向现货集中竞价平台申报发行认购业务的委托";
+
+/// 平台校验（表 3-1/表 3-3）：申报业务的 ApplID 必须属于当前接入平台。
+///
+/// 返回 true = 平台相符可继续处理；false = 平台不符或 ApplID 未知，已回
+/// 业务拒绝消息（MsgType=4，BusinessRejectReason=20108，文本参照
+/// tgw_error.csv）并计入业务拒绝统计，调用方应放弃处理本条申报。
+///
+/// 各申报消息（新订单/撤单/报价/询价/意向/成交申报/注册/投票/密码服务/
+/// 保证金查询/多腿订单）统一走本函数，避免重复实现。
+async fn reject_platform(
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    mt: u32,
+    appl_id: &str,
+    ref_id: &str,
+    submitting_pbu_id: &str,
+    security_id: &str,
+    security_id_source: &str,
+) -> bool {
+    let ok = strategy::platform_of_appl_id(appl_id) == Some(ctx.cfg.platform_type);
+    if ok {
+        return true;
+    }
+    let rej = BusinessReject {
+        appl_id: appl_id.trim_end().to_string(),
+        transact_time: protocol::now_timestamp(),
+        submitting_pbu_id: submitting_pbu_id.to_string(),
+        security_id: security_id.to_string(),
+        security_id_source: security_id_source.to_string(),
+        ref_seq_num: 0,
+        ref_msg_type: mt,
+        business_reject_ref_id: ref_id.to_string(),
+        business_reject_reason: 20108,
+        business_reject_text: BUSINESS_REJECT_PLATFORM_TEXT.into(),
+    };
+    let _ = tx.send(rej.encode()).await;
+    ctx.stats.business_rejects.fetch_add(1, Ordering::Relaxed);
+    let belong = strategy::platform_of_appl_id(appl_id)
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "未知".into());
+    ctx.log(
+        "warn",
+        format!(
+            "业务拒绝(4) MsgType={} ApplID={} RefID={}：业务属于平台{}，当前接入平台{}（20108 {}",
+            mt,
+            appl_id.trim_end(),
+            ref_id,
+            belong,
+            ctx.cfg.platform_type,
+            BUSINESS_REJECT_PLATFORM_TEXT,
+        ),
+    );
+    false
+}
+
+/// 处理报价（4.6.1）/报价回复（4.6.3）：平台校验后回 4.6.2 报价状态回报。
+///
+/// 报价被接受 → QuoteStatus=0（Accepted）；报价回复被接受也回 2xxx06
+/// （表 4-67 注 1/2：作为报价回复的响应时，重复组取值同报价回复消息）。
+async fn handle_quote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) {
+    if Quote::is_quote(mt) {
+        let q = match Quote::decode(mt, body) {
+            Ok(q) => q,
+            Err(e) => {
+                ctx.log("error", format!("报价({})解析失败: {}", mt, e));
+                return;
+            }
+        };
+        if !reject_platform(
+            ctx,
+            tx,
+            mt,
+            &q.appl_id,
+            &q.quote_msg_id,
+            &q.submitting_pbu_id,
+            &q.security_id,
+            &q.security_id_source,
+        )
+        .await
+        {
+            return;
+        }
+        // 接受报价：报价状态回报回填报价字段，扩展字段照抄请求
+        let rpt = QuoteStatusReport {
+            msg_type: QuoteStatusReport::response_msg_type(mt),
+            partition_no: ctx.cfg.partition_no,
+            report_index: ctx.stats.next_report_index(),
+            appl_id: q.appl_id.clone(),
+            reporting_pbu_id: q.submitting_pbu_id.clone(),
+            submitting_pbu_id: q.submitting_pbu_id.clone(),
+            security_id: q.security_id.clone(),
+            security_id_source: q.security_id_source.clone(),
+            owner_type: q.owner_type,
+            clearing_firm: q.clearing_firm.clone(),
+            transact_time: protocol::now_timestamp(),
+            user_info: q.user_info.clone(),
+            quote_msg_id: q.quote_msg_id.clone(),
+            account_id: q.account_id.clone(),
+            quote_req_id: q.quote_req_id.clone(),
+            quote_status: 0, // Accepted
+            quote_reject_reason: 0,
+            quote_type: q.quote_type,
+            bid_px: q.bid_px,
+            offer_px: q.offer_px,
+            bid_size: q.bid_size,
+            offer_size: q.offer_size,
+            // 扩展字段：订单号/执行号由交易所分配
+            bid_position_effect: q.bid_position_effect,
+            offer_position_effect: q.offer_position_effect,
+            contract_account_code: q.contract_account_code.clone(),
+            branch_id: q.branch_id.clone(),
+            order_id: ctx.stats.next_order_id(),
+            exec_id: ctx.stats.next_exec_id(),
+            quote_resp_id: q.quote_resp_id.clone(),
+            private_quote: q.private_quote,
+            side: 0,
+            price_type: q.price_type,
+            valid_until_time: q.valid_until_time,
+            cash_margin: q.cash_margin,
+            counterparty_pbu_id: q.counterparty_pbu_id.clone(),
+            memo: q.memo.clone(),
+            quote_reject_text: String::new(),
+            member_id: q.member_id.clone(),
+            investor_type: q.investor_type.clone(),
+            investor_id: q.investor_id.clone(),
+            investor_name: q.investor_name.clone(),
+            trader_code: q.trader_code.clone(),
+            settl_type: q.settl_type,
+            settl_period: q.settl_period,
+            pre_trade_anonymity: q.pre_trade_anonymity,
+            max_floor: q.max_floor,
+            min_qty: q.min_qty,
+            no_counterparty: q.no_counterparty,
+            counterparties: q.counterparties.clone(),
+            // 作为报价申报的响应：NoQuote=1、QuoteID 填报价 QuoteID（注 1）
+            no_quote: 1,
+            quotes: vec![QuoteItem {
+                quote_id: q.quote_id.clone(),
+                quote_price: 0,
+                quote_qty: 0,
+            }],
+        };
+        let _ = tx.send(rpt.encode()).await;
+        ctx.log(
+            "info",
+            format!(
+                "收到报价({}) QuoteMsgID={} 证券={} 买价={:.4} 卖价={:.4}，已接受({})",
+                mt,
+                q.quote_msg_id,
+                q.security_id,
+                q.bid_px as f64 / 10000.0,
+                q.offer_px as f64 / 10000.0,
+                rpt.msg_type
+            ),
+        );
+    } else {
+        // 4.6.3 报价回复：回 2xxx06，重复组取值同报价回复消息（注 2）
+        let q = match QuoteResponse::decode(mt, body) {
+            Ok(q) => q,
+            Err(e) => {
+                ctx.log("error", format!("报价回复({})解析失败: {}", mt, e));
+                return;
+            }
+        };
+        if !reject_platform(
+            ctx,
+            tx,
+            mt,
+            &q.appl_id,
+            &q.cl_ord_id,
+            &q.submitting_pbu_id,
+            &q.security_id,
+            &q.security_id_source,
+        )
+        .await
+        {
+            return;
+        }
+        let rpt = QuoteStatusReport {
+            msg_type: QuoteStatusReport::response_msg_type(mt),
+            partition_no: ctx.cfg.partition_no,
+            report_index: ctx.stats.next_report_index(),
+            appl_id: q.appl_id.clone(),
+            reporting_pbu_id: q.submitting_pbu_id.clone(),
+            submitting_pbu_id: q.submitting_pbu_id.clone(),
+            security_id: q.security_id.clone(),
+            security_id_source: q.security_id_source.clone(),
+            owner_type: q.owner_type,
+            clearing_firm: q.clearing_firm.clone(),
+            transact_time: protocol::now_timestamp(),
+            user_info: q.user_info.clone(),
+            quote_msg_id: q.quotes.first().map(|i| i.quote_id.clone()).unwrap_or_default(),
+            account_id: q.account_id.clone(),
+            quote_req_id: String::new(),
+            quote_status: 0, // Accepted
+            quote_reject_reason: 0,
+            quote_type: q.quote_type,
+            bid_px: 0,
+            offer_px: 0,
+            bid_size: 0,
+            offer_size: 0,
+            branch_id: q.branch_id.clone(),
+            order_id: ctx.stats.next_order_id(),
+            exec_id: ctx.stats.next_exec_id(),
+            quote_resp_id: q.quote_resp_id.clone(),
+            private_quote: 0,
+            side: q.side,
+            price_type: q.price_type,
+            valid_until_time: q.valid_until_time,
+            cash_margin: q.cash_margin,
+            memo: String::new(),
+            member_id: q.member_id.clone(),
+            investor_type: q.investor_type.clone(),
+            investor_id: q.investor_id.clone(),
+            investor_name: q.investor_name.clone(),
+            trader_code: q.trader_code.clone(),
+            settl_type: q.settl_type,
+            settl_period: q.settl_period,
+            no_quote: q.no_quote,
+            quotes: q.quotes.clone(),
+            ..Default::default()
+        };
+        let _ = tx.send(rpt.encode()).await;
+        ctx.log(
+            "info",
+            format!(
+                "收到报价回复({}) QuoteRespID={} ClOrdID={} 回复类型={}，已接受({})",
+                mt,
+                q.quote_resp_id,
+                q.cl_ord_id,
+                quote_resp_type_name(q.quote_resp_type),
+                rpt.msg_type
+            ),
+        );
+    }
+}
+
+/// 处理询价请求（4.7.1）：平台校验后回 4.7.2 询价请求响应（已接受）。
+async fn handle_quote_request(
+    mt: u32,
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    body: &[u8],
+) {
+    let q = match QuoteRequest::decode(mt, body) {
+        Ok(q) => q,
+        Err(e) => {
+            ctx.log("error", format!("询价请求({})解析失败: {}", mt, e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &q.appl_id,
+        &q.cl_ord_id,
+        &q.submitting_pbu_id,
+        &q.security_id,
+        &q.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = QuoteRequestAck {
+        msg_type: QuoteRequestAck::response_msg_type(mt),
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: q.appl_id.clone(),
+        reporting_pbu_id: q.submitting_pbu_id.clone(),
+        submitting_pbu_id: q.submitting_pbu_id.clone(),
+        security_id: q.security_id.clone(),
+        security_id_source: q.security_id_source.clone(),
+        owner_type: q.owner_type,
+        clearing_firm: q.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: q.user_info.clone(),
+        order_id: ctx.stats.next_order_id(),
+        exec_id: ctx.stats.next_exec_id(),
+        cl_ord_id: q.cl_ord_id.clone(),
+        account_id: q.account_id.clone(),
+        branch_id: q.branch_id.clone(),
+        quote_req_id: q.quote_req_id.clone(),
+        quote_request_trans_type: q.quote_request_trans_type,
+        quote_request_type: 101, // Submit
+        private_quote: q.private_quote,
+        quote_request_status: 0, // Accepted
+        quote_request_reject_reason: 0,
+        order_qty: q.order_qty,
+        price: q.price,
+        side: q.side,
+        expire_time: q.expire_time,
+        quote_type: q.quote_type,
+        quote_price_type: q.quote_price_type,
+        memo: q.memo.clone(),
+        // 扩展字段照抄请求（响应消息扩展同请求，表 4-79 注 2）
+        cash_margin: q.cash_margin,
+        no_counterparty_pbu: q.no_counterparty_pbu,
+        counterparty_pbus: q.counterparty_pbus.clone(),
+        member_id: q.member_id.clone(),
+        investor_type: q.investor_type.clone(),
+        investor_id: q.investor_id.clone(),
+        investor_name: q.investor_name.clone(),
+        trader_code: q.trader_code.clone(),
+        settl_type: q.settl_type,
+        settl_period: q.settl_period,
+        pre_trade_anonymity: q.pre_trade_anonymity,
+        quote_request_reject_text: String::new(),
+        no_counterparty: q.no_counterparty,
+        counterparties: q.counterparties.clone(),
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到询价请求({}) QuoteReqID={} ClOrdID={} 证券={}，已接受({})",
+            mt, q.quote_req_id, q.cl_ord_id, q.security_id, rpt.msg_type
+        ),
+    );
+}
+
+/// 处理意向申报（4.8.1）：平台校验后回 4.8.2 意向申报响应（已接受）。
+async fn handle_ioi(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) {
+    let q = match IndicationOfInterest::decode(mt, body) {
+        Ok(q) => q,
+        Err(e) => {
+            ctx.log("error", format!("意向申报({})解析失败: {}", mt, e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &q.appl_id,
+        &q.ioi_id,
+        &q.submitting_pbu_id,
+        &q.security_id,
+        &q.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = IOIResponse {
+        msg_type: msg_type::IOI_RESPONSE,
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: q.appl_id.clone(),
+        reporting_pbu_id: q.submitting_pbu_id.clone(),
+        submitting_pbu_id: q.submitting_pbu_id.clone(),
+        security_id: q.security_id.clone(),
+        security_id_source: q.security_id_source.clone(),
+        owner_type: q.owner_type,
+        clearing_firm: q.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: q.user_info.clone(),
+        quote_resp_id: ctx.stats.next_exec_id(), // 交易所意向申报响应编号
+        quote_resp_type: 2,                     // 意向申报响应
+        exec_type: 0,                           // New
+        quote_reject_reason: 0,
+        ioi_id: q.ioi_id.clone(),
+        ioi_ref_id: q.ioi_ref_id.clone(),
+        ioi_trans_type: q.ioi_trans_type,
+        side: q.side,
+        account_id: q.account_id.clone(),
+        branch_id: q.branch_id.clone(),
+        ioi_qty: q.ioi_qty,
+        price: q.price,
+        contactor: q.contactor.clone(),
+        contact_info: q.contact_info.clone(),
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到意向申报({}) IOIID={} 证券={} 方向={}，已接受({})",
+            mt, q.ioi_id, q.security_id, side_name(q.side), rpt.msg_type
+        ),
+    );
+}
+
+/// 处理成交申报（4.9.1，11 种业务）：平台校验后回 4.9.2 成交申报响应（已接受）。
+/// 扩展字段按原始字节原样回写（表 4-100 注 2），保证柜台对得上号。
+async fn handle_tcr(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) {
+    let tcr = match TradeCaptureReport::decode(mt, body) {
+        Ok(t) => t,
+        Err(e) => {
+            ctx.log("error", format!("成交申报({})解析失败: {}", mt, e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &tcr.appl_id,
+        &tcr.trade_report_id,
+        &tcr.submitting_pbu_id,
+        &tcr.security_id,
+        &tcr.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = TcrAck {
+        msg_type: TcrAck::response_msg_type(mt),
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: tcr.appl_id.clone(),
+        reporting_pbu_id: tcr.submitting_pbu_id.clone(),
+        submitting_pbu_id: tcr.submitting_pbu_id.clone(),
+        security_id: tcr.security_id.clone(),
+        security_id_source: tcr.security_id_source.clone(),
+        owner_type: tcr.owner_type,
+        clearing_firm: tcr.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: tcr.user_info.clone(),
+        trade_id: ctx.stats.next_order_id(), // 交易所成交申报编号
+        trade_report_id: tcr.trade_report_id.clone(),
+        trade_report_type: tcr.trade_report_type,
+        trade_report_trans_type: tcr.trade_report_trans_type,
+        trade_handling_instr: tcr.trade_handling_instr,
+        trade_report_ref_id: tcr.trade_report_ref_id.clone(),
+        trd_ack_status: 0,  // Accepted
+        trd_rpt_status: 0,  // 接受
+        trade_report_reject_reason: 0,
+        last_px: tcr.last_px,
+        last_qty: tcr.last_qty,
+        trd_type: tcr.trd_type,
+        trd_sub_type: tcr.trd_sub_type,
+        confirm_id: tcr.confirm_id.clone(),
+        exec_id: ctx.stats.next_exec_id(),
+        side: tcr.side,
+        pbu_id: tcr.pbu_id.clone(),
+        account_id: tcr.account_id.clone(),
+        branch_id: tcr.branch_id.clone(),
+        counterparty_pbu_id: tcr.counterparty_pbu_id.clone(),
+        counterparty_account_id: tcr.counterparty_account_id.clone(),
+        counterparty_branch_id: tcr.counterparty_branch_id.clone(),
+        trade_report_reject_text: String::new(),
+        extend: tcr.extend.clone(), // 扩展字段原样回写
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到成交申报({}) TradeReportID={} 证券={} 价格={:.4} 数量={}，已接受({})",
+            mt,
+            tcr.trade_report_id,
+            tcr.security_id,
+            tcr.last_px as f64 / 10000.0,
+            tcr.last_qty / 100,
+            rpt.msg_type
+        ),
+    );
+}
+
+/// 处理注册（4.10.1，转托管）：平台校验后回 4.10.2 注册执行报告（已接受）。
+async fn handle_designation(
+    mt: u32,
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    body: &[u8],
+) {
+    let d = match Designation::decode(mt, body) {
+        Ok(d) => d,
+        Err(e) => {
+            ctx.log("error", format!("注册(102099)解析失败: {}", e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &d.appl_id,
+        &d.cl_ord_id,
+        &d.submitting_pbu_id,
+        &d.security_id,
+        &d.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = DesignationReport {
+        msg_type: msg_type::DESIGNATION_REPORT,
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: d.appl_id.clone(),
+        reporting_pbu_id: d.submitting_pbu_id.clone(),
+        submitting_pbu_id: d.submitting_pbu_id.clone(),
+        security_id: d.security_id.clone(),
+        security_id_source: d.security_id_source.clone(),
+        owner_type: d.owner_type,
+        clearing_firm: d.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: d.user_info.clone(),
+        order_id: ctx.stats.next_order_id(),
+        cl_ord_id: d.cl_ord_id.clone(),
+        orig_cl_ord_id: d.orig_cl_ord_id.clone(),
+        exec_id: ctx.stats.next_exec_id(),
+        exec_type: 0, // New
+        ord_rej_reason: 0,
+        designation_instruction: d.designation_instruction,
+        designation_trans_type: d.designation_trans_type,
+        account_id: d.account_id.clone(),
+        branch_id: d.branch_id.clone(),
+        order_qty: d.order_qty,
+        transferee_pbu_id: d.transferee_pbu_id.clone(),
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到注册({}) ClOrdID={} 账户={} 转入单元={}，已接受({})",
+            mt, d.cl_ord_id, d.account_id, d.transferee_pbu_id, rpt.msg_type
+        ),
+    );
+}
+
+/// 处理投票（4.11.1）：平台校验后回 4.11.2 投票执行报告（已接受）。
+async fn handle_evote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) {
+    let v = match Evote::decode(mt, body) {
+        Ok(v) => v,
+        Err(e) => {
+            ctx.log("error", format!("投票(102197)解析失败: {}", e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &v.appl_id,
+        &v.cl_ord_id,
+        &v.submitting_pbu_id,
+        &v.security_id,
+        &v.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = EvoteReport {
+        msg_type: msg_type::EVOTE_REPORT,
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: v.appl_id.clone(),
+        reporting_pbu_id: v.submitting_pbu_id.clone(),
+        submitting_pbu_id: v.submitting_pbu_id.clone(),
+        security_id: v.security_id.clone(),
+        security_id_source: v.security_id_source.clone(),
+        owner_type: v.owner_type,
+        clearing_firm: v.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: v.user_info.clone(),
+        order_id: ctx.stats.next_order_id(),
+        cl_ord_id: v.cl_ord_id.clone(),
+        exec_id: ctx.stats.next_exec_id(),
+        exec_type: 0, // New
+        ord_rej_reason: 0,
+        account_id: v.account_id.clone(),
+        branch_id: v.branch_id.clone(),
+        voting_proposal: v.voting_proposal,
+        voting_sub_proposal: v.voting_sub_proposal,
+        voting_preference: v.voting_preference,
+        order_qty: v.order_qty,
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到投票({}) ClOrdID={} 议案={} 意向={}，已接受({})",
+            mt, v.cl_ord_id, v.voting_proposal, v.voting_preference, rpt.msg_type
+        ),
+    );
+}
+
+/// 处理密码服务（4.12.1）：平台校验后回 4.12.2 密码服务执行报告（已接受）。
+async fn handle_password_service(
+    mt: u32,
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    body: &[u8],
+) {
+    let p = match PasswordService::decode(mt, body) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.log("error", format!("密码服务(102489)解析失败: {}", e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &p.appl_id,
+        &p.cl_ord_id,
+        &p.submitting_pbu_id,
+        &p.security_id,
+        &p.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = PasswordServiceReport {
+        msg_type: msg_type::PASSWORD_SERVICE_REPORT,
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: p.appl_id.clone(),
+        reporting_pbu_id: p.submitting_pbu_id.clone(),
+        submitting_pbu_id: p.submitting_pbu_id.clone(),
+        security_id: p.security_id.clone(),
+        security_id_source: p.security_id_source.clone(),
+        owner_type: p.owner_type,
+        clearing_firm: p.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: p.user_info.clone(),
+        order_id: ctx.stats.next_order_id(),
+        cl_ord_id: p.cl_ord_id.clone(),
+        exec_id: ctx.stats.next_exec_id(),
+        exec_type: 0, // New
+        ord_rej_reason: 0,
+        account_id: p.account_id.clone(),
+        branch_id: p.branch_id.clone(),
+        validation_code: p.validation_code,
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到密码服务({}) ClOrdID={} 账户={}，已接受({})",
+            mt, p.cl_ord_id, p.account_id, rpt.msg_type
+        ),
+    );
+}
+
+/// 处理保证金查询（4.13.1）：平台校验后回 4.13.2 保证金查询结果。
+/// 模拟器不保存真实资金，按“查询成功”回 4 条金额为 0 的保证金条目
+/// （表 4-122 注 1：1=可用余额 2=总金额 3/4=预留）。
+async fn handle_margin_query(
+    mt: u32,
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    body: &[u8],
+) {
+    let m = match MarginQuery::decode(mt, body) {
+        Ok(m) => m,
+        Err(e) => {
+            ctx.log("error", format!("保证金查询(102587)解析失败: {}", e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &m.appl_id,
+        &m.cl_ord_id,
+        &m.submitting_pbu_id,
+        &m.security_id,
+        &m.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = MarginQueryResult {
+        msg_type: msg_type::MARGIN_QUERY_RESULT,
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: m.appl_id.clone(),
+        reporting_pbu_id: m.submitting_pbu_id.clone(),
+        submitting_pbu_id: m.submitting_pbu_id.clone(),
+        security_id: m.security_id.clone(),
+        security_id_source: m.security_id_source.clone(),
+        owner_type: m.owner_type,
+        clearing_firm: m.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: m.user_info.clone(),
+        cl_ord_id: m.cl_ord_id.clone(),
+        exec_id: ctx.stats.next_exec_id(),
+        exec_type: 0, // New
+        ord_rej_reason: 0,
+        fund_pbu_id: m.fund_pbu_id.clone(),
+        no_margin_items: 4,
+        margin_items: vec![(1, 0), (2, 0), (3, 0), (4, 0)],
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到保证金查询({}) ClOrdID={} 结算账号={}，已回查询结果({})",
+            mt, m.cl_ord_id, m.fund_pbu_id, rpt.msg_type
+        ),
+    );
+}
+
+/// 处理多腿订单（4.14.1，期权行权合并/组合策略）：平台校验后回
+/// 4.14.2 多腿订单响应执行报告（已接受，扩展字段同多腿订单）。
+async fn handle_multileg(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) {
+    let o = match MultilegOrder::decode(mt, body) {
+        Ok(o) => o,
+        Err(e) => {
+            ctx.log("error", format!("多腿订单({})解析失败: {}", mt, e));
+            return;
+        }
+    };
+    if !reject_platform(
+        ctx,
+        tx,
+        mt,
+        &o.common.appl_id,
+        &o.common.cl_ord_id,
+        &o.common.submitting_pbu_id,
+        &o.common.security_id,
+        &o.common.security_id_source,
+    )
+    .await
+    {
+        return;
+    }
+    let rpt = MultilegExecRpt {
+        msg_type: MultilegExecRpt::response_msg_type(mt),
+        partition_no: ctx.cfg.partition_no,
+        report_index: ctx.stats.next_report_index(),
+        appl_id: o.common.appl_id.clone(),
+        reporting_pbu_id: o.common.submitting_pbu_id.clone(),
+        submitting_pbu_id: o.common.submitting_pbu_id.clone(),
+        security_id: o.common.security_id.clone(),
+        security_id_source: o.common.security_id_source.clone(),
+        owner_type: o.common.owner_type,
+        clearing_firm: o.common.clearing_firm.clone(),
+        transact_time: protocol::now_timestamp(),
+        user_info: o.common.user_info.clone(),
+        order_id: ctx.stats.next_order_id(),
+        cl_ord_id: o.common.cl_ord_id.clone(),
+        orig_cl_ord_id: String::new(),
+        exec_id: ctx.stats.next_exec_id(),
+        exec_type: exec_type::NEW,
+        ord_status: ord_status::NEW,
+        ord_rej_reason: 0,
+        leaves_qty: o.common.order_qty,
+        cum_qty: 0,
+        side: o.common.side,
+        ord_type: o.common.ord_type,
+        order_qty: o.common.order_qty,
+        price: o.common.price,
+        account_id: o.common.account_id.clone(),
+        branch_id: o.common.branch_id.clone(),
+        order_restrictions: o.common.order_restrictions.clone(),
+        // 扩展字段同多腿订单扩展字段（表 4-126 注 2）
+        contract_account_code: o.contract_account_code.clone(),
+        secondary_order_id: o.secondary_order_id.clone(),
+        security_type: o.security_type.clone(),
+        security_sub_type: o.security_sub_type.clone(),
+        no_legs: o.no_legs,
+        legs: o.legs.clone(),
+    };
+    let _ = tx.send(rpt.encode()).await;
+    ctx.log(
+        "info",
+        format!(
+            "收到多腿订单({}) ClOrdID={} 合约数={}，已接受({})",
+            mt, o.common.cl_ord_id, o.no_legs, rpt.msg_type
+        ),
+    );
+}
+
+/// 报价回复类型的中文名（日志用）：1=Hit/Lift 2=Counter 6=Pass
+fn quote_resp_type_name(t: u8) -> &'static str {
+    match t {
+        1 => "接受",
+        2 => "重报",
+        6 => "拒绝",
+        _ => "未知",
+    }
+}
+
+/// 5.6 交易会话状态消息（仅固定收益交易平台）：按当前时刻推断交易会话
+/// 子 ID（表 5-7 注 1 的 13 个时间段），起始/结束时间填对应段落的当日
+/// 时间戳（YYYYMMDDHHMMSSsss），登录后由主循环下发。
+fn encode_session_status() -> Vec<u8> {
+    let now = chrono::Local::now();
+    let sub = trading_session_sub_id(now);
+    TradingSessionStatus {
+        msg_type: msg_type::TRADING_SESSION_STATUS,
+        market_id: String::new(),
+        market_segment_id: "6".into(),
+        trading_session_id: String::new(),
+        trading_session_sub_id: sub.into(),
+        trad_ses_status: 0,
+        trad_ses_start_time: session_time_range(now, sub).0,
+        trad_ses_end_time: session_time_range(now, sub).1,
+    }
+    .encode()
+}
+
+/// 按当前时刻推断固定收益平台的交易会话子 ID（表 5-7 注 1）
+fn trading_session_sub_id(now: chrono::DateTime<chrono::Local>) -> &'static str {
+    let hm = now.format("%H%M").to_string().parse::<u32>().unwrap_or(9999);
+    match hm {
+        0..=859 => "0",          // 开市前 0:00-9:00
+        900..=914 => "100",      // 匹配成交前交易 9:00-9:15
+        915..=919 => "130",      // 开盘集合竞价（可撤单）9:15-9:20
+        920..=924 => "150",      // 开盘集合竞价（不可撤单）9:20-9:25
+        925..=929 => "170",      // 匹配成交暂停 9:25-9:30
+        930..=959 => "200",      // 上午交易 9:30-10:00
+        1000..=1129 => "230",    // 上午交易（竞买应价）10:00-11:30
+        1130..=1259 => "300",    // 中午休市 11:30-13:00
+        1300..=1329 => "400",    // 下午交易（不可互联）13:00-13:30
+        1330..=1459 => "430",    // 下午交易 13:30-15:00
+        1500..=1526 => "450",    // 下午交易（分销后）15:00-15:27
+        1527..=1529 => "480",    // 收盘连续竞价 15:27-15:30
+        _ => "600",              // 收市后 15:30-24:00
+    }
+}
+
+/// 交易会话子 ID 对应的时间段起止（当日时间戳，YYYYMMDDHHMMSSsss）
+fn session_time_range(now: chrono::DateTime<chrono::Local>, sub: &str) -> (i64, i64) {
+    let date = now.format("%Y%m%d").to_string();
+    let (sh, sm, eh, em, es) = match sub {
+        "0" => (0, 0, 9, 0, 0),
+        "100" => (9, 0, 9, 15, 0),
+        "130" => (9, 15, 9, 20, 0),
+        "150" => (9, 20, 9, 25, 0),
+        "170" => (9, 25, 9, 30, 0),
+        "200" => (9, 30, 10, 0, 0),
+        "230" => (10, 0, 11, 30, 0),
+        "300" => (11, 30, 13, 0, 0),
+        "400" => (13, 0, 13, 30, 0),
+        "430" => (13, 30, 15, 0, 0),
+        "450" => (15, 0, 15, 27, 0),
+        "480" => (15, 27, 15, 30, 0),
+        _ => (15, 30, 23, 59, 999),
+    };
+    let start: i64 = format!("{}{:02}{:02}00000", date, sh, sm).parse().unwrap_or(0);
+    // YYYYMMDDHHMMSSsss（秒 00 + 毫秒），与 start 位数一致（17 位）
+    let end: i64 = format!("{}{:02}{:02}00{:03}", date, eh, em, es).parse().unwrap_or(0);
+    (start, end)
 }
 
 /// 手动回复的回报种类（界面在途单上选择“成交/拒单/撤单成功”时指定）。

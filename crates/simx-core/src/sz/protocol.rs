@@ -218,6 +218,178 @@ pub mod msg_type {
     pub const EXEC_RPT_BOND_BID_TRADE: u32 = 204_130;
     /// 表 4-53 港股通成交执行报告（206315，ApplID=630，无扩展字段）
     pub const EXEC_RPT_HK_TRADE: u32 = 206_315;
+
+    // ---- 5.6 交易会话状态（MsgType=10，仅固定收益平台）----
+    /// 交易会话状态（5.6）
+    pub const TRADING_SESSION_STATUS: u32 = 10;
+
+    // ---- 4.6.1 报价（Quote，MsgType = 1xxx05）----
+    /// 4.6.1.1 期权集中竞价交易业务报价（100405，ApplID=041）
+    pub const QUOTE_OPTION: u32 = 100_405;
+    /// 4.6.1.2 协议交易业务报价（100505，ApplID=056）
+    pub const QUOTE_AGREEMENT: u32 = 100_505;
+    /// 4.6.1.3 债券现券交易业务报价（104105，ApplID=412/415）
+    pub const QUOTE_BOND: u32 = 104_105;
+
+    // ---- 4.6.2 报价状态回报（Quote Status Report，MsgType = 2xxx06）----
+    /// 4.6.2.1 期权集中竞价交易业务报价状态回报（200406，ApplID=041）
+    pub const QUOTE_STATUS_OPTION: u32 = 200_406;
+    /// 4.6.2.2 协议交易业务报价状态回报（200506，ApplID=056 报价 / 057 报价回复）
+    pub const QUOTE_STATUS_AGREEMENT: u32 = 200_506;
+    /// 4.6.2.3 债券现券交易业务报价状态回报（204106，ApplID=412/413/415/416）
+    pub const QUOTE_STATUS_BOND: u32 = 204_106;
+
+    // ---- 4.6.3 报价回复（Quote Response，MsgType = 1xxx10）----
+    /// 4.6.3.1 协议交易业务报价回复（100510，ApplID=057）
+    pub const QUOTE_RESPONSE_AGREEMENT: u32 = 100_510;
+    /// 4.6.3.2 债券现券交易业务报价回复（104110，ApplID=413/416）
+    pub const QUOTE_RESPONSE_BOND: u32 = 104_110;
+
+    // ---- 4.6.4 转发报价（Allege Quote，MsgType = 2xxx26）----
+    /// 4.6.4.1 协议交易转发报价（200526，ApplID=056）
+    pub const ALLEGE_QUOTE_AGREEMENT: u32 = 200_526;
+    /// 4.6.4.2 债券现券交易转发报价（204126，ApplID=412/415）
+    pub const ALLEGE_QUOTE_BOND: u32 = 204_126;
+
+    // ---- 4.6.5 转发报价回复（Allege Quote Response，MsgType = 2xxx27）----
+    /// 4.6.5 转发报价回复（200527，ApplID=056/057；文档未列业务对应表，按 2xxx26 规律推断）
+    pub const ALLEGE_QUOTE_RESPONSE_AGREEMENT: u32 = 200_527;
+    /// 4.6.5 转发报价回复（204127，ApplID=412/413/415/416；推断同上）
+    pub const ALLEGE_QUOTE_RESPONSE_BOND: u32 = 204_127;
+
+    // ---- 4.7.1 询价请求（Quote Request，MsgType = 1xxx17）----
+    /// 4.7.1.1 协议交易业务询价请求（100517，ApplID=055）
+    pub const QUOTE_REQUEST_AGREEMENT: u32 = 100_517;
+    /// 4.7.1.2 债券现券交易业务询价请求（104117，ApplID=414）
+    pub const QUOTE_REQUEST_BOND: u32 = 104_117;
+
+    // ---- 4.7.2 询价请求响应（Quote Request Ack，MsgType = 2xxx17）----
+    /// 4.7.2 协议交易业务询价请求响应（200517，ApplID=055）
+    pub const QUOTE_REQUEST_ACK_AGREEMENT: u32 = 200_517;
+    /// 4.7.2 债券现券交易业务询价请求响应（204117，ApplID=414）
+    pub const QUOTE_REQUEST_ACK_BOND: u32 = 204_117;
+
+    // ---- 4.7.3 转发询价请求（Allege Quote Request，MsgType = 2xxx25）----
+    /// 4.7.3.1 协议交易转发询价请求（200525，ApplID=055）
+    pub const ALLEGE_QUOTE_REQUEST_AGREEMENT: u32 = 200_525;
+    /// 4.7.3.2 债券现券交易转发询价请求（204125，ApplID=414）
+    pub const ALLEGE_QUOTE_REQUEST_BOND: u32 = 204_125;
+
+    // ---- 4.8 意向申报（IOI，MsgType = 1xxx09 / 2xxx10）----
+    /// 4.8.1 协议交易意向申报（100509，ApplID=050）
+    pub const IOI: u32 = 100_509;
+    /// 4.8.2 协议交易意向申报响应（200510，ApplID=050）
+    pub const IOI_RESPONSE: u32 = 200_510;
+
+    // ---- 4.9.1 成交申报（Trade Capture Report，MsgType = 1xxx03）----
+    /// 4.9.1.1 协议交易双方协议成交申报（100503，ApplID=053）
+    pub const TCR_AGREEMENT: u32 = 100_503;
+    /// 4.9.1.2 转融通证券出借约定申报（100703，ApplID=071）
+    pub const TCR_SEC_LENDING: u32 = 100_703;
+    /// 4.9.1.3 资产管理计划份额转让（100803，ApplID=080）
+    pub const TCR_AM_PLAN: u32 = 100_803;
+    /// 4.9.1.4 股票质押式回购（100903，ApplID=090）
+    pub const TCR_STOCK_PLEDGE: u32 = 100_903;
+    /// 4.9.1.5 约定购回（101003，ApplID=100）
+    pub const TCR_AGREED_BUYBACK: u32 = 101_003;
+    /// 4.9.1.6 质押式报价回购（101103，ApplID=110）
+    pub const TCR_QUOTED_REPO: u32 = 101_103;
+    /// 4.9.1.7 债券质押式协议回购（103003，ApplID=300）
+    pub const TCR_BOND_AGREEMENT_REPO: u32 = 103_003;
+    /// 4.9.1.8 债券质押式三方回购交易（103203，ApplID=320）
+    pub const TCR_BOND_3P_REPO: u32 = 103_203;
+    /// 4.9.1.9 债券现券交易协商成交申报（104103，ApplID=411/419/41A）
+    pub const TCR_BOND_CASH: u32 = 104_103;
+    /// 4.9.1.10 债券转让业务回售转售（104303，ApplID=430）
+    pub const TCR_BOND_TRANSFER: u32 = 104_303;
+    /// 4.9.1.11 债券借贷（104203，ApplID=420）
+    pub const TCR_BOND_LENDING: u32 = 104_203;
+
+    // ---- 4.9.2 成交申报响应（Trade Capture Report Ack，MsgType = 2xxx04）----
+    /// 4.9.2 协议交易双方协议成交申报响应（200504，ApplID=053）
+    pub const TCR_ACK_AGREEMENT: u32 = 200_504;
+    /// 4.9.2 转融通证券出借约定申报响应（200704，ApplID=071）
+    pub const TCR_ACK_SEC_LENDING: u32 = 200_704;
+    /// 4.9.2 资产管理计划份额转让成交申报响应（200804，ApplID=080）
+    pub const TCR_ACK_AM_PLAN: u32 = 200_804;
+    /// 4.9.2 股票质押式回购成交申报响应（200904，ApplID=090）
+    pub const TCR_ACK_STOCK_PLEDGE: u32 = 200_904;
+    /// 4.9.2 约定购回成交申报响应（201004，ApplID=100）
+    pub const TCR_ACK_AGREED_BUYBACK: u32 = 201_004;
+    /// 4.9.2 质押式报价回购成交申报响应（201104，ApplID=110）
+    pub const TCR_ACK_QUOTED_REPO: u32 = 201_104;
+    /// 4.9.2 债券质押式协议回购成交申报响应（203004，ApplID=300）
+    pub const TCR_ACK_BOND_AGREEMENT_REPO: u32 = 203_004;
+    /// 4.9.2 债券质押式三方回购交易成交申报响应（203204，ApplID=320）
+    pub const TCR_ACK_BOND_3P_REPO: u32 = 203_204;
+    /// 4.9.2 债券现券交易协商成交申报响应（204104，ApplID=411/419/41A）
+    pub const TCR_ACK_BOND_CASH: u32 = 204_104;
+    /// 4.9.2 债券借贷成交申报响应（204204，ApplID=420）
+    pub const TCR_ACK_BOND_LENDING: u32 = 204_204;
+    /// 4.9.2 债券转让业务回售转售成交申报响应（204304，ApplID=430）
+    pub const TCR_ACK_BOND_TRANSFER: u32 = 204_304;
+
+    // ---- 4.9.3 转发成交申报（MsgType = 2xxx20）----
+    /// 4.9.3.1 债券质押式协议回购转发成交申报（203020，ApplID=300）
+    pub const ALLEGE_TCR_BOND_AGREEMENT_REPO: u32 = 203_020;
+    /// 4.9.3.1 债券质押式三方回购转发成交申报（203220，ApplID=320）
+    pub const ALLEGE_TCR_BOND_3P_REPO: u32 = 203_220;
+    /// 4.9.3.3 债券现券交易转发成交申报（204120，ApplID=411/419/41A）
+    pub const ALLEGE_TCR_BOND_CASH: u32 = 204_120;
+    /// 4.9.3.4 债券转让业务转发成交申报（204320，ApplID=430）
+    pub const ALLEGE_TCR_BOND_TRANSFER: u32 = 204_320;
+    /// 4.9.3.5 债券借贷转发成交申报（204220，ApplID=420）
+    pub const ALLEGE_TCR_BOND_LENDING: u32 = 204_220;
+
+    // ---- 4.9.4 成交确认（MsgType = 2xxx03）----
+    /// 4.9.4.1 协议交易双方协议成交申报确认（200503，ApplID=053）
+    pub const TCR_CONFIRM_AGREEMENT: u32 = 200_503;
+    /// 4.9.4.2 转融通证券出借约定申报确认（200703，ApplID=071）
+    pub const TCR_CONFIRM_SEC_LENDING: u32 = 200_703;
+    /// 4.9.4.3 债券质押式协议回购成交申报确认（203003，ApplID=300）
+    pub const TCR_CONFIRM_BOND_AGREEMENT_REPO: u32 = 203_003;
+    /// 4.9.4.4 债券质押式三方回购交易成交申报确认（203203，ApplID=320）
+    pub const TCR_CONFIRM_BOND_3P_REPO: u32 = 203_203;
+    /// 4.9.4.5 债券现券交易协商成交申报确认（204103，ApplID=411/419/41A）
+    pub const TCR_CONFIRM_BOND_CASH: u32 = 204_103;
+    /// 4.9.4.6 债券转让业务回售转售成交申报确认（204303，ApplID=430）
+    pub const TCR_CONFIRM_BOND_TRANSFER: u32 = 204_303;
+    /// 4.9.4.7 债券借贷成交申报确认（204203，ApplID=420）
+    pub const TCR_CONFIRM_BOND_LENDING: u32 = 204_203;
+
+    // ---- 4.10 转托管（注册，MsgType = 102099 / 202098，ApplID=200）----
+    /// 4.10.1 注册（102099，ApplID=200 转托管）
+    pub const DESIGNATION: u32 = 102_099;
+    /// 4.10.2 注册执行报告（202098，ApplID=200）
+    pub const DESIGNATION_REPORT: u32 = 202_098;
+
+    // ---- 4.11 网络投票（MsgType = 102197 / 202196，ApplID=210）----
+    /// 4.11.1 投票（102197，ApplID=210）
+    pub const EVOTE: u32 = 102_197;
+    /// 4.11.2 投票执行报告（202196，ApplID=210）
+    pub const EVOTE_REPORT: u32 = 202_196;
+
+    // ---- 4.12 密码服务（MsgType = 102489 / 202488，ApplID=240/241）----
+    /// 4.12.1 密码服务（102489，ApplID=240 激活 / 241 挂失或重置）
+    pub const PASSWORD_SERVICE: u32 = 102_489;
+    /// 4.12.2 密码服务执行报告（202488，ApplID=240/241）
+    pub const PASSWORD_SERVICE_REPORT: u32 = 202_488;
+
+    // ---- 4.13 保证金查询（MsgType = 102587 / 202586，ApplID=250）----
+    /// 4.13.1 保证金查询（102587，ApplID=250）
+    pub const MARGIN_QUERY: u32 = 102_587;
+    /// 4.13.2 保证金查询结果（202586，ApplID=250）
+    pub const MARGIN_QUERY_RESULT: u32 = 202_586;
+
+    // ---- 4.14 多腿订单（MsgType = 1xxx21 / 2xxx22 / 2xxx23）----
+    /// 4.14.1.1 期权行权指令合并申报多腿订单（101621，ApplID=161）
+    pub const NEW_ORDER_MULTILEG_EXERCISE: u32 = 101_621;
+    /// 4.14.1.2 期权组合策略保证金构建/解除组合申报多腿订单（103421，ApplID=340/341）
+    pub const NEW_ORDER_MULTILEG_STRATEGY: u32 = 103_421;
+    /// 4.14.2 期权行权指令合并申报执行报告（201622，ApplID=161）
+    pub const MULTILEG_EXEC_RPT_EXERCISE: u32 = 201_622;
+    /// 4.14.2 期权组合策略保证金构建/解除组合执行报告（203422，ApplID=340/341）
+    pub const MULTILEG_EXEC_RPT_STRATEGY: u32 = 203_422;
 }
 
 /// 执行类型 ExecType 取值（回报消息里表示“这条回报是什么事件”）。
@@ -316,6 +488,11 @@ impl BodyWriter {
     pub fn i64(&mut self, v: i64) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+
+    /// 写入原始字节（各业务扩展字段原样回写用）
+    pub fn raw(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
 }
 
 impl Default for BodyWriter {
@@ -373,6 +550,12 @@ impl<'a> BodyReader<'a> {
 
     pub fn i64(&mut self) -> io::Result<i64> {
         Ok(i64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    /// 读取剩余全部字节的原始拷贝（各业务扩展字段按字节保存用）
+    pub fn take_rest(&mut self) -> io::Result<Vec<u8>> {
+        let s = self.take(self.remaining())?;
+        Ok(s.to_vec())
     }
 }
 
@@ -1840,6 +2023,3034 @@ impl ExecRptTrade {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 4.6 ~ 4.14 其它业务消息（报价/询价/意向/成交申报/转托管/投票/密码/保证金/多腿）
+// ---------------------------------------------------------------------------
+
+/// 债券现券类业务报文中的“对手方信息”重复组（表 4-66/4-70/4-78/4-80 等）。
+/// 每行记录一个对手方的交易商/主体类型/主体代码/客户名称/交易员信息。
+#[derive(Debug, Clone, Default)]
+pub struct CounterpartyInfo {
+    pub member_id: String,       // char[6] 对手方交易商代码
+    pub investor_type: String,   // char[2] 对手方交易主体类型
+    pub investor_id: String,     // char[10] 对手方交易主体代码
+    pub investor_name: String,   // char[120] 对手方客户名称
+    pub trader_code: String,     // char[8] 对手方交易员代码
+}
+
+impl CounterpartyInfo {
+    /// 单条记录字节长度（6+2+10+120+8 = 146）
+    pub const REC_LEN: usize = 146;
+
+    pub fn decode_from(r: &mut BodyReader) -> io::Result<Self> {
+        Ok(Self {
+            member_id: r.str(6)?,
+            investor_type: r.str(2)?,
+            investor_id: r.str(10)?,
+            investor_name: r.str(120)?,
+            trader_code: r.str(8)?,
+        })
+    }
+
+    pub fn encode_to(&self, w: &mut BodyWriter) {
+        w.str(&self.member_id, 6);
+        w.str(&self.investor_type, 2);
+        w.str(&self.investor_id, 10);
+        w.str(&self.investor_name, 120);
+        w.str(&self.trader_code, 8);
+    }
+}
+
+/// 报价类报文中的“报价明细”重复组（表 4-69/4-70/4-71 等）。
+/// 每行记录一个报价消息的编号/价格/数量。
+#[derive(Debug, Clone, Default)]
+pub struct QuoteItem {
+    pub quote_id: String, // char[10] 报价消息编号
+    pub quote_price: i64, // Price 报价价格
+    pub quote_qty: i64,   // Qty 报价数量
+}
+
+impl QuoteItem {
+    /// 单条记录字节长度（10+8+8 = 26）
+    pub const REC_LEN: usize = 26;
+
+    pub fn decode_from(r: &mut BodyReader) -> io::Result<Self> {
+        Ok(Self {
+            quote_id: r.str(10)?,
+            quote_price: r.i64()?,
+            quote_qty: r.i64()?,
+        })
+    }
+
+    pub fn encode_to(&self, w: &mut BodyWriter) {
+        w.str(&self.quote_id, 10);
+        w.i64(self.quote_price);
+        w.i64(self.quote_qty);
+    }
+}
+
+/// 报价（4.6.1，MsgType=1xxx05，OMS→TGW）。
+/// 公共字段（表 4-63）16 个 + 各业务扩展字段（4.6.1.1~4.6.1.3）。
+///
+/// 报价方式（注 2）：双边报价 BidSize/OfferSize 均>0；买报价 BidSize>0 且
+/// OfferSize=0；卖报价 BidSize=0 且 OfferSize>0；撤销报价两者均=0。
+#[derive(Debug, Clone, Default)]
+pub struct Quote {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码
+    pub security_id_source: String, // char[4] 证券代码源（102=深交所）
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub quote_msg_id: String,       // char[10] 客户报价消息编号
+    pub account_id: String,         // char[12] 证券账户
+    pub quote_req_id: String,       // char[10] 询价请求编号（响应询价时填转发询价请求的 QuoteReqID）
+    pub quote_type: u8,             // 报价类型（1=可交易的报价）
+    pub bid_px: i64,                // Price 买报价
+    pub offer_px: i64,              // Price 卖报价
+    pub bid_size: i64,              // Qty 买数量
+    pub offer_size: i64,            // Qty 卖数量
+    // ---- 扩展字段（超集，仅本业务相关字段有值）----
+    // 4.6.1.1 期权集中竞价（100405）
+    pub bid_position_effect: u8,      // 买平仓标识（'O' 开仓 / 'C' 平仓）
+    pub offer_position_effect: u8,    // 卖平仓标识
+    pub contract_account_code: String, // char[6] 合约账户标识码
+    // 4.6.1.2 协议交易（100505）/ 4.6.1.3 债券现券（104105）
+    pub branch_id: String,            // char[4] 营业部代码
+    pub quote_id: String,             // char[10] 报价消息编号（撤单时填被撤报价的 QuoteID）
+    pub quote_resp_id: String,        // char[16] 报价回复消息编号
+    pub private_quote: u8,            // 私有报价（0=私有 1=公开）
+    pub valid_until_time: i64,        // 报价有效时间（预留）
+    pub price_type: u8,               // 价格类型（预留；1=百分比 2=每交易单位）
+    pub cash_margin: u8,              // 信用标识（1=Cash 2=Open 3=Close）
+    pub counterparty_pbu_id: String,  // char[6] 对手方交易单元（仅 100505）
+    pub memo: String,                 // char[160] 备注
+    // 4.6.1.3 债券现券（104105）独有
+    pub member_id: String,            // char[6] 本方交易商代码
+    pub investor_type: String,        // char[2] 本方交易主体类型
+    pub investor_id: String,          // char[10] 本方交易主体代码
+    pub investor_name: String,        // char[120] 本方客户名称
+    pub trader_code: String,          // char[8] 本方交易员代码
+    pub settl_type: u16,              // 结算方式
+    pub settl_period: u8,             // 结算周期
+    pub pre_trade_anonymity: u8,      // 是否匿名（0=显名 1=匿名）
+    pub max_floor: i64,               // Qty 可显示数量（预留）
+    pub min_qty: i64,                 // Qty 最低成交数量
+    pub no_counterparty: u32,         // 对手方个数
+    pub counterparties: Vec<CounterpartyInfo>, // 对手方明细（重复组）
+}
+
+impl Quote {
+    /// 是否 4.6.1 报价消息类型（主循环分发用）
+    pub fn is_quote(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::QUOTE_OPTION | msg_type::QUOTE_AGREEMENT | msg_type::QUOTE_BOND
+        )
+    }
+
+    /// 按消息类型解码一笔报价：先读公共字段，再按业务分派扩展字段
+    /// （与 NewOrder::decode 一致，扩展字段容忍缺失）。
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = Quote {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            quote_msg_id: r.str(10)?,
+            account_id: r.str(12)?,
+            quote_req_id: r.str(10)?,
+            quote_type: r.ch()?,
+            bid_px: r.i64()?,
+            offer_px: r.i64()?,
+            bid_size: r.i64()?,
+            offer_size: r.i64()?,
+            ..Default::default()
+        };
+        match mt {
+            // 4.6.1.1 期权集中竞价（100405）表 4-64：BidPositionEffect/OfferPositionEffect/ContractAccountCode
+            msg_type::QUOTE_OPTION => {
+                if r.remaining() >= 8 {
+                    q.bid_position_effect = r.ch()?;
+                    q.offer_position_effect = r.ch()?;
+                    q.contract_account_code = r.str(6)?;
+                }
+            }
+            // 4.6.1.2 协议交易（100505）表 4-65：
+            // BranchID/QuoteID/QuoteRespID/PrivateQuote/ValidUntilTime/PriceType/CashMargin/CounterpartyPBUID/Memo
+            msg_type::QUOTE_AGREEMENT => {
+                if r.remaining() >= 207 {
+                    q.branch_id = r.str(4)?;
+                    q.quote_id = r.str(10)?;
+                    q.quote_resp_id = r.str(16)?;
+                    q.private_quote = r.ch()?;
+                    q.valid_until_time = r.i64()?;
+                    q.price_type = r.ch()?;
+                    q.cash_margin = r.ch()?;
+                    q.counterparty_pbu_id = r.str(6)?;
+                    q.memo = r.str(160)?;
+                }
+            }
+            // 4.6.1.3 债券现券（104105）表 4-66：
+            // BranchID/QuoteID/QuoteRespID/PrivateQuote/ValidUntilTime/PriceType/CashMargin/
+            // MemberID/InvestorType/InvestorID/InvestorName/TraderCode/SettlType/SettlPeriod/
+            // PreTradeAnonymity/MaxFloor/MinQty/Memo/NoCounterparty+重复组
+            msg_type::QUOTE_BOND => {
+                if r.remaining() >= 371 {
+                    q.branch_id = r.str(4)?;
+                    q.quote_id = r.str(10)?;
+                    q.quote_resp_id = r.str(16)?;
+                    q.private_quote = r.ch()?;
+                    q.valid_until_time = r.i64()?;
+                    q.price_type = r.ch()?;
+                    q.cash_margin = r.ch()?;
+                    q.member_id = r.str(6)?;
+                    q.investor_type = r.str(2)?;
+                    q.investor_id = r.str(10)?;
+                    q.investor_name = r.str(120)?;
+                    q.trader_code = r.str(8)?;
+                    q.settl_type = r.u16()?;
+                    q.settl_period = r.ch()?;
+                    q.pre_trade_anonymity = r.ch()?;
+                    q.max_floor = r.i64()?;
+                    q.min_qty = r.i64()?;
+                    q.memo = r.str(160)?;
+                    q.no_counterparty = r.u32()?;
+                    for _ in 0..q.no_counterparty {
+                        q.counterparties.push(CounterpartyInfo::decode_from(&mut r)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+/// 报价状态回报（4.6.2，MsgType=2xxx06，TGW→OMS）。
+/// 公共字段（表 4-67）21 个 + 各业务扩展字段（4.6.2.1~4.6.2.3）。
+///
+/// 注 1/2：作为报价消息（056/412/415）的响应时 NoQuote=1 且 QuotePrice/QuoteQty=0；
+/// 作为报价回复消息（057/413/416）的响应时重复组取值同报价回复消息。
+#[derive(Debug, Clone, Default)]
+pub struct QuoteStatusReport {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3] 应用标识
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码
+    pub transact_time: i64,         // 回报时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub quote_msg_id: String,       // char[10] 客户报价消息编号
+    pub account_id: String,         // char[12] 证券账户
+    pub quote_req_id: String,       // char[10] 询价请求编号
+    pub quote_status: u8,           // 0=Accepted 4=Cancelled 5=Rejected 7=Expired
+    pub quote_reject_reason: u16,   // 拒绝原因代码
+    pub quote_type: u8,             // 报价类型
+    pub bid_px: i64,                // 买报价
+    pub offer_px: i64,              // 卖报价
+    pub bid_size: i64,              // 买数量
+    pub offer_size: i64,            // 卖数量
+    // ---- 扩展字段（超集）----
+    // 4.6.2.1 期权（200406）
+    pub bid_position_effect: u8,
+    pub offer_position_effect: u8,
+    pub contract_account_code: String,
+    // 4.6.2.2 协议（200506）
+    pub branch_id: String,            // char[4] 营业部代码
+    pub order_id: String,             // char[16] 交易所订单编号
+    pub exec_id: String,              // char[16] 执行编号
+    pub quote_resp_id: String,        // char[16] 报价回复消息编号
+    pub private_quote: u8,
+    pub side: u8,                     // 方向（报价回复响应时填）
+    pub price_type: u8,
+    pub valid_until_time: i64,
+    pub cash_margin: u8,
+    pub counterparty_pbu_id: String,
+    pub memo: String,
+    // 4.6.2.3 债券（204106）独有
+    pub quote_reject_text: String,    // char[50] 拒绝原因说明
+    pub member_id: String,
+    pub investor_type: String,
+    pub investor_id: String,
+    pub investor_name: String,
+    pub trader_code: String,
+    pub settl_type: u16,
+    pub settl_period: u8,
+    pub pre_trade_anonymity: u8,
+    pub max_floor: i64,
+    pub min_qty: i64,
+    pub no_counterparty: u32,
+    pub counterparties: Vec<CounterpartyInfo>,
+    pub no_quote: u32,
+    pub quotes: Vec<QuoteItem>,
+}
+
+impl QuoteStatusReport {
+    /// 是否 4.6.2 报价状态回报消息类型（describe_body 分派用）
+    pub fn is_quote_status_report(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::QUOTE_STATUS_OPTION | msg_type::QUOTE_STATUS_AGREEMENT | msg_type::QUOTE_STATUS_BOND
+        )
+    }
+
+    /// 由申报消息类型反查报价状态回报报文类型（4.6.2 业务对应表）
+    pub fn response_msg_type(req_mt: u32) -> u32 {
+        match req_mt {
+            msg_type::QUOTE_OPTION => msg_type::QUOTE_STATUS_OPTION,
+            msg_type::QUOTE_BOND | msg_type::QUOTE_RESPONSE_BOND => msg_type::QUOTE_STATUS_BOND,
+            // 100505 报价 / 100510 报价回复 → 200506
+            _ => msg_type::QUOTE_STATUS_AGREEMENT,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.quote_msg_id, 10);
+        w.str(&self.account_id, 12);
+        w.str(&self.quote_req_id, 10);
+        w.ch(self.quote_status);
+        w.u16(self.quote_reject_reason);
+        w.ch(self.quote_type);
+        w.i64(self.bid_px);
+        w.i64(self.offer_px);
+        w.i64(self.bid_size);
+        w.i64(self.offer_size);
+        // 扩展字段按业务布局
+        match self.msg_type {
+            // 4.6.2.1 期权（200406）表 4-68：BidPositionEffect/OfferPositionEffect/ContractAccountCode
+            msg_type::QUOTE_STATUS_OPTION => {
+                w.ch(self.bid_position_effect);
+                w.ch(self.offer_position_effect);
+                w.str(&self.contract_account_code, 6);
+            }
+            // 4.6.2.2 协议（200506）表 4-69：BranchID/OrderID/ExecID/QuoteRespID/PrivateQuote/
+            // Side/PriceType/ValidUntilTime/CashMargin/CounterpartyPBUID/Memo/NoQuote+重复组
+            msg_type::QUOTE_STATUS_AGREEMENT => {
+                w.str(&self.branch_id, 4);
+                w.str(&self.order_id, 16);
+                w.str(&self.exec_id, 16);
+                w.str(&self.quote_resp_id, 16);
+                w.ch(self.private_quote);
+                w.ch(self.side);
+                w.ch(self.price_type);
+                w.i64(self.valid_until_time);
+                w.ch(self.cash_margin);
+                w.str(&self.counterparty_pbu_id, 6);
+                w.str(&self.memo, 160);
+                w.u32(self.no_quote);
+                for it in &self.quotes {
+                    it.encode_to(&mut w);
+                }
+            }
+            // 4.6.2.3 债券（204106）表 4-70：BranchID/OrderID/QuoteRejectText/ExecID/QuoteRespID/
+            // PrivateQuote/Side/PriceType/ValidUntilTime/CashMargin/MemberID/InvestorType/InvestorID/
+            // InvestorName/TraderCode/SettlType/SettlPeriod/PreTradeAnonymity/MaxFloor/MinQty/Memo/
+            // NoCounterparty+重复组/NoQuote+重复组
+            msg_type::QUOTE_STATUS_BOND => {
+                w.str(&self.branch_id, 4);
+                w.str(&self.order_id, 16);
+                w.str(&self.quote_reject_text, 50);
+                w.str(&self.exec_id, 16);
+                w.str(&self.quote_resp_id, 16);
+                w.ch(self.private_quote);
+                w.ch(self.side);
+                w.ch(self.price_type);
+                w.i64(self.valid_until_time);
+                w.ch(self.cash_margin);
+                w.str(&self.member_id, 6);
+                w.str(&self.investor_type, 2);
+                w.str(&self.investor_id, 10);
+                w.str(&self.investor_name, 120);
+                w.str(&self.trader_code, 8);
+                w.u16(self.settl_type);
+                w.ch(self.settl_period);
+                w.ch(self.pre_trade_anonymity);
+                w.i64(self.max_floor);
+                w.i64(self.min_qty);
+                w.str(&self.memo, 160);
+                w.u32(self.no_counterparty);
+                for cp in &self.counterparties {
+                    cp.encode_to(&mut w);
+                }
+                w.u32(self.no_quote);
+                for it in &self.quotes {
+                    it.encode_to(&mut w);
+                }
+            }
+            _ => {}
+        }
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 报价回复（4.6.3，MsgType=1xxx10，OMS→TGW）。
+/// 公共字段（表 4-71）含重复组 + 各业务扩展字段（4.6.3.1/4.6.3.2）。
+#[derive(Debug, Clone, Default)]
+pub struct QuoteResponse {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub account_id: String,         // char[12] 证券账户
+    pub branch_id: String,          // char[4] 营业部代码
+    pub quote_resp_id: String,      // char[16] 报价回复消息编号
+    pub quote_resp_type: u8,        // 1=Hit/Lift 接受 2=Counter 重报 6=Pass 拒绝
+    pub side: u8,                   // 方向
+    pub valid_until_time: i64,      // 报价有效时间（预留）
+    pub quote_type: u8,             // 报价类型
+    pub price_type: u8,             // 价格类型（预留）
+    pub no_quote: u32,              // 报价消息个数
+    pub quotes: Vec<QuoteItem>,     // 报价明细（重复组）
+    // ---- 扩展字段 ----
+    pub cash_margin: u8,            // 信用标识（预留）
+    pub member_id: String,          // 本方交易商代码（104110 独有）
+    pub investor_type: String,
+    pub investor_id: String,
+    pub investor_name: String,
+    pub trader_code: String,
+    pub settl_type: u16,
+    pub settl_period: u8,
+}
+
+impl QuoteResponse {
+    /// 是否 4.6.3 报价回复消息类型（主循环分发用）
+    pub fn is_quote_response(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::QUOTE_RESPONSE_AGREEMENT | msg_type::QUOTE_RESPONSE_BOND
+        )
+    }
+
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = QuoteResponse {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            quote_resp_id: r.str(16)?,
+            quote_resp_type: r.ch()?,
+            side: r.ch()?,
+            valid_until_time: r.i64()?,
+            quote_type: r.ch()?,
+            price_type: r.ch()?,
+            no_quote: r.u32()?,
+            ..Default::default()
+        };
+        for _ in 0..q.no_quote {
+            q.quotes.push(QuoteItem::decode_from(&mut r)?);
+        }
+        match mt {
+            // 4.6.3.1 协议交易（100510）表 4-71 附近：CashMargin
+            msg_type::QUOTE_RESPONSE_AGREEMENT => {
+                if r.remaining() >= 1 {
+                    q.cash_margin = r.ch()?;
+                }
+            }
+            // 4.6.3.2 债券现券（104110）：CashMargin/MemberID/InvestorType/InvestorID/InvestorName/TraderCode/SettlType/SettlPeriod
+            msg_type::QUOTE_RESPONSE_BOND => {
+                if r.remaining() >= 150 {
+                    q.cash_margin = r.ch()?;
+                    q.member_id = r.str(6)?;
+                    q.investor_type = r.str(2)?;
+                    q.investor_id = r.str(10)?;
+                    q.investor_name = r.str(120)?;
+                    q.trader_code = r.str(8)?;
+                    q.settl_type = r.u16()?;
+                    q.settl_period = r.ch()?;
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+/// 转发报价（4.6.4，MsgType=2xxx26，TGW→OMS）。
+/// 公共字段（表 4-72）27 个 + 各业务扩展字段（4.6.4.1/4.6.4.2）。
+#[derive(Debug, Clone, Default)]
+pub struct AllegeQuote {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3] 应用标识
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码
+    pub transact_time: i64,         // 回报时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub order_id: String,           // char[16] 交易所订单编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub account_id: String,         // char[12] 证券账户
+    pub quote_req_id: String,       // char[10] 询价请求消息编号
+    pub quote_id: String,           // char[10] 报价消息编号
+    pub quote_resp_id: String,      // char[16] 报价回复消息编号
+    pub quote_type: u8,             // 报价类型
+    pub bid_px: i64,                // Price 买报价
+    pub offer_px: i64,              // Price 卖报价
+    pub bid_size: i64,              // Qty 买数量
+    pub offer_size: i64,            // Qty 卖数量
+    pub private_quote: u8,          // 私有报价
+    pub valid_until_time: i64,      // 报价有效时间（预留）
+    pub price_type: u8,             // 价格类型（预留）
+    pub memo: String,               // char[160] 备注
+    // ---- 扩展字段（超集）----
+    // 4.6.4.1 协议（200526）
+    pub cash_margin: u8,             // 信用标识（预留）
+    pub counterparty_pbu_id: String, // char[6] 对手方交易单元
+    // 4.6.4.2 债券（204126）独有
+    pub member_id: String,                 // char[6] 本方交易商代码
+    pub investor_type: String,             // char[2] 本方交易主体类型
+    pub investor_id: String,               // char[10] 本方交易主体代码
+    pub investor_name: String,             // char[120] 本方客户名称
+    pub trader_code: String,               // char[8] 本方交易员代码
+    pub counterparty_member_id: String,    // char[6] 对手方交易商代码
+    pub counterparty_investor_type: String, // char[2] 对手方交易主体类型
+    pub counterparty_investor_id: String,  // char[10] 对手方交易主体代码
+    pub counterparty_investor_name: String, // char[120] 对手方客户名称
+    pub counterparty_trader_code: String,  // char[8] 对手方交易员代码
+    pub settl_type: u16,                   // 结算方式
+    pub settl_period: u8,                  // 结算周期
+    pub max_floor: i64,                    // Qty 可显示数量
+    pub min_qty: i64,                      // Qty 最低成交数量
+}
+
+impl AllegeQuote {
+    /// 是否 4.6.4 转发报价消息类型（主循环分发用）
+    pub fn is_allege_quote(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::ALLEGE_QUOTE_AGREEMENT | msg_type::ALLEGE_QUOTE_BOND
+        )
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.exec_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.account_id, 12);
+        w.str(&self.quote_req_id, 10);
+        w.str(&self.quote_id, 10);
+        w.str(&self.quote_resp_id, 16);
+        w.ch(self.quote_type);
+        w.i64(self.bid_px);
+        w.i64(self.offer_px);
+        w.i64(self.bid_size);
+        w.i64(self.offer_size);
+        w.ch(self.private_quote);
+        w.i64(self.valid_until_time);
+        w.ch(self.price_type);
+        w.str(&self.memo, 160);
+        // 扩展字段按业务布局
+        match self.msg_type {
+            // 4.6.4.1 协议（200526）表 4-73：CashMargin/CounterpartyPBUID
+            msg_type::ALLEGE_QUOTE_AGREEMENT => {
+                w.ch(self.cash_margin);
+                w.str(&self.counterparty_pbu_id, 6);
+            }
+            // 4.6.4.2 债券（204126）表 4-74：CashMargin/本方 5 字段/对手方 5 字段/SettlType/SettlPeriod/MaxFloor/MinQty
+            msg_type::ALLEGE_QUOTE_BOND => {
+                w.ch(self.cash_margin);
+                w.str(&self.member_id, 6);
+                w.str(&self.investor_type, 2);
+                w.str(&self.investor_id, 10);
+                w.str(&self.investor_name, 120);
+                w.str(&self.trader_code, 8);
+                w.str(&self.counterparty_member_id, 6);
+                w.str(&self.counterparty_investor_type, 2);
+                w.str(&self.counterparty_investor_id, 10);
+                w.str(&self.counterparty_investor_name, 120);
+                w.str(&self.counterparty_trader_code, 8);
+                w.u16(self.settl_type);
+                w.ch(self.settl_period);
+                w.i64(self.max_floor);
+                w.i64(self.min_qty);
+            }
+            _ => {}
+        }
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 转发报价回复（4.6.5，MsgType=2xxx27，TGW→OMS）。
+/// 公共字段（表 4-75）25 个；文档未定义各业务扩展字段，无扩展。
+#[derive(Debug, Clone, Default)]
+pub struct AllegeQuoteResponse {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6]
+    pub submitting_pbu_id: String,  // char[6]
+    pub security_id: String,        // char[8]
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub order_id: String,           // char[16] 交易所订单编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub account_id: String,         // char[12] 证券账户
+    pub quote_id: String,           // char[10] 报价消息编号
+    pub quote_resp_id: String,      // char[16] 报价回复消息编号
+    pub quote_resp_type: u8,        // 报价回复类型
+    pub private_quote: u8,          // 私有报价
+    pub order_qty: i64,             // Qty 数量
+    pub price: i64,                 // Price 价格
+    pub side: u8,                   // 方向
+    pub valid_until_time: i64,      // 报价有效时间（预留）
+    pub quote_type: u8,             // 报价类型
+    pub price_type: u8,             // 价格类型（预留）
+}
+
+impl AllegeQuoteResponse {
+    /// 是否 4.6.5 转发报价回复消息类型（主循环分发用）
+    pub fn is_allege_quote_response(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::ALLEGE_QUOTE_RESPONSE_AGREEMENT | msg_type::ALLEGE_QUOTE_RESPONSE_BOND
+        )
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.exec_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.account_id, 12);
+        w.str(&self.quote_id, 10);
+        w.str(&self.quote_resp_id, 16);
+        w.ch(self.quote_resp_type);
+        w.ch(self.private_quote);
+        w.i64(self.order_qty);
+        w.i64(self.price);
+        w.ch(self.side);
+        w.i64(self.valid_until_time);
+        w.ch(self.quote_type);
+        w.ch(self.price_type);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 询价请求（4.7.1，MsgType=1xxx17，OMS→TGW）。
+/// 公共字段（表 4-76）21 个 + 各业务扩展字段（4.7.1.1/4.7.1.2）。
+#[derive(Debug, Clone, Default)]
+pub struct QuoteRequest {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub account_id: String,         // char[12] 证券账户
+    pub branch_id: String,          // char[4] 营业部代码
+    pub quote_req_id: String,       // char[10] 询价请求编号（撤单时填被撤委托的 QuoteReqID）
+    pub quote_request_trans_type: u16, // 询价请求事务类型（0=New 1=Cancel）
+    pub private_quote: u8,          // 私有报价（0=私有报价 1=公开报价）
+    pub order_qty: i64,             // Qty 数量
+    pub price: i64,                 // Price 价格
+    pub side: u8,                   // 方向（1=买 2=卖）
+    pub expire_time: i64,           // 询价请求失效时间（预留）
+    pub quote_type: u8,             // 报价类型（1=可交易的报价）
+    pub quote_price_type: u16,      // 报价价格类型（预留；1=百分比 2=每股）
+    pub memo: String,               // char[160] 备注
+    // ---- 扩展字段（超集）----
+    // 4.7.1.1 协议（100517）
+    pub cash_margin: u8,                // 信用标识（预留）
+    pub no_counterparty_pbu: u32,       // 对手方交易单元个数
+    pub counterparty_pbus: Vec<String>, // 对手方交易单元（char[6]，重复组）
+    // 4.7.1.2 债券（104117）
+    pub member_id: String,             // char[6] 本方交易商代码
+    pub investor_type: String,         // char[2] 本方交易主体类型
+    pub investor_id: String,           // char[10] 本方交易主体代码
+    pub investor_name: String,         // char[120] 本方客户名称
+    pub trader_code: String,           // char[8] 本方交易员代码
+    pub settl_type: u16,               // 结算方式
+    pub settl_period: u8,              // 结算周期
+    pub pre_trade_anonymity: u8,       // 是否匿名
+    pub no_counterparty: u32,          // 对手方个数
+    pub counterparties: Vec<CounterpartyInfo>, // 对手方明细（重复组）
+}
+
+impl QuoteRequest {
+    /// 是否 4.7.1 询价请求消息类型（主循环分发用）
+    pub fn is_quote_request(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::QUOTE_REQUEST_AGREEMENT | msg_type::QUOTE_REQUEST_BOND
+        )
+    }
+
+    /// 按消息类型解码一笔询价请求（与 NewOrder::decode 一致，扩展字段容忍缺失）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = QuoteRequest {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            quote_req_id: r.str(10)?,
+            quote_request_trans_type: r.u16()?,
+            private_quote: r.ch()?,
+            order_qty: r.i64()?,
+            price: r.i64()?,
+            side: r.ch()?,
+            expire_time: r.i64()?,
+            quote_type: r.ch()?,
+            quote_price_type: r.u16()?,
+            memo: r.str(160)?,
+            ..Default::default()
+        };
+        match mt {
+            // 4.7.1.1 协议（100517）表 4-77：CashMargin/NoCounterpartyPBU+重复组
+            msg_type::QUOTE_REQUEST_AGREEMENT => {
+                if r.remaining() >= 5 {
+                    q.cash_margin = r.ch()?;
+                    q.no_counterparty_pbu = r.u32()?;
+                    for _ in 0..q.no_counterparty_pbu {
+                        q.counterparty_pbus.push(r.str(6)?);
+                    }
+                }
+            }
+            // 4.7.1.2 债券（104117）表 4-78：本方 5 字段/SettlType/SettlPeriod/PreTradeAnonymity/NoCounterparty+重复组
+            msg_type::QUOTE_REQUEST_BOND => {
+                if r.remaining() >= 154 {
+                    q.member_id = r.str(6)?;
+                    q.investor_type = r.str(2)?;
+                    q.investor_id = r.str(10)?;
+                    q.investor_name = r.str(120)?;
+                    q.trader_code = r.str(8)?;
+                    q.settl_type = r.u16()?;
+                    q.settl_period = r.ch()?;
+                    q.pre_trade_anonymity = r.ch()?;
+                    q.no_counterparty = r.u32()?;
+                    for _ in 0..q.no_counterparty {
+                        q.counterparties.push(CounterpartyInfo::decode_from(&mut r)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+/// 询价请求响应（4.7.2，MsgType=2xxx17，TGW→OMS）。
+/// 公共字段（表 4-79）29 个 + 各业务扩展字段。
+/// 注 2：200517 扩展字段同 100517 询价请求；204117 扩展见 4.7.2.1（表 4-80）。
+#[derive(Debug, Clone, Default)]
+pub struct QuoteRequestAck {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,             // char[3]
+    pub reporting_pbu_id: String,    // char[6]
+    pub submitting_pbu_id: String,   // char[6]
+    pub security_id: String,         // char[8]
+    pub security_id_source: String,  // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,       // char[2]
+    pub transact_time: i64,
+    pub user_info: String,           // char[8]
+    pub order_id: String,            // char[16] 交易所订单编号
+    pub exec_id: String,             // char[16] 执行编号
+    pub cl_ord_id: String,           // char[10] 客户订单编号
+    pub account_id: String,          // char[12] 证券账户
+    pub branch_id: String,           // char[4] 营业部代码
+    pub quote_req_id: String,        // char[10] 询价请求编号
+    pub quote_request_trans_type: u16, // 询价请求事务类型
+    pub quote_request_type: u16,     // 询价请求类型（101=Submit 102=Alleged）
+    pub private_quote: u8,           // 私有报价
+    pub quote_request_status: u8,    // 0=Accepted 4=Cancelled 5=Rejected 7=Expired 8=Filled
+    pub quote_request_reject_reason: u16, // 拒绝原因代码
+    pub order_qty: i64,              // Qty 数量
+    pub price: i64,                  // Price 价格
+    pub side: u8,                    // 方向
+    pub expire_time: i64,            // 询价请求失效时间
+    pub quote_type: u8,              // 报价类型
+    pub quote_price_type: u16,       // 报价价格类型（预留）
+    pub memo: String,                // char[160] 备注
+    // ---- 扩展字段（超集）----
+    // 200517 同 100517（表 4-77）
+    pub cash_margin: u8,
+    pub no_counterparty_pbu: u32,
+    pub counterparty_pbus: Vec<String>,
+    // 204117 独有（表 4-80）
+    pub member_id: String,             // char[6] 本方交易商代码
+    pub investor_type: String,         // char[2] 本方交易主体类型
+    pub investor_id: String,           // char[10] 本方交易主体代码
+    pub investor_name: String,         // char[120] 本方客户名称
+    pub trader_code: String,           // char[8] 本方交易员代码
+    pub settl_type: u16,               // 结算方式
+    pub settl_period: u8,              // 结算周期
+    pub pre_trade_anonymity: u8,       // 是否匿名
+    pub quote_request_reject_text: String, // char[50] 拒绝原因说明
+    pub no_counterparty: u32,          // 对手方个数
+    pub counterparties: Vec<CounterpartyInfo>, // 对手方明细（重复组）
+}
+
+impl QuoteRequestAck {
+    /// 是否 4.7.2 询价请求响应消息类型（主循环分发用）
+    pub fn is_quote_request_ack(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::QUOTE_REQUEST_ACK_AGREEMENT | msg_type::QUOTE_REQUEST_ACK_BOND
+        )
+    }
+
+    /// 由申报消息类型反查询价请求响应报文类型（4.7.2 业务对应表）
+    pub fn response_msg_type(req_mt: u32) -> u32 {
+        match req_mt {
+            msg_type::QUOTE_REQUEST_BOND => msg_type::QUOTE_REQUEST_ACK_BOND,
+            _ => msg_type::QUOTE_REQUEST_ACK_AGREEMENT,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.exec_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.str(&self.quote_req_id, 10);
+        w.u16(self.quote_request_trans_type);
+        w.u16(self.quote_request_type);
+        w.ch(self.private_quote);
+        w.ch(self.quote_request_status);
+        w.u16(self.quote_request_reject_reason);
+        w.i64(self.order_qty);
+        w.i64(self.price);
+        w.ch(self.side);
+        w.i64(self.expire_time);
+        w.ch(self.quote_type);
+        w.u16(self.quote_price_type);
+        w.str(&self.memo, 160);
+        // 扩展字段按业务布局
+        match self.msg_type {
+            // 200517：同 100517（表 4-77）CashMargin/NoCounterpartyPBU+重复组
+            msg_type::QUOTE_REQUEST_ACK_AGREEMENT => {
+                w.ch(self.cash_margin);
+                w.u32(self.no_counterparty_pbu);
+                for pbu in &self.counterparty_pbus {
+                    w.str(pbu, 6);
+                }
+            }
+            // 204117（表 4-80）：本方 5 字段/SettlType/SettlPeriod/PreTradeAnonymity/QuoteRequestRejectText/NoCounterparty+重复组
+            msg_type::QUOTE_REQUEST_ACK_BOND => {
+                w.str(&self.member_id, 6);
+                w.str(&self.investor_type, 2);
+                w.str(&self.investor_id, 10);
+                w.str(&self.investor_name, 120);
+                w.str(&self.trader_code, 8);
+                w.u16(self.settl_type);
+                w.ch(self.settl_period);
+                w.ch(self.pre_trade_anonymity);
+                w.str(&self.quote_request_reject_text, 50);
+                w.u32(self.no_counterparty);
+                for cp in &self.counterparties {
+                    cp.encode_to(&mut w);
+                }
+            }
+            _ => {}
+        }
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 转发询价请求（4.7.3，MsgType=2xxx25，TGW→OMS）。
+/// 公共字段（表 4-81）27 个 + 各业务扩展字段（4.7.3.1/4.7.3.2）。
+#[derive(Debug, Clone, Default)]
+pub struct AllegeQuoteRequest {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6]
+    pub submitting_pbu_id: String,  // char[6]
+    pub security_id: String,        // char[8]
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub order_id: String,           // char[16] 交易所订单编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub account_id: String,         // char[12] 证券账户
+    pub quote_req_id: String,       // char[10] 询价请求编号
+    pub quote_request_trans_type: u16, // 询价请求事务类型
+    pub quote_request_type: u16,    // 询价请求类型
+    pub quote_request_status: u8,   // 询价请求状态
+    pub private_quote: u8,          // 私有报价
+    pub order_qty: i64,             // Qty 数量
+    pub price: i64,                 // Price 价格
+    pub side: u8,                   // 方向
+    pub expire_time: i64,           // 询价请求失效时间
+    pub quote_type: u8,             // 报价类型
+    pub quote_price_type: u16,      // 报价价格类型（预留）
+    pub memo: String,               // char[160] 备注
+    // ---- 扩展字段（超集）----
+    // 4.7.3.1 协议（200525）
+    pub cash_margin: u8,             // 信用标识（预留）
+    pub counterparty_pbu_id: String, // char[6] 对手方交易单元
+    // 4.7.3.2 债券（204125）
+    pub member_id: String,                 // char[6] 本方交易商代码
+    pub investor_type: String,             // char[2] 本方交易主体类型
+    pub investor_id: String,               // char[10] 本方交易主体代码
+    pub investor_name: String,             // char[120] 本方客户名称
+    pub trader_code: String,               // char[8] 本方交易员代码
+    pub counterparty_member_id: String,    // char[6] 对手方交易商代码
+    pub counterparty_investor_type: String, // char[2] 对手方交易主体类型
+    pub counterparty_investor_id: String,  // char[10] 对手方交易主体代码
+    pub counterparty_investor_name: String, // char[120] 对手方客户名称
+    pub counterparty_trader_code: String,  // char[8] 对手方交易员代码
+    pub settl_type: u16,                   // 结算方式
+    pub settl_period: u8,                  // 结算周期
+}
+
+impl AllegeQuoteRequest {
+    /// 是否 4.7.3 转发询价请求消息类型（主循环分发用）
+    pub fn is_allege_quote_request(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::ALLEGE_QUOTE_REQUEST_AGREEMENT | msg_type::ALLEGE_QUOTE_REQUEST_BOND
+        )
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.exec_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.account_id, 12);
+        w.str(&self.quote_req_id, 10);
+        w.u16(self.quote_request_trans_type);
+        w.u16(self.quote_request_type);
+        w.ch(self.quote_request_status);
+        w.ch(self.private_quote);
+        w.i64(self.order_qty);
+        w.i64(self.price);
+        w.ch(self.side);
+        w.i64(self.expire_time);
+        w.ch(self.quote_type);
+        w.u16(self.quote_price_type);
+        w.str(&self.memo, 160);
+        // 扩展字段按业务布局
+        match self.msg_type {
+            // 4.7.3.1 协议（200525）表 4-82：CashMargin/CounterpartyPBUID
+            msg_type::ALLEGE_QUOTE_REQUEST_AGREEMENT => {
+                w.ch(self.cash_margin);
+                w.str(&self.counterparty_pbu_id, 6);
+            }
+            // 4.7.3.2 债券（204125）表 4-83：本方 5 字段/对手方 5 字段/SettlType/SettlPeriod
+            msg_type::ALLEGE_QUOTE_REQUEST_BOND => {
+                w.str(&self.member_id, 6);
+                w.str(&self.investor_type, 2);
+                w.str(&self.investor_id, 10);
+                w.str(&self.investor_name, 120);
+                w.str(&self.trader_code, 8);
+                w.str(&self.counterparty_member_id, 6);
+                w.str(&self.counterparty_investor_type, 2);
+                w.str(&self.counterparty_investor_id, 10);
+                w.str(&self.counterparty_investor_name, 120);
+                w.str(&self.counterparty_trader_code, 8);
+                w.u16(self.settl_type);
+                w.ch(self.settl_period);
+            }
+            _ => {}
+        }
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 意向申报（4.8.1，MsgType=100509，OMS→TGW）。
+/// 公共字段（表 4-84）16 个 + 扩展字段（4.8.1.1）。
+#[derive(Debug, Clone, Default)]
+pub struct IndicationOfInterest {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码（固定填全空格）
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub ioi_id: String,             // char[10] 客户意向申报编号
+    pub account_id: String,         // char[12] 证券账户
+    pub branch_id: String,          // char[4] 营业部代码
+    pub ioi_trans_type: u8,         // 意向申报类型（N=意向申报 C=意向申报撤单）
+    pub side: u8,                   // 买卖方向（1=买 2=卖）
+    pub ioi_ref_id: String,         // char[10] 原意向申报 IOIID
+    pub ioi_qty: i64,               // Qty 数量
+    pub price: i64,                 // Price 价格
+    // ---- 扩展字段（4.8.1.1）----
+    pub contactor: String,    // char[12] 联系人
+    pub contact_info: String, // char[30] 联系方式
+}
+
+impl IndicationOfInterest {
+    /// 是否 4.8.1 意向申报消息类型（主循环分发用）
+    pub fn is_ioi(mt: u32) -> bool {
+        mt == msg_type::IOI
+    }
+
+    /// 按消息类型解码一笔意向申报（扩展字段容忍缺失）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = IndicationOfInterest {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            ioi_id: r.str(10)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            ioi_trans_type: r.ch()?,
+            side: r.ch()?,
+            ioi_ref_id: r.str(10)?,
+            ioi_qty: r.i64()?,
+            price: r.i64()?,
+            ..Default::default()
+        };
+        // 4.8.1.1（表 4-85）：Contactor/ContactInfo
+        if r.remaining() >= 42 {
+            q.contactor = r.str(12)?;
+            q.contact_info = r.str(30)?;
+        }
+        Ok(q)
+    }
+}
+
+/// 意向申报响应（4.8.2，MsgType=200510，TGW→OMS）。
+/// 公共字段（表 4-86）23 个 + 扩展字段（4.8.2.1）。
+#[derive(Debug, Clone, Default)]
+pub struct IOIResponse {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8]
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub quote_resp_id: String,      // char[16] 交易所意向申报响应编号
+    pub quote_resp_type: u8,        // 响应类型（2=意向申报响应）
+    pub exec_type: u8,              // 执行类型（0=New 4=Canceled 8=Reject）
+    pub quote_reject_reason: u16,   // 拒绝原因代码
+    pub ioi_id: String,             // char[10] 客户意向申报编号
+    pub ioi_ref_id: String,         // char[10] 原意向申报 IOIID
+    pub ioi_trans_type: u8,         // 意向申报类型
+    pub side: u8,                   // 买卖方向
+    pub account_id: String,         // char[12]
+    pub branch_id: String,          // char[4]
+    pub ioi_qty: i64,               // Qty 数量
+    pub price: i64,                 // Price 价格
+    // ---- 扩展字段（4.8.2.1）----
+    pub contactor: String,    // char[12] 联系人
+    pub contact_info: String, // char[30] 联系方式
+}
+
+impl IOIResponse {
+    /// 是否 4.8.2 意向申报响应消息类型（主循环分发用）
+    pub fn is_ioi_response(mt: u32) -> bool {
+        mt == msg_type::IOI_RESPONSE
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.quote_resp_id, 16);
+        w.ch(self.quote_resp_type);
+        w.ch(self.exec_type);
+        w.u16(self.quote_reject_reason);
+        w.str(&self.ioi_id, 10);
+        w.str(&self.ioi_ref_id, 10);
+        w.ch(self.ioi_trans_type);
+        w.ch(self.side);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.i64(self.ioi_qty);
+        w.i64(self.price);
+        // 4.8.2.1（表 4-87）：Contactor/ContactInfo
+        w.str(&self.contactor, 12);
+        w.str(&self.contact_info, 30);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 成交申报（4.9.1，MsgType=1xxx03，OMS→TGW）。
+/// 公共字段（表 4-88）25 个。扩展字段为各业务专有（4.9.1.1~4.9.1.11，
+/// 含重复组与变长字段），此处按原始字节保存，确认/响应时原样回写。
+#[derive(Debug, Clone, Default)]
+pub struct TradeCaptureReport {
+    pub msg_type: u32,
+    pub appl_id: String,                 // char[3] 应用标识
+    pub submitting_pbu_id: String,       // char[6] 申报交易单元
+    pub security_id: String,             // char[8] 证券代码
+    pub security_id_source: String,      // char[4] 证券代码源
+    pub owner_type: u16,                 // 订单所有者类型
+    pub clearing_firm: String,           // char[2] 结算机构代码
+    pub transact_time: i64,              // 委托时间
+    pub user_info: String,               // char[8] 用户私有信息
+    pub trade_report_id: String,         // char[10] 客户成交申报编号
+    pub trade_report_type: u8,           // 0=提交 2=接受 3=拒绝
+    pub trade_report_trans_type: u8,     // 0=New 1=Cancel 2=Replace
+    pub trade_handling_instr: u8,        // 1=成交报告 2=协议配对 3=成交请求 5=双边确认
+    pub trade_report_ref_id: String,     // char[10] 原客户成交申报编号
+    pub last_px: i64,                    // Price 价格
+    pub last_qty: i64,                   // Qty 数量
+    pub trd_type: u16,                   // 成交申报业务类别
+    pub trd_sub_type: u16,               // 成交申报业务子类别
+    pub confirm_id: String,              // char[8] 约定号
+    pub side: u8,                        // 本方参与人买卖方向
+    pub pbu_id: String,                  // char[6] 本方交易单元
+    pub account_id: String,              // char[12] 本方证券账户
+    pub branch_id: String,               // char[4] 本方营业部代码
+    pub counterparty_pbu_id: String,     // char[6] 对手方交易单元
+    pub counterparty_account_id: String, // char[12] 对手方证券账户
+    pub counterparty_branch_id: String,  // char[4] 对手方营业部代码
+    /// 各业务扩展字段原始字节（4.9.1.1~4.9.1.11，decode 后剩余部分原样保存）
+    pub extend: Vec<u8>,
+}
+
+impl TradeCaptureReport {
+    /// 是否 4.9.1 成交申报消息类型（主循环分发用）
+    pub fn is_trade_capture_report(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::TCR_AGREEMENT
+                | msg_type::TCR_SEC_LENDING
+                | msg_type::TCR_AM_PLAN
+                | msg_type::TCR_STOCK_PLEDGE
+                | msg_type::TCR_AGREED_BUYBACK
+                | msg_type::TCR_QUOTED_REPO
+                | msg_type::TCR_BOND_AGREEMENT_REPO
+                | msg_type::TCR_BOND_3P_REPO
+                | msg_type::TCR_BOND_CASH
+                | msg_type::TCR_BOND_TRANSFER
+                | msg_type::TCR_BOND_LENDING
+        )
+    }
+
+    /// 按消息类型解码一笔成交申报：公共 137 字节 + 扩展原始字节
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let q = TradeCaptureReport {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            trade_report_id: r.str(10)?,
+            trade_report_type: r.ch()?,
+            trade_report_trans_type: r.ch()?,
+            trade_handling_instr: r.ch()?,
+            trade_report_ref_id: r.str(10)?,
+            last_px: r.i64()?,
+            last_qty: r.i64()?,
+            trd_type: r.u16()?,
+            trd_sub_type: r.u16()?,
+            confirm_id: r.str(8)?,
+            side: r.ch()?,
+            pbu_id: r.str(6)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            counterparty_pbu_id: r.str(6)?,
+            counterparty_account_id: r.str(12)?,
+            counterparty_branch_id: r.str(4)?,
+            extend: r.take_rest()?,
+        };
+        Ok(q)
+    }
+}
+
+/// 成交申报响应（4.9.2，MsgType=2xxx04，TGW→OMS）。
+/// 公共字段（表 4-100）33 个；扩展字段同成交申报各业务扩展字段（注 2），
+/// 债券借贷（204204）在扩展字段最前多一个 TradeReportRejectText（注 3）。
+#[derive(Debug, Clone, Default)]
+pub struct TcrAck {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,                 // char[3]
+    pub reporting_pbu_id: String,        // char[6] 回报交易单元
+    pub submitting_pbu_id: String,       // char[6] 申报交易单元
+    pub security_id: String,             // char[8]
+    pub security_id_source: String,      // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,           // char[2]
+    pub transact_time: i64,
+    pub user_info: String,               // char[8]
+    pub trade_id: String,                // char[16] 交易所成交申报编号
+    pub trade_report_id: String,         // char[10] 客户成交申报编号
+    pub trade_report_type: u8,           // 成交申报类型
+    pub trade_report_trans_type: u8,     // 成交申报事务类别
+    pub trade_handling_instr: u8,        // 成交申报模式
+    pub trade_report_ref_id: String,     // char[10] 原客户成交申报编号
+    pub trd_ack_status: u8,              // 0=Accepted 1=Rejected
+    pub trd_rpt_status: u16,             // 0=接受 1=拒绝 2=已撤销 100=未匹配 101=已匹配
+    pub trade_report_reject_reason: u16, // 成交申报被拒绝原因代码
+    pub last_px: i64,                    // Price 价格
+    pub last_qty: i64,                   // Qty 数量
+    pub trd_type: u16,                   // 成交申报业务类别
+    pub trd_sub_type: u16,               // 成交申报业务子类别
+    pub confirm_id: String,              // char[8] 约定号
+    pub exec_id: String,                 // char[16] 执行编号
+    pub side: u8,                        // 本方参与人买卖方向
+    pub pbu_id: String,                  // char[6] 本方交易单元
+    pub account_id: String,              // char[12] 本方证券账户
+    pub branch_id: String,               // char[4] 本方营业部代码
+    pub counterparty_pbu_id: String,     // char[6] 对手方交易单元
+    pub counterparty_account_id: String, // char[12] 对手方证券账户
+    pub counterparty_branch_id: String,  // char[4] 对手方营业部代码
+    /// 债券借贷（204204）扩展最前的成交申报拒绝原因说明（注 3），其他业务忽略
+    pub trade_report_reject_text: String, // char[50]
+    /// 各业务扩展字段原始字节（同成交申报扩展，原样回写）
+    pub extend: Vec<u8>,
+}
+
+impl TcrAck {
+    /// 是否 4.9.2 成交申报响应消息类型（主循环分发用）
+    pub fn is_tcr_ack(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::TCR_ACK_AGREEMENT
+                | msg_type::TCR_ACK_SEC_LENDING
+                | msg_type::TCR_ACK_AM_PLAN
+                | msg_type::TCR_ACK_STOCK_PLEDGE
+                | msg_type::TCR_ACK_AGREED_BUYBACK
+                | msg_type::TCR_ACK_QUOTED_REPO
+                | msg_type::TCR_ACK_BOND_AGREEMENT_REPO
+                | msg_type::TCR_ACK_BOND_3P_REPO
+                | msg_type::TCR_ACK_BOND_CASH
+                | msg_type::TCR_ACK_BOND_TRANSFER
+                | msg_type::TCR_ACK_BOND_LENDING
+        )
+    }
+
+    /// 由成交申报消息类型反查响应报文类型（4.9.2 业务对应表）
+    pub fn response_msg_type(req_mt: u32) -> u32 {
+        match req_mt {
+            msg_type::TCR_AGREEMENT => msg_type::TCR_ACK_AGREEMENT,
+            msg_type::TCR_SEC_LENDING => msg_type::TCR_ACK_SEC_LENDING,
+            msg_type::TCR_AM_PLAN => msg_type::TCR_ACK_AM_PLAN,
+            msg_type::TCR_STOCK_PLEDGE => msg_type::TCR_ACK_STOCK_PLEDGE,
+            msg_type::TCR_AGREED_BUYBACK => msg_type::TCR_ACK_AGREED_BUYBACK,
+            msg_type::TCR_QUOTED_REPO => msg_type::TCR_ACK_QUOTED_REPO,
+            msg_type::TCR_BOND_AGREEMENT_REPO => msg_type::TCR_ACK_BOND_AGREEMENT_REPO,
+            msg_type::TCR_BOND_3P_REPO => msg_type::TCR_ACK_BOND_3P_REPO,
+            msg_type::TCR_BOND_CASH => msg_type::TCR_ACK_BOND_CASH,
+            msg_type::TCR_BOND_TRANSFER => msg_type::TCR_ACK_BOND_TRANSFER,
+            msg_type::TCR_BOND_LENDING => msg_type::TCR_ACK_BOND_LENDING,
+            _ => 0,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.trade_id, 16);
+        w.str(&self.trade_report_id, 10);
+        w.ch(self.trade_report_type);
+        w.ch(self.trade_report_trans_type);
+        w.ch(self.trade_handling_instr);
+        w.str(&self.trade_report_ref_id, 10);
+        w.ch(self.trd_ack_status);
+        w.u16(self.trd_rpt_status);
+        w.u16(self.trade_report_reject_reason);
+        w.i64(self.last_px);
+        w.i64(self.last_qty);
+        w.u16(self.trd_type);
+        w.u16(self.trd_sub_type);
+        w.str(&self.confirm_id, 8);
+        w.str(&self.exec_id, 16);
+        w.ch(self.side);
+        w.str(&self.pbu_id, 6);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.str(&self.counterparty_pbu_id, 6);
+        w.str(&self.counterparty_account_id, 12);
+        w.str(&self.counterparty_branch_id, 4);
+        // 扩展字段：债券借贷（204204）扩展最前插 TradeReportRejectText（注 3）
+        if self.msg_type == msg_type::TCR_ACK_BOND_LENDING {
+            w.str(&self.trade_report_reject_text, 50);
+        }
+        w.raw(&self.extend);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 转发成交申报（4.9.3，MsgType=2xxx20，TGW→OMS）。
+/// 公共字段（表 4-101）30 个；扩展字段为各业务专有（4.9.3.1~4.9.3.5），
+/// 按原始字节保存并原样回写。
+#[derive(Debug, Clone, Default)]
+pub struct AllegeTcr {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,                 // char[3]
+    pub reporting_pbu_id: String,        // char[6] 回报交易单元
+    pub submitting_pbu_id: String,       // char[6] 申报交易单元
+    pub security_id: String,             // char[8]
+    pub security_id_source: String,      // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,           // char[2]
+    pub transact_time: i64,
+    pub user_info: String,               // char[8]
+    pub trade_id: String,                // char[16] 交易所成交申报编号
+    pub trade_report_id: String,         // char[10] 客户成交申报编号
+    pub trade_report_type: u8,           // 成交申报类型
+    pub trade_report_trans_type: u8,     // 成交申报事务类别
+    pub trade_handling_instr: u8,        // 成交申报模式
+    pub trade_report_ref_id: String,     // char[10] 原客户成交申报编号
+    pub last_px: i64,                    // Price 价格
+    pub last_qty: i64,                   // Qty 数量
+    pub trd_type: u16,                   // 成交申报业务类别
+    pub trd_sub_type: u16,               // 成交申报业务子类别
+    pub confirm_id: String,              // char[8] 约定号
+    pub exec_id: String,                 // char[16] 执行编号
+    pub side: u8,                        // 本方参与人买卖方向
+    pub pbu_id: String,                  // char[6] 本方交易单元
+    pub account_id: String,              // char[12] 本方证券账户
+    pub branch_id: String,               // char[4] 本方营业部代码
+    pub counterparty_pbu_id: String,     // char[6] 对手方交易单元
+    pub counterparty_account_id: String, // char[12] 对手方证券账户
+    pub counterparty_branch_id: String,  // char[4] 对手方营业部代码
+    /// 各业务扩展字段原始字节（4.9.3.1~4.9.3.5）
+    pub extend: Vec<u8>,
+}
+
+impl AllegeTcr {
+    /// 是否 4.9.3 转发成交申报消息类型（主循环分发用）
+    pub fn is_allege_tcr(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::ALLEGE_TCR_BOND_AGREEMENT_REPO
+                | msg_type::ALLEGE_TCR_BOND_3P_REPO
+                | msg_type::ALLEGE_TCR_BOND_CASH
+                | msg_type::ALLEGE_TCR_BOND_LENDING
+                | msg_type::ALLEGE_TCR_BOND_TRANSFER
+        )
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.trade_id, 16);
+        w.str(&self.trade_report_id, 10);
+        w.ch(self.trade_report_type);
+        w.ch(self.trade_report_trans_type);
+        w.ch(self.trade_handling_instr);
+        w.str(&self.trade_report_ref_id, 10);
+        w.i64(self.last_px);
+        w.i64(self.last_qty);
+        w.u16(self.trd_type);
+        w.u16(self.trd_sub_type);
+        w.str(&self.confirm_id, 8);
+        w.str(&self.exec_id, 16);
+        w.ch(self.side);
+        w.str(&self.pbu_id, 6);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.str(&self.counterparty_pbu_id, 6);
+        w.str(&self.counterparty_account_id, 12);
+        w.str(&self.counterparty_branch_id, 4);
+        w.raw(&self.extend);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 成交确认（4.9.4，MsgType=2xxx03，TGW→OMS）。
+/// 公共字段（表 4-107）29 个；扩展字段为各业务专有（4.9.4.1~4.9.4.7），
+/// 按原始字节保存并原样回写。
+#[derive(Debug, Clone, Default)]
+pub struct TcrConfirm {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,                 // char[3]
+    pub reporting_pbu_id: String,        // char[6] 回报交易单元
+    pub submitting_pbu_id: String,       // char[6] 申报交易单元
+    pub security_id: String,             // char[8]
+    pub security_id_source: String,      // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,           // char[2]
+    pub transact_time: i64,
+    pub user_info: String,               // char[8]
+    pub trade_id: String,                // char[16] 交易所成交申报编号
+    pub trade_report_id: String,         // char[10] 客户成交申报编号
+    pub trade_report_type: u8,           // 成交申报类型
+    pub trade_report_trans_type: u8,     // 成交申报事务类别
+    pub trade_handling_instr: u8,        // 成交申报模式
+    pub last_px: i64,                    // Price 价格
+    pub last_qty: i64,                   // Qty 数量
+    pub trd_type: u16,                   // 成交申报业务类别
+    pub trd_sub_type: u16,               // 成交申报业务子类别
+    pub confirm_id: String,              // char[8] 约定号
+    pub exec_id: String,                 // char[16] 执行编号
+    pub side: u8,                        // 本方参与人买卖方向
+    pub pbu_id: String,                  // char[6] 本方交易单元
+    pub account_id: String,              // char[12] 本方证券账户
+    pub branch_id: String,               // char[4] 本方营业部代码
+    pub counterparty_pbu_id: String,     // char[6] 对手方交易单元
+    pub counterparty_account_id: String, // char[12] 对手方证券账户
+    pub counterparty_branch_id: String,  // char[4] 对手方营业部代码
+    /// 各业务扩展字段原始字节（4.9.4.1~4.9.4.7）
+    pub extend: Vec<u8>,
+}
+
+impl TcrConfirm {
+    /// 是否 4.9.4 成交确认消息类型（主循环分发用）
+    pub fn is_tcr_confirm(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::TCR_CONFIRM_AGREEMENT
+                | msg_type::TCR_CONFIRM_SEC_LENDING
+                | msg_type::TCR_CONFIRM_BOND_AGREEMENT_REPO
+                | msg_type::TCR_CONFIRM_BOND_3P_REPO
+                | msg_type::TCR_CONFIRM_BOND_CASH
+                | msg_type::TCR_CONFIRM_BOND_TRANSFER
+                | msg_type::TCR_CONFIRM_BOND_LENDING
+        )
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.trade_id, 16);
+        w.str(&self.trade_report_id, 10);
+        w.ch(self.trade_report_type);
+        w.ch(self.trade_report_trans_type);
+        w.ch(self.trade_handling_instr);
+        w.i64(self.last_px);
+        w.i64(self.last_qty);
+        w.u16(self.trd_type);
+        w.u16(self.trd_sub_type);
+        w.str(&self.confirm_id, 8);
+        w.str(&self.exec_id, 16);
+        w.ch(self.side);
+        w.str(&self.pbu_id, 6);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.str(&self.counterparty_pbu_id, 6);
+        w.str(&self.counterparty_account_id, 12);
+        w.str(&self.counterparty_branch_id, 4);
+        w.raw(&self.extend);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+// 注册（4.10.1，MsgType=102099，OMS→TGW；ApplID=200 转托管）。
+/// 表 4-115 全部 16 个字段，无扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct Designation {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识（200=转托管）
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码（系统内转托管可空）
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub orig_cl_ord_id: String,     // char[10] 原始交易的客户订单编号
+    pub designation_instruction: u8, // 注册指令（3=转托管）
+    pub designation_trans_type: u8,  // 注册类型（1=New 3=Cancel）
+    pub account_id: String,         // char[12] 证券账户
+    pub branch_id: String,          // char[4] 营业部代码
+    pub order_qty: i64,             // Qty 数量（系统内转托管可 0=全部）
+    pub transferee_pbu_id: String,  // char[6] 转入交易单元代码
+}
+
+impl Designation {
+    /// 是否 4.10.1 注册消息类型（主循环分发用）
+    pub fn is_designation(mt: u32) -> bool {
+        mt == msg_type::DESIGNATION
+    }
+
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(Designation {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            orig_cl_ord_id: r.str(10)?,
+            designation_instruction: r.ch()?,
+            designation_trans_type: r.ch()?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            order_qty: r.i64()?,
+            transferee_pbu_id: r.str(6)?,
+        })
+    }
+}
+
+/// 注册执行报告（4.10.2，MsgType=202098，TGW→OMS；ApplID=200 转托管）。
+/// 表 4-116 全部 23 个字段，无扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct DesignationReport {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8]
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub order_id: String,           // char[16] 交易所订单编号
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub orig_cl_ord_id: String,     // char[10] 原始交易的客户订单编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub exec_type: u8,              // 0=New 4=Cancelled 8=Rejected
+    pub ord_rej_reason: u16,        // 拒绝原因代码（ExecType=8 时填写）
+    pub designation_instruction: u8, // 注册指令（3=转托管）
+    pub designation_trans_type: u8,  // 注册类型（1=New 3=Cancel）
+    pub account_id: String,         // char[12]
+    pub branch_id: String,          // char[4]
+    pub order_qty: i64,             // Qty 数量
+    pub transferee_pbu_id: String,  // char[6] 转入交易单元代码
+}
+
+impl DesignationReport {
+    /// 是否 4.10.2 注册执行报告消息类型（主循环分发用）
+    pub fn is_designation_report(mt: u32) -> bool {
+        mt == msg_type::DESIGNATION_REPORT
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.orig_cl_ord_id, 10);
+        w.str(&self.exec_id, 16);
+        w.ch(self.exec_type);
+        w.u16(self.ord_rej_reason);
+        w.ch(self.designation_instruction);
+        w.ch(self.designation_trans_type);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.i64(self.order_qty);
+        w.str(&self.transferee_pbu_id, 6);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 投票（4.11.1，MsgType=102197，OMS→TGW；ApplID=210 投票）。
+/// 表 4-117 全部 15 个字段，无扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct Evote {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识（210=投票）
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 投票代码
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码（固定填全空格）
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub account_id: String,         // char[12] 证券账户
+    pub branch_id: String,          // char[4] 营业部代码
+    pub voting_proposal: u16,       // 投票议案号（1-99 具体议案 / 100 总议案）
+    pub voting_sub_proposal: u16,   // 投票子议案号或选举候选人（0=所有子议案）
+    pub voting_preference: u8,      // 投票意向（1=同意 2=反对 3=弃权；累积投票填 0）
+    pub order_qty: i64,             // Qty 投票数量（累积投票议案填写）
+}
+
+impl Evote {
+    /// 是否 4.11.1 投票消息类型（主循环分发用）
+    pub fn is_evote(mt: u32) -> bool {
+        mt == msg_type::EVOTE
+    }
+
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(Evote {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            voting_proposal: r.u16()?,
+            voting_sub_proposal: r.u16()?,
+            voting_preference: r.ch()?,
+            order_qty: r.i64()?,
+        })
+    }
+}
+
+/// 投票执行报告（4.11.2，MsgType=202196，TGW→OMS；ApplID=210 投票）。
+/// 表 4-118 全部 22 个字段，无扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct EvoteReport {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 投票代码
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub order_id: String,           // char[16] 交易所订单编号
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub exec_type: u8,              // 0=New 8=Rejected
+    pub ord_rej_reason: u16,        // 拒绝原因代码（ExecType=8 时填写）
+    pub account_id: String,         // char[12]
+    pub branch_id: String,          // char[4]
+    pub voting_proposal: u16,       // 投票议案号
+    pub voting_sub_proposal: u16,   // 投票子议案号或选举候选人
+    pub voting_preference: u8,      // 投票意向
+    pub order_qty: i64,             // Qty 投票数量
+}
+
+impl EvoteReport {
+    /// 是否 4.11.2 投票执行报告消息类型（主循环分发用）
+    pub fn is_evote_report(mt: u32) -> bool {
+        mt == msg_type::EVOTE_REPORT
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.exec_id, 16);
+        w.ch(self.exec_type);
+        w.u16(self.ord_rej_reason);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.u16(self.voting_proposal);
+        w.u16(self.voting_sub_proposal);
+        w.ch(self.voting_preference);
+        w.i64(self.order_qty);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 密码服务（4.12.1，MsgType=102489，OMS→TGW；ApplID=240 激活 / 241 挂失或重置）。
+/// 表 4-119 全部 12 个字段，无扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct PasswordService {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识（240=激活 241=挂失或重置）
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码（369991 中国结算 / 369999 网络投票）
+    pub security_id_source: String, // char[4] 证券代码源
+    pub owner_type: u16,            // 订单所有者类型
+    pub clearing_firm: String,      // char[2] 结算机构代码（固定填全空格）
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub account_id: String,         // char[12] 证券账户
+    pub branch_id: String,          // char[4] 营业部代码
+    pub validation_code: u32,       // 密码激活或重置校验号
+}
+
+impl PasswordService {
+    /// 是否 4.12.1 密码服务消息类型（主循环分发用）
+    pub fn is_password_service(mt: u32) -> bool {
+        mt == msg_type::PASSWORD_SERVICE
+    }
+
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(PasswordService {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            validation_code: r.u32()?,
+        })
+    }
+}
+
+/// 密码服务执行报告（4.12.2，MsgType=202488，TGW→OMS）。
+/// 表 4-120 全部 19 个字段，无扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct PasswordServiceReport {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8]
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub order_id: String,           // char[16] 交易所订单编号
+    pub cl_ord_id: String,          // char[10] 客户订单编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub exec_type: u8,              // 0=New 8=Rejected
+    pub ord_rej_reason: u16,        // 拒绝原因代码（ExecType=8 时填写）
+    pub account_id: String,         // char[12]
+    pub branch_id: String,          // char[4]
+    pub validation_code: u32,       // 密码激活或重置校验号
+}
+
+impl PasswordServiceReport {
+    /// 是否 4.12.2 密码服务执行报告消息类型（主循环分发用）
+    pub fn is_password_service_report(mt: u32) -> bool {
+        mt == msg_type::PASSWORD_SERVICE_REPORT
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.exec_id, 16);
+        w.ch(self.exec_type);
+        w.u16(self.ord_rej_reason);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.u32(self.validation_code);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 保证金查询（4.13.1，MsgType=102587，OMS→TGW；ApplID=250 保证金查询）。
+/// 表 4-121 全部 10 个字段，无扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct MarginQuery {
+    pub msg_type: u32,
+    pub appl_id: String,            // char[3] 应用标识（250=保证金查询）
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8] 证券代码（固定填全空格）
+    pub security_id_source: String, // char[4] 证券代码源（固定填全空格）
+    pub owner_type: u16,            // 订单所有者类型（固定填 0）
+    pub clearing_firm: String,      // char[2] 结算机构代码（固定填全空格）
+    pub transact_time: i64,         // 委托时间
+    pub user_info: String,          // char[8] 用户私有信息
+    pub cl_ord_id: String,          // char[10] 客户查询编号
+    pub fund_pbu_id: String,        // char[6] 结算账号
+}
+
+impl MarginQuery {
+    /// 是否 4.13.1 保证金查询消息类型（主循环分发用）
+    pub fn is_margin_query(mt: u32) -> bool {
+        mt == msg_type::MARGIN_QUERY
+    }
+
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(MarginQuery {
+            msg_type: mt,
+            appl_id: r.str(3)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            fund_pbu_id: r.str(6)?,
+        })
+    }
+}
+
+/// 保证金查询结果（4.13.2，MsgType=202586，TGW→OMS）。
+/// 表 4-122：公共字段 + NoMarginItems 重复组 + Filler1（12 字节空格）+ Filler2（4 字节 0）。
+/// 注 1：查询失败则保证金条目个数为 0；查询成功则条目个数为 4。
+#[derive(Debug, Clone, Default)]
+pub struct MarginQueryResult {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8]
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub cl_ord_id: String,          // char[10] 客户查询编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub exec_type: u8,              // 0=New 8=Rejected
+    pub ord_rej_reason: u16,        // 拒绝原因代码（ExecType=8 时填写）
+    pub fund_pbu_id: String,        // char[6] 结算账号
+    pub no_margin_items: u32,       // 保证金条目个数
+    /// 保证金条目（1=可用余额 2=总金额 3/4=预留）
+    pub margin_items: Vec<(u8, i64)>,
+}
+
+impl MarginQueryResult {
+    /// 是否 4.13.2 保证金查询结果消息类型（主循环分发用）
+    pub fn is_margin_query_result(mt: u32) -> bool {
+        mt == msg_type::MARGIN_QUERY_RESULT
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.exec_id, 16);
+        w.ch(self.exec_type);
+        w.u16(self.ord_rej_reason);
+        w.str(&self.fund_pbu_id, 6);
+        w.u32(self.margin_items.len() as u32);
+        for (item, amount) in &self.margin_items {
+            w.ch(*item);
+            w.i64(*amount);
+        }
+        w.str(&"", 12); // Filler1 占位字段，固定填空
+        w.i32(0);       // Filler2 占位字段，固定填 0
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 多腿订单（4.14.1，MsgType=1xxx21，OMS→TGW）。
+/// 公共字段同表 4-4（复用 OrderCommon，89 字节）+ 各业务扩展字段。
+#[derive(Debug, Clone, Default)]
+pub struct MultilegOrder {
+    pub msg_type: u32,
+    /// 表 4-4 公共字段
+    pub common: OrderCommon,
+    // ---- 扩展字段（超集）----
+    /// 4.14.1.1/4.14.1.2 合约账户标识码（char[6]）
+    pub contract_account_code: String,
+    /// 4.14.1.2 第二交易所订单编号（char[16]，解除组合时填拟解除组合流水号）
+    pub secondary_order_id: String,
+    /// 4.14.1.2 证券类别（char[8]，MLEG=组合）
+    pub security_type: String,
+    /// 4.14.1.2 证券子类别（char[8]，填写组合策略编码）
+    pub security_sub_type: String,
+    /// 成份合约个数
+    pub no_legs: u32,
+    /// 成份合约明细（代码/代码源/数量；103421 另有方向）
+    pub legs: Vec<MultilegLeg>,
+}
+
+/// 多腿订单成份合约重复组单条记录
+#[derive(Debug, Clone, Default)]
+pub struct MultilegLeg {
+    pub leg_security_id: String,       // char[8] 成份合约代码
+    pub leg_security_id_source: String, // char[4] 成份合约代码源
+    pub leg_side: u8,                  // 成份合约方向（1=权利仓 2=义务仓；仅 103421）
+    pub leg_order_qty: i64,            // Qty 成份合约数量
+}
+
+impl MultilegOrder {
+    /// 是否 4.14.1 多腿订单消息类型（主循环分发用）
+    pub fn is_multileg(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::NEW_ORDER_MULTILEG_EXERCISE | msg_type::NEW_ORDER_MULTILEG_STRATEGY
+        )
+    }
+
+    /// 按消息类型解码一笔多腿订单（扩展字段容忍缺失）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let common = OrderCommon::decode_from(&mut r)?;
+        let mut o = MultilegOrder {
+            msg_type: mt,
+            common,
+            ..Default::default()
+        };
+        match mt {
+            // 4.14.1.1 期权行权指令合并申报（101621）表 4-124：ContractAccountCode/NoLegs+重复组
+            msg_type::NEW_ORDER_MULTILEG_EXERCISE => {
+                if r.remaining() >= 10 {
+                    o.contract_account_code = r.str(6)?;
+                    o.no_legs = r.u32()?;
+                    for _ in 0..o.no_legs {
+                        o.legs.push(MultilegLeg {
+                            leg_security_id: r.str(8)?,
+                            leg_security_id_source: r.str(4)?,
+                            leg_order_qty: r.i64()?,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            // 4.14.1.2 期权组合策略（103421）表 4-125：ContractAccountCode/SecondaryOrderID/SecurityType/SecuritySubType/NoLegs+重复组
+            msg_type::NEW_ORDER_MULTILEG_STRATEGY => {
+                if r.remaining() >= 42 {
+                    o.contract_account_code = r.str(6)?;
+                    o.secondary_order_id = r.str(16)?;
+                    o.security_type = r.str(8)?;
+                    o.security_sub_type = r.str(8)?;
+                    o.no_legs = r.u32()?;
+                    for _ in 0..o.no_legs {
+                        o.legs.push(MultilegLeg {
+                            leg_security_id: r.str(8)?,
+                            leg_security_id_source: r.str(4)?,
+                            leg_side: r.ch()?,
+                            leg_order_qty: r.i64()?,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(o)
+    }
+}
+
+/// 多腿订单响应及撤单成功执行报告（4.14.2，MsgType=2xxx22，TGW→OMS）。
+/// 公共字段（表 4-126）27 个；扩展字段同多腿订单扩展字段一致（注 2）。
+#[derive(Debug, Clone, Default)]
+pub struct MultilegExecRpt {
+    pub msg_type: u32,
+    pub partition_no: i32,
+    pub report_index: i64,
+    pub appl_id: String,            // char[3]
+    pub reporting_pbu_id: String,   // char[6] 回报交易单元
+    pub submitting_pbu_id: String,  // char[6] 申报交易单元
+    pub security_id: String,        // char[8]
+    pub security_id_source: String, // char[4]
+    pub owner_type: u16,
+    pub clearing_firm: String,      // char[2]
+    pub transact_time: i64,
+    pub user_info: String,          // char[8]
+    pub order_id: String,           // char[16] 交易所订单编号
+    pub cl_ord_id: String,          // char[10] 客户订单编号（报价委托成交填 QuoteMsgID）
+    pub orig_cl_ord_id: String,     // char[10] 原始订单客户订单编号
+    pub exec_id: String,            // char[16] 执行编号
+    pub exec_type: u8,              // 执行类型
+    pub ord_status: u8,             // 订单状态
+    pub ord_rej_reason: u16,        // 撤单/拒绝原因代码
+    pub leaves_qty: i64,            // Qty 订单剩余数量
+    pub cum_qty: i64,               // Qty 累计执行数量
+    pub side: u8,                   // 买卖方向
+    pub ord_type: u8,               // 订单类别
+    pub order_qty: i64,             // Qty 订单数量
+    pub price: i64,                 // Price 价格
+    pub account_id: String,         // char[12]
+    pub branch_id: String,          // char[4]
+    pub order_restrictions: String, // char[4] 订单限定
+    // ---- 扩展字段（同多腿订单扩展字段，注 2）----
+    pub contract_account_code: String,
+    pub secondary_order_id: String,
+    pub security_type: String,
+    pub security_sub_type: String,
+    pub no_legs: u32,
+    pub legs: Vec<MultilegLeg>,
+}
+
+impl MultilegExecRpt {
+    /// 是否 4.14.2 多腿订单响应执行报告消息类型（主循环分发用）
+    pub fn is_multileg_exec_rpt(mt: u32) -> bool {
+        matches!(
+            mt,
+            msg_type::MULTILEG_EXEC_RPT_EXERCISE | msg_type::MULTILEG_EXEC_RPT_STRATEGY
+        )
+    }
+
+    /// 由多腿订单消息类型反查执行报告报文类型（表 4-127）
+    pub fn response_msg_type(req_mt: u32) -> u32 {
+        match req_mt {
+            msg_type::NEW_ORDER_MULTILEG_EXERCISE => msg_type::MULTILEG_EXEC_RPT_EXERCISE,
+            _ => msg_type::MULTILEG_EXEC_RPT_STRATEGY,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.i32(self.partition_no);
+        w.i64(self.report_index);
+        w.str(&self.appl_id, 3);
+        w.str(&self.reporting_pbu_id, 6);
+        w.str(&self.submitting_pbu_id, 6);
+        w.str(&self.security_id, 8);
+        w.str(&self.security_id_source, 4);
+        w.u16(self.owner_type);
+        w.str(&self.clearing_firm, 2);
+        w.i64(self.transact_time);
+        w.str(&self.user_info, 8);
+        w.str(&self.order_id, 16);
+        w.str(&self.cl_ord_id, 10);
+        w.str(&self.orig_cl_ord_id, 10);
+        w.str(&self.exec_id, 16);
+        w.ch(self.exec_type);
+        w.ch(self.ord_status);
+        w.u16(self.ord_rej_reason);
+        w.i64(self.leaves_qty);
+        w.i64(self.cum_qty);
+        w.ch(self.side);
+        w.ch(self.ord_type);
+        w.i64(self.order_qty);
+        w.i64(self.price);
+        w.str(&self.account_id, 12);
+        w.str(&self.branch_id, 4);
+        w.str(&self.order_restrictions, 4);
+        // 扩展字段同多腿订单扩展字段（注 2）
+        w.str(&self.contract_account_code, 6);
+        if self.msg_type == msg_type::MULTILEG_EXEC_RPT_STRATEGY {
+            w.str(&self.secondary_order_id, 16);
+            w.str(&self.security_type, 8);
+            w.str(&self.security_sub_type, 8);
+        }
+        w.u32(self.no_legs);
+        for leg in &self.legs {
+            w.str(&leg.leg_security_id, 8);
+            w.str(&leg.leg_security_id_source, 4);
+            if self.msg_type == msg_type::MULTILEG_EXEC_RPT_STRATEGY {
+                w.ch(leg.leg_side);
+            }
+            w.i64(leg.leg_order_qty);
+        }
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 交易会话状态消息（5.6，MsgType=10，TGW→OMS）。
+/// 表 5-7：仅固定收益交易平台（MarketSegmentID=6）提供本消息。
+#[derive(Debug, Clone, Default)]
+pub struct TradingSessionStatus {
+    pub msg_type: u32,
+    pub market_id: String,        // char[8] 市场代码，预留
+    pub market_segment_id: String, // char[8] 市场板块代码（仅第一位表示平台号，6=固定收益）
+    pub trading_session_id: String, // char[4] 交易会话 ID，预留
+    /// 交易会话子 ID（char[4] 数值型字符串）：0=开市前 100=匹配成交前 130=开盘集合竞价可撤
+    /// 150=不可撤 170=暂停 200=上午交易 230=竞买应价 300=中午休市 400=下午不可互联
+    /// 430=下午交易 450=分销后 480=收盘连续竞价 600=收市后
+    pub trading_session_sub_id: String,
+    pub trad_ses_status: u16,     // 交易会话状态，预留
+    pub trad_ses_start_time: i64, // 交易会话起始时间
+    pub trad_ses_end_time: i64,   // 交易会话结束时间
+}
+
+impl TradingSessionStatus {
+    /// 是否 5.6 交易会话状态消息类型（主循环分发用）
+    pub fn is_trading_session_status(mt: u32) -> bool {
+        mt == msg_type::TRADING_SESSION_STATUS
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = BodyWriter::new();
+        w.str(&self.market_id, 8);
+        w.str(&self.market_segment_id, 8);
+        w.str(&self.trading_session_id, 4);
+        w.str(&self.trading_session_sub_id, 4);
+        w.u16(self.trad_ses_status);
+        w.i64(self.trad_ses_start_time);
+        w.i64(self.trad_ses_end_time);
+        frame(self.msg_type, &w.into_inner())
+    }
+}
+
+/// 回报同步消息（5.2，MsgType=5，OMS→TGW）。
+/// 表 5-3：NoPartitions + 重复组 {PartitionNo, ReportIndex}。
+/// OMS 登录后告知 TGW 各分区期望接收的下一条回报记录号；
+/// 分区号须存在且不重复，否则回 20106 业务拒绝（见 session 处理）。
+#[derive(Debug, Clone, Default)]
+pub struct ReportSync {
+    pub msg_type: u32,
+    /// 平台分区数量
+    pub no_partitions: u32,
+    /// 各分区期望的下一条回报记录号
+    pub partitions: Vec<ReportSyncPartition>,
+}
+
+/// 回报同步重复组单条记录
+#[derive(Debug, Clone, Default)]
+pub struct ReportSyncPartition {
+    pub partition_no: i32, // 平台分区号（须存在且不重复）
+    pub report_index: i64, // 期望接收的下一条回报记录号
+}
+
+impl ReportSync {
+    /// 是否 5.2 回报同步消息类型（主循环分发用）
+    pub fn is_report_sync(mt: u32) -> bool {
+        mt == msg_type::REPORT_SYNC
+    }
+
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let no_partitions = r.u32()?;
+        let mut partitions = Vec::with_capacity(no_partitions as usize);
+        for _ in 0..no_partitions {
+            partitions.push(ReportSyncPartition {
+                partition_no: r.i32()?,
+                report_index: r.i64()?,
+            });
+        }
+        Ok(ReportSync { msg_type: mt, no_partitions, partitions })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TGW→OMS 出站消息的 decode 补充（与 encode 镜像，供 describe_body 捕获展示）
+// ---------------------------------------------------------------------------
+
+impl QuoteStatusReport {
+    /// 按消息类型解码一条报价状态回报（公共字段 + 各业务扩展字段）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = QuoteStatusReport {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            quote_msg_id: r.str(10)?,
+            account_id: r.str(12)?,
+            quote_req_id: r.str(10)?,
+            quote_status: r.ch()?,
+            quote_reject_reason: r.u16()?,
+            quote_type: r.ch()?,
+            bid_px: r.i64()?,
+            offer_px: r.i64()?,
+            bid_size: r.i64()?,
+            offer_size: r.i64()?,
+            ..Default::default()
+        };
+        match mt {
+            // 4.6.2.1 期权（200406）表 4-68
+            msg_type::QUOTE_STATUS_OPTION => {
+                if r.remaining() >= 8 {
+                    q.bid_position_effect = r.ch()?;
+                    q.offer_position_effect = r.ch()?;
+                    q.contract_account_code = r.str(6)?;
+                }
+            }
+            // 4.6.2.2 协议（200506）表 4-69
+            msg_type::QUOTE_STATUS_AGREEMENT => {
+                if r.remaining() >= 246 {
+                    q.branch_id = r.str(4)?;
+                    q.order_id = r.str(16)?;
+                    q.exec_id = r.str(16)?;
+                    q.quote_resp_id = r.str(16)?;
+                    q.private_quote = r.ch()?;
+                    q.side = r.ch()?;
+                    q.price_type = r.ch()?;
+                    q.valid_until_time = r.i64()?;
+                    q.cash_margin = r.ch()?;
+                    q.counterparty_pbu_id = r.str(6)?;
+                    q.memo = r.str(160)?;
+                    q.no_quote = r.u32()?;
+                    for _ in 0..q.no_quote {
+                        q.quotes.push(QuoteItem::decode_from(&mut r)?);
+                    }
+                }
+            }
+            // 4.6.2.3 债券（204106）表 4-70
+            msg_type::QUOTE_STATUS_BOND => {
+                if r.remaining() >= 424 {
+                    q.branch_id = r.str(4)?;
+                    q.order_id = r.str(16)?;
+                    q.quote_reject_text = r.str(50)?;
+                    q.exec_id = r.str(16)?;
+                    q.quote_resp_id = r.str(16)?;
+                    q.private_quote = r.ch()?;
+                    q.side = r.ch()?;
+                    q.price_type = r.ch()?;
+                    q.valid_until_time = r.i64()?;
+                    q.cash_margin = r.ch()?;
+                    q.member_id = r.str(6)?;
+                    q.investor_type = r.str(2)?;
+                    q.investor_id = r.str(10)?;
+                    q.investor_name = r.str(120)?;
+                    q.trader_code = r.str(8)?;
+                    q.settl_type = r.u16()?;
+                    q.settl_period = r.ch()?;
+                    q.pre_trade_anonymity = r.ch()?;
+                    q.max_floor = r.i64()?;
+                    q.min_qty = r.i64()?;
+                    q.memo = r.str(160)?;
+                    q.no_counterparty = r.u32()?;
+                    for _ in 0..q.no_counterparty {
+                        q.counterparties.push(CounterpartyInfo::decode_from(&mut r)?);
+                    }
+                    q.no_quote = r.u32()?;
+                    for _ in 0..q.no_quote {
+                        q.quotes.push(QuoteItem::decode_from(&mut r)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+impl AllegeQuote {
+    /// 按消息类型解码一条转发报价（公共字段 + 各业务扩展字段）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = AllegeQuote {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            exec_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            quote_req_id: r.str(10)?,
+            quote_id: r.str(10)?,
+            quote_resp_id: r.str(16)?,
+            quote_type: r.ch()?,
+            bid_px: r.i64()?,
+            offer_px: r.i64()?,
+            bid_size: r.i64()?,
+            offer_size: r.i64()?,
+            private_quote: r.ch()?,
+            valid_until_time: r.i64()?,
+            price_type: r.ch()?,
+            memo: r.str(160)?,
+            ..Default::default()
+        };
+        match mt {
+            // 4.6.4.1 协议（200526）表 4-73
+            msg_type::ALLEGE_QUOTE_AGREEMENT => {
+                if r.remaining() >= 7 {
+                    q.cash_margin = r.ch()?;
+                    q.counterparty_pbu_id = r.str(6)?;
+                }
+            }
+            // 4.6.4.2 债券（204126）表 4-74
+            msg_type::ALLEGE_QUOTE_BOND => {
+                if r.remaining() >= 312 {
+                    q.cash_margin = r.ch()?;
+                    q.member_id = r.str(6)?;
+                    q.investor_type = r.str(2)?;
+                    q.investor_id = r.str(10)?;
+                    q.investor_name = r.str(120)?;
+                    q.trader_code = r.str(8)?;
+                    q.counterparty_member_id = r.str(6)?;
+                    q.counterparty_investor_type = r.str(2)?;
+                    q.counterparty_investor_id = r.str(10)?;
+                    q.counterparty_investor_name = r.str(120)?;
+                    q.counterparty_trader_code = r.str(8)?;
+                    q.settl_type = r.u16()?;
+                    q.settl_period = r.ch()?;
+                    q.max_floor = r.i64()?;
+                    q.min_qty = r.i64()?;
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+impl AllegeQuoteResponse {
+    /// 按消息类型解码一条转发报价回复（表 4-75，无扩展字段）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(AllegeQuoteResponse {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            exec_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            quote_id: r.str(10)?,
+            quote_resp_id: r.str(16)?,
+            quote_resp_type: r.ch()?,
+            private_quote: r.ch()?,
+            order_qty: r.i64()?,
+            price: r.i64()?,
+            side: r.ch()?,
+            valid_until_time: r.i64()?,
+            quote_type: r.ch()?,
+            price_type: r.ch()?,
+        })
+    }
+}
+
+impl QuoteRequestAck {
+    /// 按消息类型解码一条询价请求响应（公共字段 + 各业务扩展字段）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = QuoteRequestAck {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            exec_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            quote_req_id: r.str(10)?,
+            quote_request_trans_type: r.u16()?,
+            quote_request_type: r.u16()?,
+            private_quote: r.ch()?,
+            quote_request_status: r.ch()?,
+            quote_request_reject_reason: r.u16()?,
+            order_qty: r.i64()?,
+            price: r.i64()?,
+            side: r.ch()?,
+            expire_time: r.i64()?,
+            quote_type: r.ch()?,
+            quote_price_type: r.u16()?,
+            memo: r.str(160)?,
+            ..Default::default()
+        };
+        match mt {
+            // 200517：同 100517（表 4-77）
+            msg_type::QUOTE_REQUEST_ACK_AGREEMENT => {
+                if r.remaining() >= 5 {
+                    q.cash_margin = r.ch()?;
+                    q.no_counterparty_pbu = r.u32()?;
+                    for _ in 0..q.no_counterparty_pbu {
+                        q.counterparty_pbus.push(r.str(6)?);
+                    }
+                }
+            }
+            // 204117（表 4-80）
+            msg_type::QUOTE_REQUEST_ACK_BOND => {
+                if r.remaining() >= 204 {
+                    q.member_id = r.str(6)?;
+                    q.investor_type = r.str(2)?;
+                    q.investor_id = r.str(10)?;
+                    q.investor_name = r.str(120)?;
+                    q.trader_code = r.str(8)?;
+                    q.settl_type = r.u16()?;
+                    q.settl_period = r.ch()?;
+                    q.pre_trade_anonymity = r.ch()?;
+                    q.quote_request_reject_text = r.str(50)?;
+                    q.no_counterparty = r.u32()?;
+                    for _ in 0..q.no_counterparty {
+                        q.counterparties.push(CounterpartyInfo::decode_from(&mut r)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+impl AllegeQuoteRequest {
+    /// 按消息类型解码一条转发询价请求（公共字段 + 各业务扩展字段）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = AllegeQuoteRequest {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            exec_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            account_id: r.str(12)?,
+            quote_req_id: r.str(10)?,
+            quote_request_trans_type: r.u16()?,
+            quote_request_type: r.u16()?,
+            quote_request_status: r.ch()?,
+            private_quote: r.ch()?,
+            order_qty: r.i64()?,
+            price: r.i64()?,
+            side: r.ch()?,
+            expire_time: r.i64()?,
+            quote_type: r.ch()?,
+            quote_price_type: r.u16()?,
+            memo: r.str(160)?,
+            ..Default::default()
+        };
+        match mt {
+            // 4.7.3.1 协议（200525）表 4-82
+            msg_type::ALLEGE_QUOTE_REQUEST_AGREEMENT => {
+                if r.remaining() >= 7 {
+                    q.cash_margin = r.ch()?;
+                    q.counterparty_pbu_id = r.str(6)?;
+                }
+            }
+            // 4.7.3.2 债券（204125）表 4-83
+            msg_type::ALLEGE_QUOTE_REQUEST_BOND => {
+                if r.remaining() >= 295 {
+                    q.member_id = r.str(6)?;
+                    q.investor_type = r.str(2)?;
+                    q.investor_id = r.str(10)?;
+                    q.investor_name = r.str(120)?;
+                    q.trader_code = r.str(8)?;
+                    q.counterparty_member_id = r.str(6)?;
+                    q.counterparty_investor_type = r.str(2)?;
+                    q.counterparty_investor_id = r.str(10)?;
+                    q.counterparty_investor_name = r.str(120)?;
+                    q.counterparty_trader_code = r.str(8)?;
+                    q.settl_type = r.u16()?;
+                    q.settl_period = r.ch()?;
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+impl IOIResponse {
+    /// 按消息类型解码一条意向申报响应（表 4-86 + 表 4-87）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = IOIResponse {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            quote_resp_id: r.str(16)?,
+            quote_resp_type: r.ch()?,
+            exec_type: r.ch()?,
+            quote_reject_reason: r.u16()?,
+            ioi_id: r.str(10)?,
+            ioi_ref_id: r.str(10)?,
+            ioi_trans_type: r.ch()?,
+            side: r.ch()?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            ioi_qty: r.i64()?,
+            price: r.i64()?,
+            ..Default::default()
+        };
+        // 4.8.2.1（表 4-87）：Contactor/ContactInfo
+        if r.remaining() >= 42 {
+            q.contactor = r.str(12)?;
+            q.contact_info = r.str(30)?;
+        }
+        Ok(q)
+    }
+}
+
+impl TcrAck {
+    /// 按消息类型解码一条成交申报响应（公共字段 + 扩展原始字节）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = TcrAck {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            trade_id: r.str(16)?,
+            trade_report_id: r.str(10)?,
+            trade_report_type: r.ch()?,
+            trade_report_trans_type: r.ch()?,
+            trade_handling_instr: r.ch()?,
+            trade_report_ref_id: r.str(10)?,
+            trd_ack_status: r.ch()?,
+            trd_rpt_status: r.u16()?,
+            trade_report_reject_reason: r.u16()?,
+            last_px: r.i64()?,
+            last_qty: r.i64()?,
+            trd_type: r.u16()?,
+            trd_sub_type: r.u16()?,
+            confirm_id: r.str(8)?,
+            exec_id: r.str(16)?,
+            side: r.ch()?,
+            pbu_id: r.str(6)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            counterparty_pbu_id: r.str(6)?,
+            counterparty_account_id: r.str(12)?,
+            counterparty_branch_id: r.str(4)?,
+            ..Default::default()
+        };
+        // 债券借贷（204204）扩展最前是 TradeReportRejectText（注 3），其余原样保存
+        if mt == msg_type::TCR_ACK_BOND_LENDING && r.remaining() >= 50 {
+            q.trade_report_reject_text = r.str(50)?;
+        }
+        q.extend = r.take_rest()?;
+        Ok(q)
+    }
+}
+
+impl AllegeTcr {
+    /// 按消息类型解码一条转发成交申报（公共字段 + 扩展原始字节）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = AllegeTcr {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            trade_id: r.str(16)?,
+            trade_report_id: r.str(10)?,
+            trade_report_type: r.ch()?,
+            trade_report_trans_type: r.ch()?,
+            trade_handling_instr: r.ch()?,
+            trade_report_ref_id: r.str(10)?,
+            last_px: r.i64()?,
+            last_qty: r.i64()?,
+            trd_type: r.u16()?,
+            trd_sub_type: r.u16()?,
+            confirm_id: r.str(8)?,
+            exec_id: r.str(16)?,
+            side: r.ch()?,
+            pbu_id: r.str(6)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            counterparty_pbu_id: r.str(6)?,
+            counterparty_account_id: r.str(12)?,
+            counterparty_branch_id: r.str(4)?,
+            extend: Vec::new(),
+        };
+        q.extend = r.take_rest()?;
+        Ok(q)
+    }
+}
+
+impl TcrConfirm {
+    /// 按消息类型解码一条成交确认（公共字段 + 扩展原始字节）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = TcrConfirm {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            trade_id: r.str(16)?,
+            trade_report_id: r.str(10)?,
+            trade_report_type: r.ch()?,
+            trade_report_trans_type: r.ch()?,
+            trade_handling_instr: r.ch()?,
+            last_px: r.i64()?,
+            last_qty: r.i64()?,
+            trd_type: r.u16()?,
+            trd_sub_type: r.u16()?,
+            confirm_id: r.str(8)?,
+            exec_id: r.str(16)?,
+            side: r.ch()?,
+            pbu_id: r.str(6)?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            counterparty_pbu_id: r.str(6)?,
+            counterparty_account_id: r.str(12)?,
+            counterparty_branch_id: r.str(4)?,
+            extend: Vec::new(),
+        };
+        q.extend = r.take_rest()?;
+        Ok(q)
+    }
+}
+
+impl DesignationReport {
+    /// 按消息类型解码一条注册执行报告（表 4-116）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(DesignationReport {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            orig_cl_ord_id: r.str(10)?,
+            exec_id: r.str(16)?,
+            exec_type: r.ch()?,
+            ord_rej_reason: r.u16()?,
+            designation_instruction: r.ch()?,
+            designation_trans_type: r.ch()?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            order_qty: r.i64()?,
+            transferee_pbu_id: r.str(6)?,
+        })
+    }
+}
+
+impl EvoteReport {
+    /// 按消息类型解码一条投票执行报告（表 4-118）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(EvoteReport {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            exec_id: r.str(16)?,
+            exec_type: r.ch()?,
+            ord_rej_reason: r.u16()?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            voting_proposal: r.u16()?,
+            voting_sub_proposal: r.u16()?,
+            voting_preference: r.ch()?,
+            order_qty: r.i64()?,
+        })
+    }
+}
+
+impl PasswordServiceReport {
+    /// 按消息类型解码一条密码服务执行报告（表 4-120）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(PasswordServiceReport {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            exec_id: r.str(16)?,
+            exec_type: r.ch()?,
+            ord_rej_reason: r.u16()?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            validation_code: r.u32()?,
+        })
+    }
+}
+
+impl MarginQueryResult {
+    /// 按消息类型解码一条保证金查询结果（表 4-122）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = MarginQueryResult {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            cl_ord_id: r.str(10)?,
+            exec_id: r.str(16)?,
+            exec_type: r.ch()?,
+            ord_rej_reason: r.u16()?,
+            fund_pbu_id: r.str(6)?,
+            no_margin_items: 0,
+            margin_items: Vec::new(),
+        };
+        // NoMarginItems 重复组与 Filler 占位字段位于 FundPBUID 之后
+        let n = r.u32()?;
+        q.no_margin_items = n;
+        for _ in 0..n {
+            q.margin_items.push((r.ch()?, r.i64()?));
+        }
+        let _filler1 = r.str(12)?; // 占位字段，固定填空
+        let _filler2 = r.i32()?;   // 占位字段，固定填 0
+        Ok(q)
+    }
+}
+
+impl MultilegExecRpt {
+    /// 按消息类型解码一条多腿订单执行报告（公共字段 + 各业务扩展字段）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        let mut q = MultilegExecRpt {
+            msg_type: mt,
+            partition_no: r.i32()?,
+            report_index: r.i64()?,
+            appl_id: r.str(3)?,
+            reporting_pbu_id: r.str(6)?,
+            submitting_pbu_id: r.str(6)?,
+            security_id: r.str(8)?,
+            security_id_source: r.str(4)?,
+            owner_type: r.u16()?,
+            clearing_firm: r.str(2)?,
+            transact_time: r.i64()?,
+            user_info: r.str(8)?,
+            order_id: r.str(16)?,
+            cl_ord_id: r.str(10)?,
+            orig_cl_ord_id: r.str(10)?,
+            exec_id: r.str(16)?,
+            exec_type: r.ch()?,
+            ord_status: r.ch()?,
+            ord_rej_reason: r.u16()?,
+            leaves_qty: r.i64()?,
+            cum_qty: r.i64()?,
+            side: r.ch()?,
+            ord_type: r.ch()?,
+            order_qty: r.i64()?,
+            price: r.i64()?,
+            account_id: r.str(12)?,
+            branch_id: r.str(4)?,
+            order_restrictions: r.str(4)?,
+            ..Default::default()
+        };
+        match mt {
+            // 201622：同 101621 扩展（表 4-124）
+            msg_type::MULTILEG_EXEC_RPT_EXERCISE => {
+                if r.remaining() >= 10 {
+                    q.contract_account_code = r.str(6)?;
+                    q.no_legs = r.u32()?;
+                    for _ in 0..q.no_legs {
+                        q.legs.push(MultilegLeg {
+                            leg_security_id: r.str(8)?,
+                            leg_security_id_source: r.str(4)?,
+                            leg_order_qty: r.i64()?,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            // 203422：同 103421 扩展（表 4-125）
+            msg_type::MULTILEG_EXEC_RPT_STRATEGY => {
+                if r.remaining() >= 42 {
+                    q.contract_account_code = r.str(6)?;
+                    q.secondary_order_id = r.str(16)?;
+                    q.security_type = r.str(8)?;
+                    q.security_sub_type = r.str(8)?;
+                    q.no_legs = r.u32()?;
+                    for _ in 0..q.no_legs {
+                        q.legs.push(MultilegLeg {
+                            leg_security_id: r.str(8)?,
+                            leg_security_id_source: r.str(4)?,
+                            leg_side: r.ch()?,
+                            leg_order_qty: r.i64()?,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(q)
+    }
+}
+
+impl TradingSessionStatus {
+    /// 按消息类型解码一条交易会话状态消息（表 5-7）
+    pub fn decode(mt: u32, body: &[u8]) -> io::Result<Self> {
+        let mut r = BodyReader::new(body);
+        Ok(TradingSessionStatus {
+            msg_type: mt,
+            market_id: r.str(8)?,
+            market_segment_id: r.str(8)?,
+            trading_session_id: r.str(4)?,
+            trading_session_sub_id: r.str(4)?,
+            trad_ses_status: r.u16()?,
+            trad_ses_start_time: r.i64()?,
+            trad_ses_end_time: r.i64()?,
+        })
+    }
+}
+
 // 消息类型中文名与报文逐字段解析（供捕获展示/持久化使用）
 // ---------------------------------------------------------------------------
 
@@ -1929,6 +5140,92 @@ pub fn msg_type_name(mt: u32) -> &'static str {
         msg_type::EXEC_RPT_BOND_CASH_TRADE => "成交执行报告 ExecRptBondCashTrade(204115)",
         msg_type::EXEC_RPT_BOND_BID_TRADE => "成交执行报告 ExecRptBondBidTrade(204130)",
         msg_type::EXEC_RPT_HK_TRADE => "成交执行报告 ExecRptHkTrade(206315)",
+        // ---- 5.6 交易会话状态 ----
+        msg_type::TRADING_SESSION_STATUS => "交易会话状态 TradingSessionStatus(10)",
+        // ---- 4.6.1 报价 ----
+        msg_type::QUOTE_OPTION => "报价 QuoteOption(100405)",
+        msg_type::QUOTE_AGREEMENT => "报价 QuoteAgreement(100505)",
+        msg_type::QUOTE_BOND => "报价 QuoteBond(104105)",
+        // ---- 4.6.2 报价状态回报 ----
+        msg_type::QUOTE_STATUS_OPTION => "报价状态回报 QuoteStatusOption(200406)",
+        msg_type::QUOTE_STATUS_AGREEMENT => "报价状态回报 QuoteStatusAgreement(200506)",
+        msg_type::QUOTE_STATUS_BOND => "报价状态回报 QuoteStatusBond(204106)",
+        // ---- 4.6.3 报价回复 ----
+        msg_type::QUOTE_RESPONSE_AGREEMENT => "报价回复 QuoteResponseAgreement(100510)",
+        msg_type::QUOTE_RESPONSE_BOND => "报价回复 QuoteResponseBond(104110)",
+        // ---- 4.6.4 转发报价 ----
+        msg_type::ALLEGE_QUOTE_AGREEMENT => "转发报价 AllegeQuoteAgreement(200526)",
+        msg_type::ALLEGE_QUOTE_BOND => "转发报价 AllegeQuoteBond(204126)",
+        // ---- 4.6.5 转发报价回复 ----
+        msg_type::ALLEGE_QUOTE_RESPONSE_AGREEMENT => "转发报价回复 AllegeQuoteResponseAgreement(200527)",
+        msg_type::ALLEGE_QUOTE_RESPONSE_BOND => "转发报价回复 AllegeQuoteResponseBond(204127)",
+        // ---- 4.7.1 询价请求 ----
+        msg_type::QUOTE_REQUEST_AGREEMENT => "询价请求 QuoteRequestAgreement(100517)",
+        msg_type::QUOTE_REQUEST_BOND => "询价请求 QuoteRequestBond(104117)",
+        // ---- 4.7.2 询价请求响应 ----
+        msg_type::QUOTE_REQUEST_ACK_AGREEMENT => "询价请求响应 QuoteRequestAckAgreement(200517)",
+        msg_type::QUOTE_REQUEST_ACK_BOND => "询价请求响应 QuoteRequestAckBond(204117)",
+        // ---- 4.7.3 转发询价请求 ----
+        msg_type::ALLEGE_QUOTE_REQUEST_AGREEMENT => "转发询价请求 AllegeQuoteRequestAgreement(200525)",
+        msg_type::ALLEGE_QUOTE_REQUEST_BOND => "转发询价请求 AllegeQuoteRequestBond(204125)",
+        // ---- 4.8 意向申报 ----
+        msg_type::IOI => "意向申报 IndicationOfInterest(100509)",
+        msg_type::IOI_RESPONSE => "意向申报响应 IOIResponse(200510)",
+        // ---- 4.9.1 成交申报 ----
+        msg_type::TCR_AGREEMENT => "成交申报 TcrAgreement(100503)",
+        msg_type::TCR_SEC_LENDING => "成交申报 TcrSecLending(100703)",
+        msg_type::TCR_AM_PLAN => "成交申报 TcrAmPlan(100803)",
+        msg_type::TCR_STOCK_PLEDGE => "成交申报 TcrStockPledge(100903)",
+        msg_type::TCR_AGREED_BUYBACK => "成交申报 TcrAgreedBuyback(101003)",
+        msg_type::TCR_QUOTED_REPO => "成交申报 TcrQuotedRepo(101103)",
+        msg_type::TCR_BOND_AGREEMENT_REPO => "成交申报 TcrBondAgreementRepo(103003)",
+        msg_type::TCR_BOND_3P_REPO => "成交申报 TcrBond3pRepo(103203)",
+        msg_type::TCR_BOND_CASH => "成交申报 TcrBondCash(104103)",
+        msg_type::TCR_BOND_TRANSFER => "成交申报 TcrBondTransfer(104303)",
+        msg_type::TCR_BOND_LENDING => "成交申报 TcrBondLending(104203)",
+        // ---- 4.9.2 成交申报响应 ----
+        msg_type::TCR_ACK_AGREEMENT => "成交申报响应 TcrAckAgreement(200504)",
+        msg_type::TCR_ACK_SEC_LENDING => "成交申报响应 TcrAckSecLending(200704)",
+        msg_type::TCR_ACK_AM_PLAN => "成交申报响应 TcrAckAmPlan(200804)",
+        msg_type::TCR_ACK_STOCK_PLEDGE => "成交申报响应 TcrAckStockPledge(200904)",
+        msg_type::TCR_ACK_AGREED_BUYBACK => "成交申报响应 TcrAckAgreedBuyback(201004)",
+        msg_type::TCR_ACK_QUOTED_REPO => "成交申报响应 TcrAckQuotedRepo(201104)",
+        msg_type::TCR_ACK_BOND_AGREEMENT_REPO => "成交申报响应 TcrAckBondAgreementRepo(203004)",
+        msg_type::TCR_ACK_BOND_3P_REPO => "成交申报响应 TcrAckBond3pRepo(203204)",
+        msg_type::TCR_ACK_BOND_CASH => "成交申报响应 TcrAckBondCash(204104)",
+        msg_type::TCR_ACK_BOND_LENDING => "成交申报响应 TcrAckBondLending(204204)",
+        msg_type::TCR_ACK_BOND_TRANSFER => "成交申报响应 TcrAckBondTransfer(204304)",
+        // ---- 4.9.3 转发成交申报 ----
+        msg_type::ALLEGE_TCR_BOND_AGREEMENT_REPO => "转发成交申报 AllegeTcrBondAgreementRepo(203020)",
+        msg_type::ALLEGE_TCR_BOND_3P_REPO => "转发成交申报 AllegeTcrBond3pRepo(203220)",
+        msg_type::ALLEGE_TCR_BOND_CASH => "转发成交申报 AllegeTcrBondCash(204120)",
+        msg_type::ALLEGE_TCR_BOND_LENDING => "转发成交申报 AllegeTcrBondLending(204220)",
+        msg_type::ALLEGE_TCR_BOND_TRANSFER => "转发成交申报 AllegeTcrBondTransfer(204320)",
+        // ---- 4.9.4 成交确认 ----
+        msg_type::TCR_CONFIRM_AGREEMENT => "成交确认 TcrConfirmAgreement(200503)",
+        msg_type::TCR_CONFIRM_SEC_LENDING => "成交确认 TcrConfirmSecLending(200703)",
+        msg_type::TCR_CONFIRM_BOND_AGREEMENT_REPO => "成交确认 TcrConfirmBondAgreementRepo(203003)",
+        msg_type::TCR_CONFIRM_BOND_3P_REPO => "成交确认 TcrConfirmBond3pRepo(203203)",
+        msg_type::TCR_CONFIRM_BOND_CASH => "成交确认 TcrConfirmBondCash(204103)",
+        msg_type::TCR_CONFIRM_BOND_LENDING => "成交确认 TcrConfirmBondLending(204203)",
+        msg_type::TCR_CONFIRM_BOND_TRANSFER => "成交确认 TcrConfirmBondTransfer(204303)",
+        // ---- 4.10 转托管 ----
+        msg_type::DESIGNATION => "注册 Designation(102099)",
+        msg_type::DESIGNATION_REPORT => "注册执行报告 DesignationReport(202098)",
+        // ---- 4.11 网络投票 ----
+        msg_type::EVOTE => "投票 Evote(102197)",
+        msg_type::EVOTE_REPORT => "投票执行报告 EvoteReport(202196)",
+        // ---- 4.12 密码服务 ----
+        msg_type::PASSWORD_SERVICE => "密码服务 PasswordService(102489)",
+        msg_type::PASSWORD_SERVICE_REPORT => "密码服务执行报告 PasswordServiceReport(202488)",
+        // ---- 4.13 保证金查询 ----
+        msg_type::MARGIN_QUERY => "保证金查询 MarginQuery(102587)",
+        msg_type::MARGIN_QUERY_RESULT => "保证金查询结果 MarginQueryResult(202586)",
+        // ---- 4.14 多腿订单 ----
+        msg_type::NEW_ORDER_MULTILEG_EXERCISE => "多腿订单 MultilegOrderExercise(101621)",
+        msg_type::NEW_ORDER_MULTILEG_STRATEGY => "多腿订单 MultilegOrderStrategy(103421)",
+        msg_type::MULTILEG_EXEC_RPT_EXERCISE => "多腿订单执行报告 MultilegExecRptExercise(201622)",
+        msg_type::MULTILEG_EXEC_RPT_STRATEGY => "多腿订单执行报告 MultilegExecRptStrategy(203422)",
         _ => "未知消息",
     }
 }
@@ -2031,11 +5328,22 @@ fn appl_id_label(s: &str) -> String {
         "020" => "020 (债券通用质押式回购)".into(),
         "030" => "030 (债券分销)".into(),
         "040" => "040 (期权集中竞价)".into(),
+        "041" => "041 (期权集中竞价交易报价申报)".into(),
+        "050" => "050 (协议交易意向申报)".into(),
+        "053" => "053 (协议交易双方协议成交申报)".into(),
+        "055" => "055 (协议交易询价请求)".into(),
+        "056" => "056 (协议交易报价申报)".into(),
+        "057" => "057 (协议交易报价回复申报)".into(),
         "051" => "051 (协议交易定价)".into(),
         "052" => "052 (协议交易点击成交)".into(),
         "060" => "060 (盘后定价大宗-收盘价)".into(),
         "061" => "061 (盘后定价大宗-VWAP)".into(),
         "070" => "070 (转融通证券出借)".into(),
+        "071" => "071 (转融通证券出借约定申报)".into(),
+        "080" => "080 (资产管理计划份额转让)".into(),
+        "090" => "090 (股票质押式回购)".into(),
+        "100" => "100 (约定购回)".into(),
+        "110" => "110 (质押式报价回购)".into(),
         "120" => "120 (ETF实时申赎)".into(),
         "130" => "130 (网上发行-发行增发)".into(),
         "131" => "131 (网上发行-向原持有人配售)".into(),
@@ -2045,30 +5353,48 @@ fn appl_id_label(s: &str) -> String {
         "151" => "151 (债券回售)".into(),
         "152" => "152 (债券回售撤销)".into(),
         "160" => "160 (期权行权)".into(),
+        "161" => "161 (期权行权指令合并申报)".into(),
         "170" => "170 (开放式基金申赎)".into(),
         "180" => "180 (要约收购-预受要约)".into(),
         "181" => "181 (要约收购-解除预受)".into(),
         "190" => "190 (回购质押)".into(),
         "191" => "191 (回购解押)".into(),
+        "200" => "200 (转托管)".into(),
+        "210" => "210 (网络投票)".into(),
         "220" => "220 (黄金ETF实物申赎)".into(),
         "230" => "230 (权证行权)".into(),
+        "240" => "240 (密码服务激活)".into(),
+        "241" => "241 (密码服务挂失或重置)".into(),
+        "250" => "250 (保证金查询)".into(),
         "270" => "270 (转处置-扣券)".into(),
         "271" => "271 (转处置-还券)".into(),
         "280" => "280 (垫券)".into(),
         "281" => "281 (还券)".into(),
         "290" => "290 (待清偿扣划-客户)".into(),
         "291" => "291 (待清偿扣划-自营)".into(),
+        "300" => "300 (债券质押式协议回购)".into(),
         "310" => "310 (分级基金实时分拆)".into(),
         "311" => "311 (分级基金实时合并)".into(),
+        "320" => "320 (债券质押式三方回购)".into(),
         "330" => "330 (三方回购入库)".into(),
         "331" => "331 (三方回购出库)".into(),
+        "340" => "340 (期权组合策略构建组合)".into(),
+        "341" => "341 (期权组合策略解除组合)".into(),
         "350" => "350 (期权普通转备兑)".into(),
         "351" => "351 (期权备兑转普通)".into(),
         "370" => "370 (盘后定价交易)".into(),
         "410" => "410 (债券现券匹配成交)".into(),
+        "411" => "411 (债券现券协商成交)".into(),
         "412" => "412 (债券现券点击报价)".into(),
+        "413" => "413 (债券现券点击报价回复)".into(),
+        "414" => "414 (债券现券询价请求)".into(),
         "415" => "415 (债券现券询价报价)".into(),
+        "416" => "416 (债券现券询价报价回复)".into(),
         "417" => "417 (债券现券竞买成交)".into(),
+        "419" => "419 (债券现券交易解除)".into(),
+        "41A" => "41A (债券现券协商成交合并)".into(),
+        "420" => "420 (债券借贷)".into(),
+        "430" => "430 (债券转让回售转售)".into(),
         "470" => "470 (跨银行间ETF实物申赎)".into(),
         "630" => "630 (港股通)".into(),
         other => other.to_string(),
@@ -2552,6 +5878,1015 @@ fn describe_trade_extend(mt: u32, t: &ExecRptTrade) -> Vec<ParsedField> {
     out
 }
 
+/// 4.6.1 报价 → 字段列表（含各业务扩展字段，describe_body 用）
+fn describe_quote(o: &Quote) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("ApplID", appl_id_label(&o.appl_id)),
+        f("SubmittingPBUId", &o.submitting_pbu_id),
+        f("SecurityID", &o.security_id),
+        f("SecurityIDSource", &o.security_id_source),
+        f("OwnerType", o.owner_type),
+        f("ClearingFirm", &o.clearing_firm),
+        f("TransactTime", fmt_time(o.transact_time)),
+        f("UserInfo", &o.user_info),
+        f("QuoteMsgID", &o.quote_msg_id),
+        f("AccountID", &o.account_id),
+        f("QuoteReqID", &o.quote_req_id),
+        f("QuoteType", o.quote_type as char),
+        f("BidPx", fmt_scaled(o.bid_px, 10000)),
+        f("OfferPx", fmt_scaled(o.offer_px, 10000)),
+        f("BidSize", fmt_scaled(o.bid_size, 100)),
+        f("OfferSize", fmt_scaled(o.offer_size, 100)),
+    ];
+    match o.msg_type {
+        // 4.6.1.1 期权（100405）表 4-64
+        msg_type::QUOTE_OPTION => {
+            out.push(f("BidPositionEffect", o.bid_position_effect as char));
+            out.push(f("OfferPositionEffect", o.offer_position_effect as char));
+            out.push(f("ContractAccountCode", &o.contract_account_code));
+        }
+        // 4.6.1.2 协议（100505）表 4-65
+        msg_type::QUOTE_AGREEMENT => {
+            out.push(f("BranchID", &o.branch_id));
+            out.push(f("QuoteID", &o.quote_id));
+            out.push(f("QuoteRespID", &o.quote_resp_id));
+            out.push(f("PrivateQuote", o.private_quote as char));
+            out.push(f("ValidUntilTime", fmt_time(o.valid_until_time)));
+            out.push(f("PriceType", o.price_type as char));
+            out.push(f("CashMargin", o.cash_margin as char));
+            out.push(f("CounterpartyPBUID", &o.counterparty_pbu_id));
+            out.push(f("Memo", &o.memo));
+        }
+        // 4.6.1.3 债券（104105）表 4-66
+        msg_type::QUOTE_BOND => {
+            out.push(f("BranchID", &o.branch_id));
+            out.push(f("QuoteID", &o.quote_id));
+            out.push(f("QuoteRespID", &o.quote_resp_id));
+            out.push(f("PrivateQuote", o.private_quote as char));
+            out.push(f("ValidUntilTime", fmt_time(o.valid_until_time)));
+            out.push(f("PriceType", o.price_type as char));
+            out.push(f("CashMargin", o.cash_margin as char));
+            out.push(f("MemberID", &o.member_id));
+            out.push(f("InvestorType", &o.investor_type));
+            out.push(f("InvestorID", &o.investor_id));
+            out.push(f("InvestorName", &o.investor_name));
+            out.push(f("TraderCode", &o.trader_code));
+            out.push(f("SettlType", o.settl_type));
+            out.push(f("SettlPeriod", o.settl_period as char));
+            out.push(f("PreTradeAnonymity", o.pre_trade_anonymity as char));
+            out.push(f("MaxFloor", fmt_scaled(o.max_floor, 100)));
+            out.push(f("MinQty", fmt_scaled(o.min_qty, 100)));
+            out.push(f("Memo", &o.memo));
+            out.push(f("NoCounterparty", o.no_counterparty));
+            for (i, cp) in o.counterparties.iter().enumerate() {
+                out.push(f(format!("Counterparty[{0}].MemberID", i + 1), &cp.member_id));
+                out.push(f(format!("Counterparty[{0}].InvestorType", i + 1), &cp.investor_type));
+                out.push(f(format!("Counterparty[{0}].InvestorID", i + 1), &cp.investor_id));
+                out.push(f(format!("Counterparty[{0}].InvestorName", i + 1), &cp.investor_name));
+                out.push(f(format!("Counterparty[{0}].TraderCode", i + 1), &cp.trader_code));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.6.2 报价状态回报 → 字段列表（含各业务扩展字段）
+fn describe_quote_status(q: &QuoteStatusReport) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("QuoteMsgID", &q.quote_msg_id),
+        f("AccountID", &q.account_id),
+        f("QuoteReqID", &q.quote_req_id),
+        f("QuoteStatus", q.quote_status as char),
+        f("QuoteRejectReason", q.quote_reject_reason),
+        f("QuoteType", q.quote_type as char),
+        f("BidPx", fmt_scaled(q.bid_px, 10000)),
+        f("OfferPx", fmt_scaled(q.offer_px, 10000)),
+        f("BidSize", fmt_scaled(q.bid_size, 100)),
+        f("OfferSize", fmt_scaled(q.offer_size, 100)),
+    ];
+    match q.msg_type {
+        // 4.6.2.1 期权（200406）表 4-68
+        msg_type::QUOTE_STATUS_OPTION => {
+            out.push(f("BidPositionEffect", q.bid_position_effect as char));
+            out.push(f("OfferPositionEffect", q.offer_position_effect as char));
+            out.push(f("ContractAccountCode", &q.contract_account_code));
+        }
+        // 4.6.2.2 协议（200506）表 4-69
+        msg_type::QUOTE_STATUS_AGREEMENT => {
+            out.push(f("BranchID", &q.branch_id));
+            out.push(f("OrderID", &q.order_id));
+            out.push(f("ExecID", &q.exec_id));
+            out.push(f("QuoteRespID", &q.quote_resp_id));
+            out.push(f("PrivateQuote", q.private_quote as char));
+            out.push(f("Side", side_label(q.side)));
+            out.push(f("PriceType", q.price_type as char));
+            out.push(f("ValidUntilTime", fmt_time(q.valid_until_time)));
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("CounterpartyPBUID", &q.counterparty_pbu_id));
+            out.push(f("Memo", &q.memo));
+            out.push(f("NoQuote", q.no_quote));
+            for (i, it) in q.quotes.iter().enumerate() {
+                out.push(f(format!("Quote[{0}].QuoteID", i + 1), &it.quote_id));
+                out.push(f(format!("Quote[{0}].QuotePrice", i + 1), fmt_scaled(it.quote_price, 10000)));
+                out.push(f(format!("Quote[{0}].QuoteQty", i + 1), fmt_scaled(it.quote_qty, 100)));
+            }
+        }
+        // 4.6.2.3 债券（204106）表 4-70
+        msg_type::QUOTE_STATUS_BOND => {
+            out.push(f("BranchID", &q.branch_id));
+            out.push(f("OrderID", &q.order_id));
+            out.push(f("QuoteRejectText", &q.quote_reject_text));
+            out.push(f("ExecID", &q.exec_id));
+            out.push(f("QuoteRespID", &q.quote_resp_id));
+            out.push(f("PrivateQuote", q.private_quote as char));
+            out.push(f("Side", side_label(q.side)));
+            out.push(f("PriceType", q.price_type as char));
+            out.push(f("ValidUntilTime", fmt_time(q.valid_until_time)));
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("MemberID", &q.member_id));
+            out.push(f("InvestorType", &q.investor_type));
+            out.push(f("InvestorID", &q.investor_id));
+            out.push(f("InvestorName", &q.investor_name));
+            out.push(f("TraderCode", &q.trader_code));
+            out.push(f("SettlType", q.settl_type));
+            out.push(f("SettlPeriod", q.settl_period as char));
+            out.push(f("PreTradeAnonymity", q.pre_trade_anonymity as char));
+            out.push(f("MaxFloor", fmt_scaled(q.max_floor, 100)));
+            out.push(f("MinQty", fmt_scaled(q.min_qty, 100)));
+            out.push(f("Memo", &q.memo));
+            out.push(f("NoCounterparty", q.no_counterparty));
+            for (i, cp) in q.counterparties.iter().enumerate() {
+                out.push(f(format!("Counterparty[{0}].MemberID", i + 1), &cp.member_id));
+                out.push(f(format!("Counterparty[{0}].InvestorType", i + 1), &cp.investor_type));
+                out.push(f(format!("Counterparty[{0}].InvestorID", i + 1), &cp.investor_id));
+                out.push(f(format!("Counterparty[{0}].InvestorName", i + 1), &cp.investor_name));
+                out.push(f(format!("Counterparty[{0}].TraderCode", i + 1), &cp.trader_code));
+            }
+            out.push(f("NoQuote", q.no_quote));
+            for (i, it) in q.quotes.iter().enumerate() {
+                out.push(f(format!("Quote[{0}].QuoteID", i + 1), &it.quote_id));
+                out.push(f(format!("Quote[{0}].QuotePrice", i + 1), fmt_scaled(it.quote_price, 10000)));
+                out.push(f(format!("Quote[{0}].QuoteQty", i + 1), fmt_scaled(it.quote_qty, 100)));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.6.3 报价回复 → 字段列表（含扩展字段）
+fn describe_quote_response(q: &QuoteResponse) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("QuoteRespID", &q.quote_resp_id),
+        f("QuoteRespType", q.quote_resp_type as char),
+        f("Side", side_label(q.side)),
+        f("ValidUntilTime", fmt_time(q.valid_until_time)),
+        f("QuoteType", q.quote_type as char),
+        f("PriceType", q.price_type as char),
+        f("NoQuote", q.no_quote),
+    ];
+    for (i, it) in q.quotes.iter().enumerate() {
+        out.push(f(format!("Quote[{0}].QuoteID", i + 1), &it.quote_id));
+        out.push(f(format!("Quote[{0}].QuotePrice", i + 1), fmt_scaled(it.quote_price, 10000)));
+        out.push(f(format!("Quote[{0}].QuoteQty", i + 1), fmt_scaled(it.quote_qty, 100)));
+    }
+    // 扩展字段按业务布局
+    match q.msg_type {
+        msg_type::QUOTE_RESPONSE_AGREEMENT => {
+            out.push(f("CashMargin", q.cash_margin as char));
+        }
+        msg_type::QUOTE_RESPONSE_BOND => {
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("MemberID", &q.member_id));
+            out.push(f("InvestorType", &q.investor_type));
+            out.push(f("InvestorID", &q.investor_id));
+            out.push(f("InvestorName", &q.investor_name));
+            out.push(f("TraderCode", &q.trader_code));
+            out.push(f("SettlType", q.settl_type));
+            out.push(f("SettlPeriod", q.settl_period as char));
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.6.4 转发报价 → 字段列表（含扩展字段）
+fn describe_allege_quote(q: &AllegeQuote) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ExecID", &q.exec_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("QuoteReqID", &q.quote_req_id),
+        f("QuoteID", &q.quote_id),
+        f("QuoteRespID", &q.quote_resp_id),
+        f("QuoteType", q.quote_type as char),
+        f("BidPx", fmt_scaled(q.bid_px, 10000)),
+        f("OfferPx", fmt_scaled(q.offer_px, 10000)),
+        f("BidSize", fmt_scaled(q.bid_size, 100)),
+        f("OfferSize", fmt_scaled(q.offer_size, 100)),
+        f("PrivateQuote", q.private_quote as char),
+        f("ValidUntilTime", fmt_time(q.valid_until_time)),
+        f("PriceType", q.price_type as char),
+        f("Memo", &q.memo),
+    ];
+    match q.msg_type {
+        // 4.6.4.1 协议（200526）表 4-73
+        msg_type::ALLEGE_QUOTE_AGREEMENT => {
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("CounterpartyPBUID", &q.counterparty_pbu_id));
+        }
+        // 4.6.4.2 债券（204126）表 4-74
+        msg_type::ALLEGE_QUOTE_BOND => {
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("MemberID", &q.member_id));
+            out.push(f("InvestorType", &q.investor_type));
+            out.push(f("InvestorID", &q.investor_id));
+            out.push(f("InvestorName", &q.investor_name));
+            out.push(f("TraderCode", &q.trader_code));
+            out.push(f("CounterpartyMemberID", &q.counterparty_member_id));
+            out.push(f("CounterpartyInvestorType", &q.counterparty_investor_type));
+            out.push(f("CounterpartyInvestorID", &q.counterparty_investor_id));
+            out.push(f("CounterpartyInvestorName", &q.counterparty_investor_name));
+            out.push(f("CounterpartyTraderCode", &q.counterparty_trader_code));
+            out.push(f("SettlType", q.settl_type));
+            out.push(f("SettlPeriod", q.settl_period as char));
+            out.push(f("MaxFloor", fmt_scaled(q.max_floor, 100)));
+            out.push(f("MinQty", fmt_scaled(q.min_qty, 100)));
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.6.5 转发报价回复 → 字段列表（表 4-75，无扩展字段）
+fn describe_allege_quote_response(q: &AllegeQuoteResponse) -> Vec<ParsedField> {
+    vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ExecID", &q.exec_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("QuoteID", &q.quote_id),
+        f("QuoteRespID", &q.quote_resp_id),
+        f("QuoteRespType", q.quote_resp_type as char),
+        f("PrivateQuote", q.private_quote as char),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+        f("Price", fmt_scaled(q.price, 10000)),
+        f("Side", side_label(q.side)),
+        f("ValidUntilTime", fmt_time(q.valid_until_time)),
+        f("QuoteType", q.quote_type as char),
+        f("PriceType", q.price_type as char),
+    ]
+}
+
+/// 4.7.1 询价请求 → 字段列表（含扩展字段）
+fn describe_quote_request(q: &QuoteRequest) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("QuoteReqID", &q.quote_req_id),
+        f("QuoteRequestTransType", q.quote_request_trans_type),
+        f("PrivateQuote", q.private_quote as char),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+        f("Price", fmt_scaled(q.price, 10000)),
+        f("Side", side_label(q.side)),
+        f("ExpireTime", fmt_time(q.expire_time)),
+        f("QuoteType", q.quote_type as char),
+        f("QuotePriceType", q.quote_price_type),
+        f("Memo", &q.memo),
+    ];
+    match q.msg_type {
+        // 4.7.1.1 协议（100517）表 4-77
+        msg_type::QUOTE_REQUEST_AGREEMENT => {
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("NoCounterpartyPBU", q.no_counterparty_pbu));
+            for (i, pbu) in q.counterparty_pbus.iter().enumerate() {
+                out.push(f(format!("CounterpartyPBU[{}]", i + 1), pbu));
+            }
+        }
+        // 4.7.1.2 债券（104117）表 4-78
+        msg_type::QUOTE_REQUEST_BOND => {
+            out.push(f("MemberID", &q.member_id));
+            out.push(f("InvestorType", &q.investor_type));
+            out.push(f("InvestorID", &q.investor_id));
+            out.push(f("InvestorName", &q.investor_name));
+            out.push(f("TraderCode", &q.trader_code));
+            out.push(f("SettlType", q.settl_type));
+            out.push(f("SettlPeriod", q.settl_period as char));
+            out.push(f("PreTradeAnonymity", q.pre_trade_anonymity as char));
+            out.push(f("NoCounterparty", q.no_counterparty));
+            for (i, cp) in q.counterparties.iter().enumerate() {
+                out.push(f(format!("Counterparty[{0}].MemberID", i + 1), &cp.member_id));
+                out.push(f(format!("Counterparty[{0}].InvestorType", i + 1), &cp.investor_type));
+                out.push(f(format!("Counterparty[{0}].InvestorID", i + 1), &cp.investor_id));
+                out.push(f(format!("Counterparty[{0}].InvestorName", i + 1), &cp.investor_name));
+                out.push(f(format!("Counterparty[{0}].TraderCode", i + 1), &cp.trader_code));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.7.2 询价请求响应 → 字段列表（含扩展字段）
+fn describe_quote_request_ack(q: &QuoteRequestAck) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ExecID", &q.exec_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("QuoteReqID", &q.quote_req_id),
+        f("QuoteRequestTransType", q.quote_request_trans_type),
+        f("QuoteRequestType", q.quote_request_type),
+        f("PrivateQuote", q.private_quote as char),
+        f("QuoteRequestStatus", q.quote_request_status as char),
+        f("QuoteRequestRejectReason", q.quote_request_reject_reason),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+        f("Price", fmt_scaled(q.price, 10000)),
+        f("Side", side_label(q.side)),
+        f("ExpireTime", fmt_time(q.expire_time)),
+        f("QuoteType", q.quote_type as char),
+        f("QuotePriceType", q.quote_price_type),
+        f("Memo", &q.memo),
+    ];
+    match q.msg_type {
+        // 200517：同 100517（表 4-77）
+        msg_type::QUOTE_REQUEST_ACK_AGREEMENT => {
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("NoCounterpartyPBU", q.no_counterparty_pbu));
+            for (i, pbu) in q.counterparty_pbus.iter().enumerate() {
+                out.push(f(format!("CounterpartyPBU[{}]", i + 1), pbu));
+            }
+        }
+        // 204117（表 4-80）
+        msg_type::QUOTE_REQUEST_ACK_BOND => {
+            out.push(f("MemberID", &q.member_id));
+            out.push(f("InvestorType", &q.investor_type));
+            out.push(f("InvestorID", &q.investor_id));
+            out.push(f("InvestorName", &q.investor_name));
+            out.push(f("TraderCode", &q.trader_code));
+            out.push(f("SettlType", q.settl_type));
+            out.push(f("SettlPeriod", q.settl_period as char));
+            out.push(f("PreTradeAnonymity", q.pre_trade_anonymity as char));
+            out.push(f("QuoteRequestRejectText", &q.quote_request_reject_text));
+            out.push(f("NoCounterparty", q.no_counterparty));
+            for (i, cp) in q.counterparties.iter().enumerate() {
+                out.push(f(format!("Counterparty[{0}].MemberID", i + 1), &cp.member_id));
+                out.push(f(format!("Counterparty[{0}].InvestorType", i + 1), &cp.investor_type));
+                out.push(f(format!("Counterparty[{0}].InvestorID", i + 1), &cp.investor_id));
+                out.push(f(format!("Counterparty[{0}].InvestorName", i + 1), &cp.investor_name));
+                out.push(f(format!("Counterparty[{0}].TraderCode", i + 1), &cp.trader_code));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.7.3 转发询价请求 → 字段列表（含扩展字段）
+fn describe_allege_quote_request(q: &AllegeQuoteRequest) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ExecID", &q.exec_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("QuoteReqID", &q.quote_req_id),
+        f("QuoteRequestTransType", q.quote_request_trans_type),
+        f("QuoteRequestType", q.quote_request_type),
+        f("QuoteRequestStatus", q.quote_request_status as char),
+        f("PrivateQuote", q.private_quote as char),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+        f("Price", fmt_scaled(q.price, 10000)),
+        f("Side", side_label(q.side)),
+        f("ExpireTime", fmt_time(q.expire_time)),
+        f("QuoteType", q.quote_type as char),
+        f("QuotePriceType", q.quote_price_type),
+        f("Memo", &q.memo),
+    ];
+    match q.msg_type {
+        // 4.7.3.1 协议（200525）表 4-82
+        msg_type::ALLEGE_QUOTE_REQUEST_AGREEMENT => {
+            out.push(f("CashMargin", q.cash_margin as char));
+            out.push(f("CounterpartyPBUID", &q.counterparty_pbu_id));
+        }
+        // 4.7.3.2 债券（204125）表 4-83
+        msg_type::ALLEGE_QUOTE_REQUEST_BOND => {
+            out.push(f("MemberID", &q.member_id));
+            out.push(f("InvestorType", &q.investor_type));
+            out.push(f("InvestorID", &q.investor_id));
+            out.push(f("InvestorName", &q.investor_name));
+            out.push(f("TraderCode", &q.trader_code));
+            out.push(f("CounterpartyMemberID", &q.counterparty_member_id));
+            out.push(f("CounterpartyInvestorType", &q.counterparty_investor_type));
+            out.push(f("CounterpartyInvestorID", &q.counterparty_investor_id));
+            out.push(f("CounterpartyInvestorName", &q.counterparty_investor_name));
+            out.push(f("CounterpartyTraderCode", &q.counterparty_trader_code));
+            out.push(f("SettlType", q.settl_type));
+            out.push(f("SettlPeriod", q.settl_period as char));
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.8.1 意向申报 → 字段列表（含扩展字段）
+fn describe_ioi(q: &IndicationOfInterest) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("IOIID", &q.ioi_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("IOITransType", q.ioi_trans_type as char),
+        f("Side", side_label(q.side)),
+        f("IOIRefID", &q.ioi_ref_id),
+        f("IOIQty", fmt_scaled(q.ioi_qty, 100)),
+        f("Price", fmt_scaled(q.price, 10000)),
+    ];
+    // 4.8.1.1（表 4-85）：Contactor/ContactInfo
+    out.push(f("Contactor", &q.contactor));
+    out.push(f("ContactInfo", &q.contact_info));
+    out
+}
+
+/// 4.8.2 意向申报响应 → 字段列表（含扩展字段）
+fn describe_ioi_response(q: &IOIResponse) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("QuoteRespID", &q.quote_resp_id),
+        f("QuoteRespType", q.quote_resp_type as char),
+        f("ExecType", exec_type_label(q.exec_type)),
+        f("QuoteRejectReason", q.quote_reject_reason),
+        f("IOIID", &q.ioi_id),
+        f("IOIRefID", &q.ioi_ref_id),
+        f("IOITransType", q.ioi_trans_type as char),
+        f("Side", side_label(q.side)),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("IOIQty", fmt_scaled(q.ioi_qty, 100)),
+        f("Price", fmt_scaled(q.price, 10000)),
+    ];
+    // 4.8.2.1（表 4-87）：Contactor/ContactInfo
+    out.push(f("Contactor", &q.contactor));
+    out.push(f("ContactInfo", &q.contact_info));
+    out
+}
+
+/// 4.9.1 成交申报 → 字段列表（扩展字段以原始字节展示）
+fn describe_tcr(q: &TradeCaptureReport) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("TradeReportID", &q.trade_report_id),
+        f("TradeReportType", q.trade_report_type as char),
+        f("TradeReportTransType", q.trade_report_trans_type as char),
+        f("TradeHandlingInstr", q.trade_handling_instr as char),
+        f("TradeReportRefID", &q.trade_report_ref_id),
+        f("LastPx", fmt_scaled(q.last_px, 10000)),
+        f("LastQty", fmt_scaled(q.last_qty, 100)),
+        f("TrdType", q.trd_type),
+        f("TrdSubType", q.trd_sub_type),
+        f("ConfirmID", &q.confirm_id),
+        f("Side", side_label(q.side)),
+        f("PBUID", &q.pbu_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("CounterpartyPBUID", &q.counterparty_pbu_id),
+        f("CounterpartyAccountID", &q.counterparty_account_id),
+        f("CounterpartyBranchID", &q.counterparty_branch_id),
+    ];
+    if !q.extend.is_empty() {
+        out.push(f("扩展字段", format!("{} 字节（业务专有，按字节原样回写）", q.extend.len())));
+    }
+    out
+}
+
+/// 4.9.2 成交申报响应 → 字段列表（含 204204 拒绝说明与扩展字节）
+fn describe_tcr_ack(q: &TcrAck) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("TradeID", &q.trade_id),
+        f("TradeReportID", &q.trade_report_id),
+        f("TradeReportType", q.trade_report_type as char),
+        f("TradeReportTransType", q.trade_report_trans_type as char),
+        f("TradeHandlingInstr", q.trade_handling_instr as char),
+        f("TradeReportRefID", &q.trade_report_ref_id),
+        f("TrdAckStatus", q.trd_ack_status as char),
+        f("TrdRptStatus", q.trd_rpt_status),
+        f("TradeReportRejectReason", q.trade_report_reject_reason),
+        f("LastPx", fmt_scaled(q.last_px, 10000)),
+        f("LastQty", fmt_scaled(q.last_qty, 100)),
+        f("TrdType", q.trd_type),
+        f("TrdSubType", q.trd_sub_type),
+        f("ConfirmID", &q.confirm_id),
+        f("ExecID", &q.exec_id),
+        f("Side", side_label(q.side)),
+        f("PBUID", &q.pbu_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("CounterpartyPBUID", &q.counterparty_pbu_id),
+        f("CounterpartyAccountID", &q.counterparty_account_id),
+        f("CounterpartyBranchID", &q.counterparty_branch_id),
+    ];
+    if q.msg_type == msg_type::TCR_ACK_BOND_LENDING {
+        out.push(f("TradeReportRejectText", &q.trade_report_reject_text));
+    }
+    if !q.extend.is_empty() {
+        out.push(f("扩展字段", format!("{} 字节（业务专有，按字节原样回写）", q.extend.len())));
+    }
+    out
+}
+
+/// 4.9.3 转发成交申报 → 字段列表
+fn describe_allege_tcr(q: &AllegeTcr) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("TradeID", &q.trade_id),
+        f("TradeReportID", &q.trade_report_id),
+        f("TradeReportType", q.trade_report_type as char),
+        f("TradeReportTransType", q.trade_report_trans_type as char),
+        f("TradeHandlingInstr", q.trade_handling_instr as char),
+        f("TradeReportRefID", &q.trade_report_ref_id),
+        f("LastPx", fmt_scaled(q.last_px, 10000)),
+        f("LastQty", fmt_scaled(q.last_qty, 100)),
+        f("TrdType", q.trd_type),
+        f("TrdSubType", q.trd_sub_type),
+        f("ConfirmID", &q.confirm_id),
+        f("ExecID", &q.exec_id),
+        f("Side", side_label(q.side)),
+        f("PBUID", &q.pbu_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("CounterpartyPBUID", &q.counterparty_pbu_id),
+        f("CounterpartyAccountID", &q.counterparty_account_id),
+        f("CounterpartyBranchID", &q.counterparty_branch_id),
+    ];
+    if !q.extend.is_empty() {
+        out.push(f("扩展字段", format!("{} 字节（业务专有，按字节原样回写）", q.extend.len())));
+    }
+    out
+}
+
+/// 4.9.4 成交确认 → 字段列表
+fn describe_tcr_confirm(q: &TcrConfirm) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("TradeID", &q.trade_id),
+        f("TradeReportID", &q.trade_report_id),
+        f("TradeReportType", q.trade_report_type as char),
+        f("TradeReportTransType", q.trade_report_trans_type as char),
+        f("TradeHandlingInstr", q.trade_handling_instr as char),
+        f("LastPx", fmt_scaled(q.last_px, 10000)),
+        f("LastQty", fmt_scaled(q.last_qty, 100)),
+        f("TrdType", q.trd_type),
+        f("TrdSubType", q.trd_sub_type),
+        f("ConfirmID", &q.confirm_id),
+        f("ExecID", &q.exec_id),
+        f("Side", side_label(q.side)),
+        f("PBUID", &q.pbu_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("CounterpartyPBUID", &q.counterparty_pbu_id),
+        f("CounterpartyAccountID", &q.counterparty_account_id),
+        f("CounterpartyBranchID", &q.counterparty_branch_id),
+    ];
+    if !q.extend.is_empty() {
+        out.push(f("扩展字段", format!("{} 字节（业务专有，按字节原样回写）", q.extend.len())));
+    }
+    out
+}
+
+/// 4.10.1 注册 → 字段列表
+fn describe_designation(q: &Designation) -> Vec<ParsedField> {
+    vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("ClOrdID", &q.cl_ord_id),
+        f("OrigClOrdID", &q.orig_cl_ord_id),
+        f("DesignationInstruction", q.designation_instruction as char),
+        f("DesignationTransType", q.designation_trans_type as char),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+        f("TransfereePBUID", &q.transferee_pbu_id),
+    ]
+}
+
+/// 4.10.2 注册执行报告 → 字段列表
+fn describe_designation_report(q: &DesignationReport) -> Vec<ParsedField> {
+    vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("OrigClOrdID", &q.orig_cl_ord_id),
+        f("ExecID", &q.exec_id),
+        f("ExecType", exec_type_label(q.exec_type)),
+        f("OrdRejReason", q.ord_rej_reason),
+        f("DesignationInstruction", q.designation_instruction as char),
+        f("DesignationTransType", q.designation_trans_type as char),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+        f("TransfereePBUID", &q.transferee_pbu_id),
+    ]
+}
+
+/// 4.11.1 投票 → 字段列表
+fn describe_evote(q: &Evote) -> Vec<ParsedField> {
+    vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("VotingProposal", q.voting_proposal),
+        f("VotingSubProposal", q.voting_sub_proposal),
+        f("VotingPreference", q.voting_preference as char),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+    ]
+}
+
+/// 4.11.2 投票执行报告 → 字段列表
+fn describe_evote_report(q: &EvoteReport) -> Vec<ParsedField> {
+    vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("ExecID", &q.exec_id),
+        f("ExecType", exec_type_label(q.exec_type)),
+        f("OrdRejReason", q.ord_rej_reason),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("VotingProposal", q.voting_proposal),
+        f("VotingSubProposal", q.voting_sub_proposal),
+        f("VotingPreference", q.voting_preference as char),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+    ]
+}
+
+/// 4.12.1 密码服务 → 字段列表
+fn describe_password_service(q: &PasswordService) -> Vec<ParsedField> {
+    vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("ClOrdID", &q.cl_ord_id),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("ValidationCode", q.validation_code),
+    ]
+}
+
+/// 4.12.2 密码服务执行报告 → 字段列表
+fn describe_password_service_report(q: &PasswordServiceReport) -> Vec<ParsedField> {
+    vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("ExecID", &q.exec_id),
+        f("ExecType", exec_type_label(q.exec_type)),
+        f("OrdRejReason", q.ord_rej_reason),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("ValidationCode", q.validation_code),
+    ]
+}
+
+/// 4.13.1 保证金查询 → 字段列表
+fn describe_margin_query(q: &MarginQuery) -> Vec<ParsedField> {
+    vec![
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("ClOrdID", &q.cl_ord_id),
+        f("FundPBUID", &q.fund_pbu_id),
+    ]
+}
+
+/// 4.13.2 保证金查询结果 → 字段列表（含保证金条目重复组）
+fn describe_margin_query_result(q: &MarginQueryResult) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("ClOrdID", &q.cl_ord_id),
+        f("ExecID", &q.exec_id),
+        f("ExecType", exec_type_label(q.exec_type)),
+        f("OrdRejReason", q.ord_rej_reason),
+        f("FundPBUID", &q.fund_pbu_id),
+        f("NoMarginItems", q.no_margin_items),
+    ];
+    for (i, (item, amount)) in q.margin_items.iter().enumerate() {
+        out.push(f(format!("MarginItem[{}].Item", i + 1), item));
+        out.push(f(format!("MarginItem[{}].Amount", i + 1), fmt_scaled(*amount, 10000)));
+    }
+    out
+}
+
+/// 4.14.1 多腿订单 → 字段列表（公共字段 + 扩展字段）
+fn describe_multileg(o: &MultilegOrder) -> Vec<ParsedField> {
+    let c = &o.common;
+    let mut out = vec![
+        f("ApplID", appl_id_label(&c.appl_id)),
+        f("SubmittingPBUId", &c.submitting_pbu_id),
+        f("SecurityID", &c.security_id),
+        f("SecurityIDSource", &c.security_id_source),
+        f("OwnerType", c.owner_type),
+        f("ClearingFirm", &c.clearing_firm),
+        f("TransactTime", fmt_time(c.transact_time)),
+        f("UserInfo", &c.user_info),
+        f("ClOrdID", &c.cl_ord_id),
+        f("AccountID", &c.account_id),
+        f("BranchID", &c.branch_id),
+        f("OrderRestrictions", &c.order_restrictions),
+        f("Side", side_label(c.side)),
+        f("OrdType", ord_type_label(c.ord_type)),
+        f("OrderQty", fmt_scaled(c.order_qty, 100)),
+        f("Price", fmt_scaled(c.price, 10000)),
+    ];
+    // 扩展字段按业务布局
+    match o.msg_type {
+        // 4.14.1.1 期权行权指令合并申报（101621）表 4-124
+        msg_type::NEW_ORDER_MULTILEG_EXERCISE => {
+            out.push(f("ContractAccountCode", &o.contract_account_code));
+            out.push(f("NoLegs", o.no_legs));
+            for (i, leg) in o.legs.iter().enumerate() {
+                out.push(f(format!("Leg[{0}].LegSecurityID", i + 1), &leg.leg_security_id));
+                out.push(f(format!("Leg[{0}].LegSecurityIDSource", i + 1), &leg.leg_security_id_source));
+                out.push(f(format!("Leg[{0}].LegOrderQty", i + 1), fmt_scaled(leg.leg_order_qty, 100)));
+            }
+        }
+        // 4.14.1.2 期权组合策略（103421）表 4-125
+        msg_type::NEW_ORDER_MULTILEG_STRATEGY => {
+            out.push(f("ContractAccountCode", &o.contract_account_code));
+            out.push(f("SecondaryOrderID", &o.secondary_order_id));
+            out.push(f("SecurityType", &o.security_type));
+            out.push(f("SecuritySubType", &o.security_sub_type));
+            out.push(f("NoLegs", o.no_legs));
+            for (i, leg) in o.legs.iter().enumerate() {
+                out.push(f(format!("Leg[{0}].LegSecurityID", i + 1), &leg.leg_security_id));
+                out.push(f(format!("Leg[{0}].LegSecurityIDSource", i + 1), &leg.leg_security_id_source));
+                out.push(f(format!("Leg[{0}].LegSide", i + 1), leg.leg_side as char));
+                out.push(f(format!("Leg[{0}].LegOrderQty", i + 1), fmt_scaled(leg.leg_order_qty, 100)));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 4.14.2 多腿订单执行报告 → 字段列表
+fn describe_multileg_exec_rpt(q: &MultilegExecRpt) -> Vec<ParsedField> {
+    let mut out = vec![
+        f("PartitionNo", q.partition_no),
+        f("ReportIndex", q.report_index),
+        f("ApplID", appl_id_label(&q.appl_id)),
+        f("ReportingPBUId", &q.reporting_pbu_id),
+        f("SubmittingPBUId", &q.submitting_pbu_id),
+        f("SecurityID", &q.security_id),
+        f("SecurityIDSource", &q.security_id_source),
+        f("OwnerType", q.owner_type),
+        f("ClearingFirm", &q.clearing_firm),
+        f("TransactTime", fmt_time(q.transact_time)),
+        f("UserInfo", &q.user_info),
+        f("OrderID", &q.order_id),
+        f("ClOrdID", &q.cl_ord_id),
+        f("OrigClOrdID", &q.orig_cl_ord_id),
+        f("ExecID", &q.exec_id),
+        f("ExecType", exec_type_label(q.exec_type)),
+        f("OrdStatus", ord_status_label(q.ord_status)),
+        f("OrdRejReason", q.ord_rej_reason),
+        f("LeavesQty", fmt_scaled(q.leaves_qty, 100)),
+        f("CumQty", fmt_scaled(q.cum_qty, 100)),
+        f("Side", side_label(q.side)),
+        f("OrdType", ord_type_label(q.ord_type)),
+        f("OrderQty", fmt_scaled(q.order_qty, 100)),
+        f("Price", fmt_scaled(q.price, 10000)),
+        f("AccountID", &q.account_id),
+        f("BranchID", &q.branch_id),
+        f("OrderRestrictions", &q.order_restrictions),
+    ];
+    // 扩展字段同多腿订单扩展字段（注 2）
+    out.push(f("ContractAccountCode", &q.contract_account_code));
+    if q.msg_type == msg_type::MULTILEG_EXEC_RPT_STRATEGY {
+        out.push(f("SecondaryOrderID", &q.secondary_order_id));
+        out.push(f("SecurityType", &q.security_type));
+        out.push(f("SecuritySubType", &q.security_sub_type));
+    }
+    out.push(f("NoLegs", q.no_legs));
+    for (i, leg) in q.legs.iter().enumerate() {
+        out.push(f(format!("Leg[{0}].LegSecurityID", i + 1), &leg.leg_security_id));
+        out.push(f(format!("Leg[{0}].LegSecurityIDSource", i + 1), &leg.leg_security_id_source));
+        if q.msg_type == msg_type::MULTILEG_EXEC_RPT_STRATEGY {
+            out.push(f(format!("Leg[{0}].LegSide", i + 1), leg.leg_side as char));
+        }
+        out.push(f(format!("Leg[{0}].LegOrderQty", i + 1), fmt_scaled(leg.leg_order_qty, 100)));
+    }
+    out
+}
+
+/// 5.6 交易会话状态 → 字段列表（表 5-7）
+fn describe_trading_session_status(q: &TradingSessionStatus) -> Vec<ParsedField> {
+    vec![
+        f("MarketID", &q.market_id),
+        f("MarketSegmentID", &q.market_segment_id),
+        f("TradingSessionID", &q.trading_session_id),
+        f("TradingSessionSubID", &q.trading_session_sub_id),
+        f("TradSesStatus", q.trad_ses_status),
+        f("TradSesStartTime", fmt_time(q.trad_ses_start_time)),
+        f("TradSesEndTime", fmt_time(q.trad_ses_end_time)),
+    ]
+}
+
 /// 实际逐字段读取逻辑：按消息类型分派，读失败（长度不符）即整体放弃。
 /// 新订单/确认/成交报告先解码到结构体再转字段列表，字段顺序与规范一致。
 fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
@@ -2582,8 +6917,15 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             out.push(f("BusinessRejectReason", r.u16()?));
             out.push(f("BusinessRejectText", r.str(50)?));
         }
-        // 回报同步：模拟器不解析其消息体，只展示消息名
-        msg_type::REPORT_SYNC => {}
+        // 5.2 回报同步：NoPartitions + 重复组 {PartitionNo, ReportIndex}
+        msg_type::REPORT_SYNC => {
+            let n = r.u32()?;
+            out.push(f("NoPartitions", n));
+            for i in 0..n {
+                out.push(f(format!("Partition[{0}].PartitionNo", i + 1), r.i32()?));
+                out.push(f(format!("Partition[{0}].ReportIndex", i + 1), r.i64()?));
+            }
+        }
         msg_type::PLATFORM_STATE => {
             out.push(f("PlatformID", r.u16()?));
             out.push(f("State", r.u16()?));
@@ -2654,6 +6996,106 @@ fn describe_body(mt: u32, body: &[u8]) -> io::Result<Vec<ParsedField>> {
             let t = ExecRptTrade::decode(m, body)?;
             out.extend(describe_trade_common(&t));
             out.extend(describe_trade_extend(m, &t));
+        }
+        // 5.6 交易会话状态
+        m if TradingSessionStatus::is_trading_session_status(m) => {
+            out.extend(describe_trading_session_status(&TradingSessionStatus::decode(m, body)?));
+        }
+        // 4.6.1 报价
+        m if Quote::is_quote(m) => {
+            out.extend(describe_quote(&Quote::decode(m, body)?));
+        }
+        // 4.6.2 报价状态回报
+        m if QuoteStatusReport::is_quote_status_report(m) => {
+            out.extend(describe_quote_status(&QuoteStatusReport::decode(m, body)?));
+        }
+        // 4.6.3 报价回复
+        m if QuoteResponse::is_quote_response(m) => {
+            out.extend(describe_quote_response(&QuoteResponse::decode(m, body)?));
+        }
+        // 4.6.4 转发报价
+        m if AllegeQuote::is_allege_quote(m) => {
+            out.extend(describe_allege_quote(&AllegeQuote::decode(m, body)?));
+        }
+        // 4.6.5 转发报价回复
+        m if AllegeQuoteResponse::is_allege_quote_response(m) => {
+            out.extend(describe_allege_quote_response(&AllegeQuoteResponse::decode(m, body)?));
+        }
+        // 4.7.1 询价请求
+        m if QuoteRequest::is_quote_request(m) => {
+            out.extend(describe_quote_request(&QuoteRequest::decode(m, body)?));
+        }
+        // 4.7.2 询价请求响应
+        m if QuoteRequestAck::is_quote_request_ack(m) => {
+            out.extend(describe_quote_request_ack(&QuoteRequestAck::decode(m, body)?));
+        }
+        // 4.7.3 转发询价请求
+        m if AllegeQuoteRequest::is_allege_quote_request(m) => {
+            out.extend(describe_allege_quote_request(&AllegeQuoteRequest::decode(m, body)?));
+        }
+        // 4.8.1 意向申报
+        m if IndicationOfInterest::is_ioi(m) => {
+            out.extend(describe_ioi(&IndicationOfInterest::decode(m, body)?));
+        }
+        // 4.8.2 意向申报响应
+        m if IOIResponse::is_ioi_response(m) => {
+            out.extend(describe_ioi_response(&IOIResponse::decode(m, body)?));
+        }
+        // 4.9.1 成交申报
+        m if TradeCaptureReport::is_trade_capture_report(m) => {
+            out.extend(describe_tcr(&TradeCaptureReport::decode(m, body)?));
+        }
+        // 4.9.2 成交申报响应
+        m if TcrAck::is_tcr_ack(m) => {
+            out.extend(describe_tcr_ack(&TcrAck::decode(m, body)?));
+        }
+        // 4.9.3 转发成交申报
+        m if AllegeTcr::is_allege_tcr(m) => {
+            out.extend(describe_allege_tcr(&AllegeTcr::decode(m, body)?));
+        }
+        // 4.9.4 成交确认
+        m if TcrConfirm::is_tcr_confirm(m) => {
+            out.extend(describe_tcr_confirm(&TcrConfirm::decode(m, body)?));
+        }
+        // 4.10 注册
+        m if Designation::is_designation(m) => {
+            out.extend(describe_designation(&Designation::decode(m, body)?));
+        }
+        // 4.10.2 注册执行报告
+        m if DesignationReport::is_designation_report(m) => {
+            out.extend(describe_designation_report(&DesignationReport::decode(m, body)?));
+        }
+        // 4.11 投票
+        m if Evote::is_evote(m) => {
+            out.extend(describe_evote(&Evote::decode(m, body)?));
+        }
+        // 4.11.2 投票执行报告
+        m if EvoteReport::is_evote_report(m) => {
+            out.extend(describe_evote_report(&EvoteReport::decode(m, body)?));
+        }
+        // 4.12 密码服务
+        m if PasswordService::is_password_service(m) => {
+            out.extend(describe_password_service(&PasswordService::decode(m, body)?));
+        }
+        // 4.12.2 密码服务执行报告
+        m if PasswordServiceReport::is_password_service_report(m) => {
+            out.extend(describe_password_service_report(&PasswordServiceReport::decode(m, body)?));
+        }
+        // 4.13 保证金查询
+        m if MarginQuery::is_margin_query(m) => {
+            out.extend(describe_margin_query(&MarginQuery::decode(m, body)?));
+        }
+        // 4.13.2 保证金查询结果
+        m if MarginQueryResult::is_margin_query_result(m) => {
+            out.extend(describe_margin_query_result(&MarginQueryResult::decode(m, body)?));
+        }
+        // 4.14.1 多腿订单
+        m if MultilegOrder::is_multileg(m) => {
+            out.extend(describe_multileg(&MultilegOrder::decode(m, body)?));
+        }
+        // 4.14.2 多腿订单执行报告
+        m if MultilegExecRpt::is_multileg_exec_rpt(m) => {
+            out.extend(describe_multileg_exec_rpt(&MultilegExecRpt::decode(m, body)?));
         }
         // 其他消息类型：不逐字段解析（调用方只展示原始报文）
         _ => {}
