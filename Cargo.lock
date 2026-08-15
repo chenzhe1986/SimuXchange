@@ -2927,6 +2927,7 @@ name = "simx-core"
 version = "1.0.0"
 dependencies = [
  "chrono",
+ "parking_lot",
  "rand",
  "serde",
  "serde_json",

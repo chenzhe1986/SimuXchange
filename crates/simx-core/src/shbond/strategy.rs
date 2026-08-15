@@ -75,9 +75,10 @@ fn qty_raw(shares: i64) -> i64 {
 }
 
 /// 成交金额 GrossTradeAmt = 价格 × 数量，两者都是放大整数：
-/// N13(5) × N15(3) 直接相乘会多放大 1000 倍，除回去得到 N18(5)
+/// N13(5) × N15(3) 直接相乘会多放大 1000 倍，除回去得到 N18(5)。
+/// 用 i128 中间量防极端价格×数量相乘溢出 i64。
 fn amount_raw(px: i64, qty: i64) -> i64 {
-    px * qty / QTY_UNIT
+    ((px as i128) * (qty as i128) / QTY_UNIT as i128) as i64
 }
 
 /// 为一笔现货竞价委托生成回报计划（本模块唯一对外入口）。
@@ -192,7 +193,7 @@ pub fn plan_reports(
         let trade = TradeRpt {
             pbu: pbu.to_string(),
             set_id: partition_no as u32,
-            report_index: stats.next_report_index() as u64,
+            report_index: 0, // 发送时由 writer 任务补写（保证与线上顺序一致）
             biz_id: order.biz_id,
             exec_type: exec_type::TRADE,
             biz_pbu: order.biz_pbu.clone(),
@@ -314,13 +315,22 @@ fn gen_fills(st: &StrategyConfig, order: &NewOrder) -> Vec<(i64, i64)> {
             let qtys = split_shares(part, sample_split_count(st));
             with_ladder_prices(st, order, &qtys)
         }
-        // 自定义：直接用用户在界面上填的逐笔数量/价格（跳过数量为 0 的行）
-        StrategyMode::Custom => st
-            .custom_fills
-            .iter()
-            .filter(|f| f.qty > 0.0)
-            .map(|f| (qty_raw(f.qty.round() as i64), px_raw(f.price)))
-            .collect(),
+        // 自定义：直接用用户在界面上填的逐笔数量/价格（跳过数量为 0 的行）。
+        // 累计成交量钳制到委托量以内：明细总和超过委托量时截断（否则回报里
+        // CumQty 会超 OrderQty，协议非法）；价格下限 0.0001 元（0 价成交无效）
+        StrategyMode::Custom => {
+            let mut remaining = total_shares;
+            let mut out = Vec::new();
+            for f in st.custom_fills.iter().filter(|f| f.qty > 0.0) {
+                if remaining <= 0 {
+                    break;
+                }
+                let shares = (f.qty.round() as i64).clamp(1, remaining);
+                remaining -= shares;
+                out.push((qty_raw(shares), px_raw(f.price.max(0.0001))));
+            }
+            out
+        }
         // 只确认/拒单：没有成交
         StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
     }

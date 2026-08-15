@@ -154,12 +154,14 @@ impl OrderBook {
     }
 
     /// 一条回报发出后同步状态：回填订单号、累计/剩余量、状态。
-    /// 终态保护：订单已到终态（全成/已撤/已拒）后，迟到的在途回报
-    /// （如同步补发的确认）不再把状态改回在途。
+    /// 终态保护：订单已到终态（全成/已撤/已拒）后不再接受任何更新——
+    /// 迟到的在途回报（如同步补发的确认）不能把状态改回在途，
+    /// 迟到的成交回报也不能把“已撤”覆盖回“已成交”（撤单后此前规划的
+    /// 延迟成交会因状态终态被发送侧丢弃，这里做第二道防线）
     pub fn apply(&self, cl_ord_id: &str, upd: &OrderUpdate) {
         let mut orders = self.inner.lock().unwrap();
         if let Some(o) = orders.iter_mut().find(|o| o.cl_ord_id == cl_ord_id) {
-            if o.status.is_terminal() && upd.status.is_inflight() {
+            if o.status.is_terminal() {
                 return;
             }
             if !upd.order_id.is_empty() {
@@ -303,6 +305,30 @@ mod tests {
         let o = book.find("CL1").unwrap();
         assert_eq!(o.status, OrderStatus::Cancelled);
         assert_eq!(o.leaves_qty, 0.0);
+        // 迟到的成交回报（终态更新）也不应把“已撤”覆盖回“已成交”
+        book.apply(
+            "CL1",
+            &OrderUpdate {
+                order_id: "0000000000005678".into(),
+                cum_qty: 1000.0,
+                leaves_qty: 0.0,
+                status: OrderStatus::Filled,
+            },
+        );
+        let o = book.find("CL1").unwrap();
+        assert_eq!(o.status, OrderStatus::Cancelled);
+        // 已拒订单同样不可被后续回报改写
+        book.add(entry("CL2", OrderStatus::Rejected));
+        book.apply(
+            "CL2",
+            &OrderUpdate {
+                order_id: String::new(),
+                cum_qty: 500.0,
+                leaves_qty: 500.0,
+                status: OrderStatus::Partial,
+            },
+        );
+        assert_eq!(book.find("CL2").unwrap().status, OrderStatus::Rejected);
     }
 
     #[test]

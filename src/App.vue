@@ -649,7 +649,9 @@ function askDeleteGateway() {
     const name = selectedGw.value.config.name;
     confirmBox.text = `确定删除网关「${name}」及其全部平台配置？`;
     confirmBox.action = async () => {
-        if ((await call({ cmd: "delete_gateway", id })) !== null || true) {
+        // call 失败时已弹错误提示并返回 null，此时保持选中、不刷新
+        const res = await call({ cmd: "delete_gateway", id });
+        if (res !== null) {
             selectedGwId.value = "";
             await refresh();
         }
@@ -1000,7 +1002,7 @@ onBeforeUnmount(() => {
                             </button>
                             <button class="btn" :disabled="selectedGw.running" @click="openNewPlatform">＋ 添加平台</button>
                             <button class="btn ghost" @click="resetStats">重置统计</button>
-                            <button class="btn ghost" @click="openRenameGateway">重命名</button>
+                            <button class="btn ghost" :disabled="selectedGw.running" @click="openRenameGateway">重命名</button>
                             <button class="btn ghost danger-ghost" :disabled="selectedGw.running" @click="askDeleteGateway">删除</button>
                         </div>
                     </div>

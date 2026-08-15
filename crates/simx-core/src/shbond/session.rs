@@ -37,6 +37,7 @@ use super::protocol::{
 use super::strategy::{self as strategy, PlannedReport, ReportKind};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
@@ -49,16 +50,33 @@ static CONN_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 读取一条完整报文：16 字节报文头 + 消息体 + 4 字节校验和。
 ///
 /// 报文头 16 字节：MsgType(4) + MsgSeqNum(8) + MsgBodyLen(4)，
-/// 校验和单独 4 字节跟在消息体后；idle_timeout 控制读超时。
+/// 校验和单独 4 字节跟在消息体后；idle_timeout 同时作用在“报文头/消息体/
+/// 校验和”三步读取上——对端发完头停住不发剩余部分时也会超时断开，
+/// 否则会话会被半包连接永久挂起（占死单连接槽位）。
 /// 返回 (消息类型, 消息体, 校验是否通过, 完整原始帧)。
 async fn read_frame(
     rh: &mut OwnedReadHalf,
     idle_timeout: Duration,
 ) -> std::io::Result<(u32, Vec<u8>, bool, Vec<u8>)> {
+    // 带超时读满 buf：超时/读错统一转成 io::Error，由调用方结束会话
+    async fn read_exact_timeout(
+        rh: &mut OwnedReadHalf,
+        buf: &mut [u8],
+        idle_timeout: Duration,
+    ) -> std::io::Result<()> {
+        match tokio::time::timeout(idle_timeout, rh.read_exact(buf)).await {
+            // 内层是 read_exact 的 io 错误，直接透传（tokio 新版返回已读字节数，
+            // 这里只关心成败）；外层是 timeout 的 Elapsed，转成 io::Error
+            Ok(r) => r.map(|_| ()),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "读超时：空闲时间超过心跳间隔 3 倍",
+            )),
+        }
+    }
+
     let mut head = [0u8; 16];
-    tokio::time::timeout(idle_timeout, rh.read_exact(&mut head))
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "读超时：空闲时间超过心跳间隔 3 倍"))??;
+    read_exact_timeout(rh, &mut head, idle_timeout).await?;
     let mt = u32::from_be_bytes(head[0..4].try_into().unwrap());
     // head[4..12] 为 MsgSeqNum，发送时由 finalize_seq 统一填充
     let body_len = u32::from_be_bytes(head[12..16].try_into().unwrap()) as usize;
@@ -70,9 +88,9 @@ async fn read_frame(
         ));
     }
     let mut body = vec![0u8; body_len];
-    rh.read_exact(&mut body).await?;
+    read_exact_timeout(rh, &mut body, idle_timeout).await?;
     let mut cks_buf = [0u8; 4];
-    rh.read_exact(&mut cks_buf).await?;
+    read_exact_timeout(rh, &mut cks_buf, idle_timeout).await?;
     let recv_cks = u32::from_be_bytes(cks_buf);
     let mut all = Vec::with_capacity(16 + body_len + 4);
     all.extend_from_slice(&head);
@@ -103,11 +121,21 @@ pub async fn handle_conn(
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4096);
     // 登记发送通道：界面手动回复成交/拒单/撤单时，经此把回报投给本连接
     ctx.conn_tx.lock().unwrap().insert(conn_id, tx.clone());
+    let stats = ctx.stats.clone();
     let writer = tokio::spawn(async move {
         let mut seq: u64 = 0;
         while let Some(mut buf) = rx.recv().await {
             seq += 1;
             protocol::finalize_seq(&mut buf, seq);
+            // 回报记录号 ReportIndex 在真实发送时分配并补写进报文：
+            // 分配时机与线上发送顺序严格一致，多笔并发回报（含延迟回报）也不会乱序；
+            // 非回报消息（心跳/登录/204/207 等）跳过，不占回报序号
+            if buf.len() >= 36 {
+                let mt = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+                if protocol::is_report_frame(mt) {
+                    protocol::patch_report_index(&mut buf, stats.next_report_index() as u64);
+                }
+            }
             if let Some(r) = &rec_send {
                 // 发送前捕获并解析字段：头 16 字节报文头，消息体在 [16..len-4]
                 let fields = if buf.len() >= 20 {
@@ -146,6 +174,11 @@ pub async fn handle_conn(
     let mut pending: Vec<PlannedReport> = Vec::new();
     let mut pbu = String::new(); // 分区编号：由 Logon 的 SenderCompID 前 8 位解析
     let mut hb_task: Option<tokio::task::JoinHandle<()>> = None;
+    // 延迟回报任务登记表：会话结束必须全部 abort 并等其释放发送端，
+    // 否则 writer.await 会一直等队列关闭（连接槽位被占死）。用 parking_lot
+    // 锁：取锁即得 guard，无中毒路径
+    let report_tasks: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
 
     loop {
         // 读超时 = 心跳间隔 × 3，至少 15 秒
@@ -186,17 +219,24 @@ pub async fn handle_conn(
                         break;
                     }
                 };
-                // 心跳间隔取 OMS 请求值，clamp 到 [5,60]
-                hb_secs = (logon.heart_bt_int as u64).clamp(5, 60);
+                // 心跳间隔取 OMS 请求值，clamp 到 [5,60]；对端填 0 表示未指定
+                // （协议约定），用默认 30 秒，避免 0 被钳成 5 秒过快心跳
+                hb_secs = if logon.heart_bt_int == 0 {
+                    30
+                } else {
+                    (logon.heart_bt_int as u64).clamp(5, 60)
+                };
                 // 分区编号 = SenderCompID 前 8 位（单分区场景即 PBU）
                 pbu = logon.sender_comp_id.chars().take(8).collect();
-                // 对端 Logon 的 SenderCompID 将成为我们的 TargetCompID
+                // 对端 Logon 的 SenderCompID 将成为我们的 TargetCompID。
+                // 债券平台协议版本最低 1.90（竞价才是 0.50），OMS 未带版本时
+                // 按 1.90 回（旧实现误用 0.50 会导致柜台判定协议不匹配）
                 let reply = Logon {
                     sender_comp_id: ctx.cfg.comp_id.clone(),
                     target_comp_id: logon.sender_comp_id.clone(),
                     heart_bt_int: hb_secs as u16,
                     prtcl_version: if logon.prtcl_version.is_empty() {
-                        "0.50".into()
+                        "1.90".into()
                     } else {
                         logon.prtcl_version.clone()
                     },
@@ -257,19 +297,19 @@ pub async fn handle_conn(
                 break;
             }
             msg_type::EXEC_RPT_SYNC if logged_on => {
-                handle_sync(&ctx, &tx, &body, &mut synced, &mut pending).await;
+                handle_sync(&ctx, &tx, &body, &mut synced, &mut pending, &report_tasks).await;
             }
             msg_type::NEW_ORDER if logged_on => {
-                handle_new_order(&ctx, &tx, &body, &pbu, synced, &mut pending, conn_id).await;
+                handle_new_order(&ctx, &tx, &body, &pbu, synced, &mut pending, conn_id, &report_tasks).await;
             }
             msg_type::CANCEL_ORDER if logged_on => {
-                handle_cancel(&ctx, &tx, &body, &pbu).await;
+                handle_cancel(&ctx, &tx, &body, &pbu, synced, &mut pending).await;
             }
             other => {
                 if !logged_on {
-                    ctx.log("warn", format!("连接 {} 收到未知会话报文 MsgType={}，忽略", peer, other));
+                    ctx.log("warn", format!("连接 {} 登录前收到业务报文 MsgType={}，忽略", peer, other));
                 } else {
-                    ctx.log("warn", format!("登录前收到业务报文 MsgType={}，忽略", other));
+                    ctx.log("warn", format!("连接 {} 收到未知会话报文 MsgType={}，忽略", peer, other));
                 }
             }
         }
@@ -278,6 +318,16 @@ pub async fn handle_conn(
     // 会话结束：停心跳任务、等 writer 排空队列
     if let Some(h) = hb_task {
         h.abort();
+    }
+    // 先终止延迟回报任务：它们各自持有 tx 的 clone，不结束的话 writer 的
+    // recv 永远等不到队列关闭，下面的 writer.await 会一直挂在这里，
+    // connections 移除 / mark_dead 都执行不到（重连会被单连接限制拒绝）
+    let pending_tasks = std::mem::take(&mut *report_tasks.lock());
+    for h in &pending_tasks {
+        h.abort();
+    }
+    for h in pending_tasks {
+        let _ = h.await;
     }
     // 先移除发送通道：它持有一份 tx clone，不先移除的话 writer 的 recv
     // 永远等不到队列关闭，writer.await 会一直挂在这里，后续的
@@ -296,6 +346,9 @@ pub async fn handle_conn(
 /// 处理执行回报同步(206)：按各分区回 ExecRptSyncRsp(207)，置 synced=true。
 ///
 /// 同步回应中 EndReportIndex 取当前已发送的回报序号，RejReason=0。
+/// 注意：ReportIndex 现在由 writer 在真实发送时分配（与线上顺序一致），
+/// 因此这里读到的全局计数器值就是“已实际发出”的回报条数，不再包含
+/// 已分配未发送的序号（旧实现分配于生成时，会把尚未送出的序号也算进去）。
 /// 同步完成前收到的委托在 pending 缓冲，完成后统一补发。
 async fn handle_sync(
     ctx: &SessionCtx,
@@ -303,6 +356,7 @@ async fn handle_sync(
     body: &[u8],
     synced: &mut bool,
     pending: &mut Vec<PlannedReport>,
+    report_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) {
     let groups = match protocol::decode_exec_rpt_sync(body) {
         Ok(g) => g,
@@ -333,9 +387,13 @@ async fn handle_sync(
     if !pending.is_empty() {
         let buffered = std::mem::take(pending);
         ctx.log("info", format!("同步完成，补发缓冲的委托 {} 笔", buffered.len()));
-        dispatch_reports(ctx, tx, buffered);
+        dispatch_reports(ctx, tx, buffered, report_tasks);
     }
 }
+
+/// 同步前缓冲的回报计划条数上限：OMS 一直不发 206 时防止内存无界增长
+/// （正常 OMS 登录后立即同步，缓冲只会有少量委托）
+const MAX_PENDING_PLANS: usize = 4096;
 
 /// 处理委托(58)：按策略生成回报计划并发送。
 /// 执行回报同步未完成时，委托先入 pending 缓冲等待补发。
@@ -347,6 +405,7 @@ async fn handle_new_order(
     synced: bool,
     pending: &mut Vec<PlannedReport>,
     conn_id: u64,
+    report_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) {
     let order = match NewOrder::decode(body) {
         Ok(o) => o,
@@ -406,6 +465,18 @@ async fn handle_new_order(
     };
     if !synced {
         // 同步未完成：委托暂存缓冲，待同步后补发
+        if pending.len() + plans.len() > MAX_PENDING_PLANS {
+            // 缓冲超上限：丢弃本笔回报并告警（OMS 一直不发 206 属于协议违规，
+            // 不能让缓冲无限增长拖垮内存）
+            ctx.log(
+                "error",
+                format!(
+                    "同步前回报缓冲已满（{} 条），ClOrdID={} 的委托回报被丢弃",
+                    MAX_PENDING_PLANS, order.cl_ord_id
+                ),
+            );
+            return;
+        }
         ctx.log(
             "warn",
             format!(
@@ -417,19 +488,38 @@ async fn handle_new_order(
         pending.extend(plans);
         return;
     }
-    dispatch_reports(ctx, tx, plans);
+    dispatch_reports(ctx, tx, plans, report_tasks);
 }
 
 /// 按计划发送回报：等待 delay_ms 后经 mpsc 队列交给 writer。
 /// 发送走独立 spawn 任务而非直接 await，避免阻塞主读循环；
-/// 队列有界（4096），发送端不会无限堆积。
-fn dispatch_reports(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, plans: Vec<PlannedReport>) {
+/// 队列有界（4096），发送端不会无限堆积；句柄登记到会话级任务表，
+/// 会话结束时统一 abort（防止任务持有发送端导致清理挂起）。
+fn dispatch_reports(
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    plans: Vec<PlannedReport>,
+    report_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+) {
     let ctx2 = ctx.clone();
     let tx2 = tx.clone();
-    tokio::spawn(async move {
+    let h = tokio::spawn(async move {
         for p in plans {
             if p.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(p.delay_ms)).await;
+            }
+            // 发送前检查订单缓存：订单已到终态（如延迟期间被撤单成功/已成交/已拒）
+            // 时，丢弃尚未发出的回报——撤单成功后不再补发此前规划的确认/成交，
+            // 保证线上回报序列与订单状态一致（撤单成功回报本身不受此限）
+            if p.kind != ReportKind::Cancel {
+                if let Some(ob) = &ctx2.orders {
+                    if ob
+                        .find(&p.cl_ord_id)
+                        .is_some_and(|o| o.status.is_terminal())
+                    {
+                        continue;
+                    }
+                }
             }
             if tx2.send(p.frame).await.is_err() {
                 break; // 连接已关闭，停止发送
@@ -454,13 +544,25 @@ fn dispatch_reports(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, plans: Vec<Pla
             ctx2.log("info", format!("发送: {}", p.desc));
         }
     });
+    report_tasks.lock().push(h);
 }
 
 /// 处理撤单(61)：平台开启“缓存订单”时按订单真实状态回复：
 /// - 原单在途（已报/部分成交）→ 撤单成功：回执行报告(32) ExecType=4 已撤
 /// - 原单已是终态（全成/已拒/已撤）或找不到 → 撤单失败：回撤单失败(59)
 /// 未开启缓存时维持旧行为（一律撤单失败）。
-async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8], pbu: &str) {
+///
+/// 执行回报同步未完成时，撤单成功/失败回报同样进 pending 缓冲等 207 后补发：
+/// 否则柜台会先收到撤单成功、后收到该委托延迟补发的申报确认/成交，状态错乱
+/// （补发时发送侧会按订单缓存终态过滤掉已撤单委托的确认/成交）。
+async fn handle_cancel(
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    body: &[u8],
+    pbu: &str,
+    synced: bool,
+    pending: &mut Vec<PlannedReport>,
+) {
     let req = match CancelOrder::decode(body) {
         Ok(r) => r,
         Err(e) => {
@@ -480,7 +582,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
                 let cxl = ExecRpt {
                     pbu: pbu.to_string(),
                     set_id: ctx.cfg.partition_no as u32,
-                    report_index: ctx.stats.next_report_index() as u64,
+                    report_index: 0, // 发送时由 writer 任务补写
                     biz_id: req.biz_id,
                     exec_type: exec_type::CANCELLED,
                     biz_pbu: req.biz_pbu.clone(),
@@ -508,12 +610,36 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
                     transact_time: protocol::now_ntime(),
                     user_info: req.user_info.clone(),
                 };
-                let _ = tx.send(cxl.encode()).await;
+                if !synced {
+                    // 同步未完成：撤单成功回报进缓冲，与委托回报一起等 207 后按
+                    // 到达顺序补发（原委托的确认/成交会被发送侧的终态检查丢弃，
+                    // 柜台只收到撤单成功）
+                    pending.push(PlannedReport {
+                        delay_ms: 0,
+                        kind: ReportKind::Cancel,
+                        frame: cxl.encode(),
+                        desc: format!(
+                            "撤单成功(32) ClOrdID={} OrigClOrdID={}（同步后补发）",
+                            req.cl_ord_id, req.orig_cl_ord_id
+                        ),
+                        cl_ord_id: req.orig_cl_ord_id.clone(),
+                        order_update: Some(OrderUpdate {
+                            order_id: entry.order_id.clone(),
+                            cum_qty: entry.cum_qty,
+                            leaves_qty: 0.0,
+                            status: OrderStatus::Cancelled,
+                        }),
+                    });
+                } else {
+                    let _ = tx.send(cxl.encode()).await;
+                }
                 ctx.log(
                     "info",
                     format!(
-                        "收到撤单 ClOrdID={} OrigClOrdID={}，原单在途，已回撤单成功(32)",
-                        req.cl_ord_id, req.orig_cl_ord_id
+                        "收到撤单 ClOrdID={} OrigClOrdID={}，原单在途，已回撤单成功(32){}",
+                        req.cl_ord_id,
+                        req.orig_cl_ord_id,
+                        if synced { "" } else { "（同步后补发）" }
                     ),
                 );
                 return;
@@ -525,7 +651,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
     let rej = CancelReject {
         pbu: pbu.to_string(),
         set_id: ctx.cfg.partition_no as u32,
-        report_index: ctx.stats.next_report_index() as u64,
+        report_index: 0, // 发送时由 writer 任务补写
         biz_id: req.biz_id,
         biz_pbu: req.biz_pbu.clone(),
         cl_ord_id: req.cl_ord_id.clone(),
@@ -537,22 +663,34 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
         transact_time: protocol::now_ntime(),
         user_info: req.user_info.clone(),
     };
-    let _ = tx.send(rej.encode()).await;
-    ctx.log(
-        "info",
-        format!(
-            "收到撤单 ClOrdID={} OrigClOrdID={}，原单不存在或不可撤，回撤单失败(59)",
-            req.cl_ord_id, req.orig_cl_ord_id
-        ),
+    let desc = format!(
+        "收到撤单 ClOrdID={} OrigClOrdID={}，原单不存在或不可撤，回撤单失败(59)",
+        req.cl_ord_id, req.orig_cl_ord_id
     );
+    if !synced {
+        // 同步未完成：撤单失败也是执行报告流消息（带 ReportIndex），
+        // 同样进缓冲等 207 后补发，避免柜台在同步前收到执行报告
+        pending.push(PlannedReport {
+            delay_ms: 0,
+            kind: ReportKind::Cancel,
+            frame: rej.encode(),
+            desc: format!("{}（同步后补发）", desc),
+            cl_ord_id: req.orig_cl_ord_id.clone(),
+            order_update: None, // 撤单失败不改订单状态
+        });
+    } else {
+        let _ = tx.send(rej.encode()).await;
+    }
+    ctx.log("info", desc);
 }
 
 /// 构造一笔手动回复报文（成交/拒单/撤单成功），与 sz::session 同构，
 /// 仅报文格式与放大倍数不同：价格放大 10 万倍、数量放大 1000 倍。
 ///
-/// 返回（编码好的完整帧, 日志描述, 订单缓存同步更新）。
+/// 返回 Ok((编码好的完整帧, 日志描述, 订单缓存同步更新))；
 /// qty/price 用自然单位（股/元）；成交数量默认剩余量（全成）、价格默认
 /// 委托价、拒单原因默认 1；订单缓存没登记过的协议特有字段用空串占位。
+/// 剩余量不足 1 股时返回 Err（不能构造合法成交回报）。
 pub fn build_manual_report(
     cfg: &PlatformConfig,
     stats: &PlatformStats,
@@ -561,9 +699,17 @@ pub fn build_manual_report(
     qty: Option<f64>,
     price: Option<f64>,
     reason: Option<i32>,
-) -> (Vec<u8>, String, OrderUpdate) {
+) -> Result<(Vec<u8>, String, OrderUpdate), String> {
     match kind {
         ManualReportKind::Trade => {
+            // 剩余量不足 1 股（小数股委托或已基本成交）时拒绝手动成交：
+            // 否则下方 clamp(1, 0) 会触发 panic（min > max）
+            if entry.leaves_qty < 1.0 {
+                return Err(format!(
+                    "订单 [{}] 剩余数量不足 1 股，不能手动回复成交",
+                    entry.cl_ord_id
+                ));
+            }
             // 成交数量钳制到 (0, 剩余量]：不传或超限都按剩余量全成
             let fill_shares = qty
                 .map(|q| q as i64)
@@ -577,7 +723,7 @@ pub fn build_manual_report(
             let trade = TradeRpt {
                 pbu: entry.pbu.clone(),
                 set_id: cfg.partition_no as u32,
-                report_index: stats.next_report_index() as u64,
+                report_index: 0, // 发送时由 writer 任务补写
                 biz_id: entry.biz_id,
                 exec_type: exec_type::TRADE,
                 biz_pbu: entry.biz_pbu.clone(),
@@ -588,8 +734,9 @@ pub fn build_manual_report(
                 order_entry_time: protocol::now_ntime(),
                 last_px,
                 last_qty,
-                // 成交金额 = 价格 × 数量，两者都是放大整数，除回数量放大倍数
-                gross_trade_amt: last_px * last_qty / 1000,
+                // 成交金额 = 价格 × 数量，两者都是放大整数，除回数量放大倍数；
+                // 用 i128 中间量防极端价格×数量相乘溢出 i64（先除后乘会丢精度）
+                gross_trade_amt: ((last_px as i128) * (last_qty as i128) / 1000) as i64,
                 side: side_byte(&entry.side),
                 order_qty: (entry.qty * 1000.0).round() as i64,
                 leaves_qty: (leaves * 1000.0).round() as i64,
@@ -625,7 +772,7 @@ pub fn build_manual_report(
                     OrderStatus::Partial
                 },
             };
-            (trade.encode(), desc, update)
+            Ok((trade.encode(), desc, update))
         }
         // 拒单/撤单成功共用执行报告骨架（32），仅执行类型/状态/原因不同
         ManualReportKind::Reject | ManualReportKind::Cancel => {
@@ -646,7 +793,7 @@ pub fn build_manual_report(
                         leaves_qty: 0.0,
                         status: OrderStatus::Rejected,
                     };
-                    (rpt.encode(), desc, update)
+                    Ok((rpt.encode(), desc, update))
                 }
                 ManualReportKind::Cancel => {
                     rpt.exec_type = exec_type::CANCELLED;
@@ -665,7 +812,7 @@ pub fn build_manual_report(
                         leaves_qty: 0.0,
                         status: OrderStatus::Cancelled,
                     };
-                    (rpt.encode(), desc, update)
+                    Ok((rpt.encode(), desc, update))
                 }
                 ManualReportKind::Trade => unreachable!(),
             }
@@ -683,7 +830,7 @@ fn base_manual_rpt(
     ExecRpt {
         pbu: entry.pbu.clone(),
         set_id: cfg.partition_no as u32,
-        report_index: stats.next_report_index() as u64,
+        report_index: 0, // 发送时由 writer 任务补写
         biz_id: entry.biz_id,
         exec_type: exec_type::NEW,
         biz_pbu: entry.biz_pbu.clone(),

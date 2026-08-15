@@ -254,6 +254,22 @@ export interface OrderEntry {
     ts: string;
     /** 所属连接序号（订单来自哪条连接，后端手动回复时定位发送通道） */
     connId: number;
+    /** 回报交易单元：沪市为 Pbu（登录 CompID 前 8 位）、深市为申报交易单元 */
+    pbu: string;
+    /** 业务标识（沪市 BizID 回填用；深市无此概念，恒为 0） */
+    bizId: number;
+    /** 业务 PBU（沪市 BizPbu 回填用；深市无此概念，恒为空） */
+    bizPbu: string;
+    /** 订单所有者类型（回报回填用；深市为 u16，沪市为 u8） */
+    ownerType: number;
+    /** 信用标签（沪市回填用；深市无，恒为空） */
+    creditTag: string;
+    /** 结算会员代码（回报回填用） */
+    clearingFirm: string;
+    /** 用户私有信息（回报按规范回填上行值） */
+    userInfo: string;
+    /** 业务标识字符串：深市为委托 ApplID（如 "010" 现货竞价）；沪市无，恒为空串 */
+    biz: string;
 }
 
 /** 订单状态 → 中文标签与颜色（未知值兜底为“未知”） */

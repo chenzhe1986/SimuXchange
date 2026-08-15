@@ -426,6 +426,29 @@ pub fn checksum(data: &[u8]) -> u32 {
     data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32)) % 256
 }
 
+/// 是否回报类消息：深市所有回报（确认/成交/撤单拒绝/报价状态/成交申报响应等）
+/// 消息号都在 200000~299999（首字节为 2）；会话消息（Logon=1/注销=2/心跳=3/
+/// 业务拒绝=4/回报同步=5/平台状态=6/回报结束=7/平台信息=9/交易会话状态=10）
+/// 都不在此区间。writer 任务据此决定是否补写 ReportIndex。
+pub fn is_report_frame(mt: u32) -> bool {
+    (200_000..300_000).contains(&mt)
+}
+
+/// 发送前把回报记录号 ReportIndex 补进报文并重算校验和。
+///
+/// 所有回报类消息体统一以 PartitionNo(i32,4 字节) + ReportIndex(i64,8 字节) 开头
+/// （见各回报结构体 encode），因此 ReportIndex 恒位于帧偏移
+/// 8(报文头) + 4 = 12 处，写 8 字节大端。
+/// ReportIndex 在真实发送时分配（与发送顺序严格一致），避免“生成时分配 +
+/// 延迟发送”导致线上序号乱序（真实柜台按分区校验 ReportIndex 单调递增）。
+pub fn patch_report_index(frame: &mut [u8], report_index: i64) {
+    frame[12..20].copy_from_slice(&report_index.to_be_bytes());
+    // 报文内容变了，校验和要重算（与 shjj 的 finalize_seq 同一思路）
+    let n = frame.len();
+    let cks = checksum(&frame[..n - 4]);
+    frame[n - 4..].copy_from_slice(&cks.to_be_bytes());
+}
+
 /// 组装完整报文：消息头（类型+长度）+ 消息体 + 校验和。
 /// 所有往外发的消息最后都经过这个函数包装成字节串。
 pub fn frame(msg_type: u32, body: &[u8]) -> Vec<u8> {

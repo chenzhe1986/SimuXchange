@@ -175,16 +175,33 @@ fn sanitize_file_name(s: &str) -> String {
 ///
 /// 返回的最后一项是“头+体+校验和”拼成的完整原始帧，供报文捕获原样记录。
 ///
-/// idle_timeout 只加在“等报文头”这一步：如果对方长时间一个字节都不发
-/// （连心跳都没有），就判定连接已失联，返回超时错误让会话结束。
+/// idle_timeout 同时作用在“读报文头 / 读消息体 / 读校验和”三步上：
+/// 若对方长时间一个字节都不发（连心跳都没有），或发完报文头就停住不发
+/// 剩余部分（半包攻击/对端异常），读超时都会触发，让会话结束——否则会话
+/// 会被一个只发头部的连接永久挂起，占死单连接槽位。
 async fn read_frame(
     rh: &mut OwnedReadHalf,
     idle_timeout: Duration,
 ) -> std::io::Result<(u32, Vec<u8>, bool, Vec<u8>)> {
+    // 带超时读满 buf：超时/读错统一转成 io::Error，由调用方结束会话
+    async fn read_exact_timeout(
+        rh: &mut OwnedReadHalf,
+        buf: &mut [u8],
+        idle_timeout: Duration,
+    ) -> std::io::Result<()> {
+        match tokio::time::timeout(idle_timeout, rh.read_exact(buf)).await {
+            // 内层是 read_exact 的 io 错误，直接透传（tokio 新版返回已读字节数，
+            // 这里只关心成败，忽略 usize）；外层是 timeout 的 Elapsed，转成 io::Error
+            Ok(r) => r.map(|_| ()),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "读取超时（心跳丢失）",
+            )),
+        }
+    }
+
     let mut head = [0u8; 8];
-    tokio::time::timeout(idle_timeout, rh.read_exact(&mut head))
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "读取超时（心跳丢失）"))??;
+    read_exact_timeout(rh, &mut head, idle_timeout).await?;
     // 报文头是大端序：前 4 字节消息类型，后 4 字节消息体长度
     let mt = u32::from_be_bytes(head[0..4].try_into().unwrap());
     let body_len = u32::from_be_bytes(head[4..8].try_into().unwrap()) as usize;
@@ -197,9 +214,9 @@ async fn read_frame(
         ));
     }
     let mut body = vec![0u8; body_len];
-    rh.read_exact(&mut body).await?;
+    read_exact_timeout(rh, &mut body, idle_timeout).await?;
     let mut cks_buf = [0u8; 4];
-    rh.read_exact(&mut cks_buf).await?;
+    read_exact_timeout(rh, &mut cks_buf, idle_timeout).await?;
     let recv_cks = u32::from_be_bytes(cks_buf);
     // 自己对“头+体”重算一遍校验和，与对方发来的比对，验证数据没被损坏
     let mut all = Vec::with_capacity(8 + body_len + 4);
@@ -240,10 +257,20 @@ pub async fn handle_conn(
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4096);
     // 登记发送通道：界面手动回复成交/拒单/撤单时，经此把回报投给本连接
     ctx.conn_tx.lock().unwrap().insert(conn_id, tx.clone());
+    let stats = ctx.stats.clone();
     let writer = tokio::spawn(async move {
         // 队列里有消息就写出去；写失败（对方已断开）或队列关闭则退出
-        while let Some(buf) = rx.recv().await {
-            // 发送前捕获（深交所报文写出前不再加工，字节即上线内容），
+        while let Some(mut buf) = rx.recv().await {
+            // 回报记录号 ReportIndex 在真实发送时分配并补写进报文：
+            // 分配时机与线上发送顺序严格一致，多笔并发回报（含延迟回报）也不会乱序；
+            // 非回报消息（Logon/心跳/业务拒绝/平台状态等）跳过，不占回报序号
+            if buf.len() >= 20 {
+                let mt = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+                if protocol::is_report_frame(mt) {
+                    protocol::patch_report_index(&mut buf, stats.next_report_index());
+                }
+            }
+            // 发送前捕获（补号已完成，捕获字节与线上完全一致），
             // 并同步解析字段：头 8 字节消息类型，消息体在 [8..len-4]
             if let Some(r) = &rec_send {
                 let fields = if buf.len() >= 12 {
@@ -278,6 +305,12 @@ pub async fn handle_conn(
     let mut hb_secs: u64 = 30; // 心跳间隔（秒），Logon 时以对方要求为准
     let mut logged_on = false; // 是否已登录（未登录前拒绝处理业务消息）
     let mut hb_task: Option<tokio::task::JoinHandle<()>> = None; // 心跳发送任务句柄
+    // 延迟回报任务登记表：回报存在延迟时用独立任务“睡眠+发送”，该任务持有
+    // 发送通道的 clone；会话结束必须把它们全部 abort 并等其释放发送端，
+    // 否则 writer.await 会一直等队列关闭（见下方清理段注释）。
+    // 用 parking_lot 锁：取锁即得 guard，无中毒路径（任务登记不允许失败）
+    let report_tasks: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
 
     // 主循环：一次处理一条报文，直到连接结束
     loop {
@@ -327,13 +360,20 @@ pub async fn handle_conn(
                         .await;
                     break;
                 }
-                // 心跳间隔采用对方 Logon 里的要求，限制在 1~300 秒的合理范围
-                hb_secs = logon.heart_bt_int.clamp(1, 300) as u64;
-                // 回复 Logon 确认登录（真实交易所的握手流程也是如此）
+                // 心跳间隔采用对方 Logon 里的要求，限制在 1~300 秒的合理范围；
+                // 对端填 0 表示未指定（协议约定），用默认 30 秒，
+                // 否则 0 会被钳成 1 秒，正常柜台偶发延迟就会被 3 秒超时误断
+                hb_secs = if logon.heart_bt_int == 0 {
+                    30
+                } else {
+                    logon.heart_bt_int.clamp(1, 300) as u64
+                };
+                // 回复 Logon 确认登录（真实交易所的握手流程也是如此），
+                // 心跳间隔回填实际生效值（含 0→默认 30 的归一化），双方一致
                 let reply = Logon {
                     sender_comp_id: ctx.cfg.comp_id.clone(),
                     target_comp_id: logon.sender_comp_id.clone(),
-                    heart_bt_int: logon.heart_bt_int,
+                    heart_bt_int: hb_secs as i32,
                     password: String::new(),
                     default_appl_ver_id: if logon.default_appl_ver_id.is_empty() {
                         "1.29".into()
@@ -433,7 +473,7 @@ pub async fn handle_conn(
             // 4.5.1 新订单：28 种业务消息类型统一分发（m 绑定实际消息类型，
             // handle_new_order 按业务解码委托并选回报报文类型）
             m if logged_on && NewOrder::is_new_order(m) => {
-                handle_new_order(m, &ctx, &tx, &body, conn_id).await;
+                handle_new_order(m, &ctx, &tx, &body, conn_id, &report_tasks).await;
             }
             msg_type::ORDER_CANCEL_REQUEST if logged_on => {
                 handle_cancel(&ctx, &tx, &body).await;
@@ -488,6 +528,17 @@ pub async fn handle_conn(
     if let Some(h) = hb_task {
         h.abort(); // 停止心跳任务
     }
+    // 先终止延迟回报任务：它们各自持有 tx 的 clone，不结束的话 writer 的
+    // recv 永远等不到队列关闭，下面的 writer.await 会一直挂在这里，
+    // connections 移除 / mark_dead 都执行不到（重连会被单连接限制拒绝）。
+    // abort 后 await 等任务真正退出（释放发送端）再继续。
+    let pending_tasks = std::mem::take(&mut *report_tasks.lock());
+    for h in &pending_tasks {
+        h.abort();
+    }
+    for h in pending_tasks {
+        let _ = h.await;
+    }
     // 先移除发送通道：它持有一份 tx clone，不先移除的话 writer 的 recv
     // 永远等不到队列关闭，writer.await 会一直挂在这里，后续的
     // connections 移除 / mark_dead 都执行不到（重连会被单连接限制拒绝）
@@ -514,6 +565,7 @@ async fn handle_new_order(
     tx: &mpsc::Sender<Vec<u8>>,
     body: &[u8],
     conn_id: u64,
+    report_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) {
     let order = match NewOrder::decode(mt, body) {
         Ok(o) => o,
@@ -605,6 +657,19 @@ async fn handle_new_order(
             if p.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(p.delay_ms)).await;
             }
+            // 发送前检查订单缓存：订单已到终态（如延迟期间被撤单成功/已成交/已拒）
+            // 时，丢弃尚未发出的回报——撤单成功后不再补发此前规划的确认/成交，
+            // 保证线上回报序列与订单状态一致（撤单成功回报本身不受此限）
+            if p.kind != ReportKind::Cancel {
+                if let Some(ob) = &ctx2.orders {
+                    if ob
+                        .find(&p.cl_ord_id)
+                        .is_some_and(|o| o.status.is_terminal())
+                    {
+                        continue;
+                    }
+                }
+            }
             if tx2.send(p.frame).await.is_err() {
                 break; // 连接已断开，剩余回报不必再发
             }
@@ -635,8 +700,10 @@ async fn handle_new_order(
         fut.await;
     } else {
         // 存在延迟：交给独立任务去睡眠+发送，主循环立即继续
-        // 接收下一笔委托，不会被延迟卡住
-        tokio::spawn(fut);
+        // 接收下一笔委托，不会被延迟卡住；句柄登记到会话级任务表，
+        // 会话结束时统一 abort（防止任务持有发送端导致清理挂起）
+        let h = tokio::spawn(fut);
+        report_tasks.lock().push(h);
     }
 }
 
@@ -687,7 +754,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
             let cxl = ExecRptAck {
                 msg_type: biz.ack_msg_type,
                 partition_no: ctx.cfg.partition_no,
-                report_index: ctx.stats.next_report_index(),
+                report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
                 appl_id: if req.appl_id.is_empty() {
                     biz.appl_id.into()
                 } else {
@@ -714,7 +781,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
                 ord_status: ord_status::CANCELLED,
                 ord_rej_reason: 0,
                 leaves_qty: 0,
-                cum_qty: (entry.cum_qty * 100.0) as i64,
+                cum_qty: (entry.cum_qty * 100.0).round() as i64,
                 side: req.side,
                 ord_type: entry.ord_type,
                 order_qty: (entry.qty * 100.0) as i64,
@@ -742,7 +809,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
     // 拼撤单拒绝报文：大部分字段直接回填请求里的值（回报要能对得上号）
     let rej = CancelReject {
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: if req.appl_id.is_empty() { "010".into() } else { req.appl_id.clone() },
         reporting_pbu_id: req.submitting_pbu_id.clone(),
         submitting_pbu_id: req.submitting_pbu_id.clone(),
@@ -861,7 +928,7 @@ async fn handle_quote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, bod
         let rpt = QuoteStatusReport {
             msg_type: QuoteStatusReport::response_msg_type(mt),
             partition_no: ctx.cfg.partition_no,
-            report_index: ctx.stats.next_report_index(),
+            report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
             appl_id: q.appl_id.clone(),
             reporting_pbu_id: q.submitting_pbu_id.clone(),
             submitting_pbu_id: q.submitting_pbu_id.clone(),
@@ -956,7 +1023,7 @@ async fn handle_quote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, bod
         let rpt = QuoteStatusReport {
             msg_type: QuoteStatusReport::response_msg_type(mt),
             partition_no: ctx.cfg.partition_no,
-            report_index: ctx.stats.next_report_index(),
+            report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
             appl_id: q.appl_id.clone(),
             reporting_pbu_id: q.submitting_pbu_id.clone(),
             submitting_pbu_id: q.submitting_pbu_id.clone(),
@@ -1043,7 +1110,7 @@ async fn handle_quote_request(
     let rpt = QuoteRequestAck {
         msg_type: QuoteRequestAck::response_msg_type(mt),
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: q.appl_id.clone(),
         reporting_pbu_id: q.submitting_pbu_id.clone(),
         submitting_pbu_id: q.submitting_pbu_id.clone(),
@@ -1123,7 +1190,7 @@ async fn handle_ioi(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body:
     let rpt = IOIResponse {
         msg_type: msg_type::IOI_RESPONSE,
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: q.appl_id.clone(),
         reporting_pbu_id: q.submitting_pbu_id.clone(),
         submitting_pbu_id: q.submitting_pbu_id.clone(),
@@ -1185,7 +1252,7 @@ async fn handle_tcr(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body:
     let rpt = TcrAck {
         msg_type: TcrAck::response_msg_type(mt),
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: tcr.appl_id.clone(),
         reporting_pbu_id: tcr.submitting_pbu_id.clone(),
         submitting_pbu_id: tcr.submitting_pbu_id.clone(),
@@ -1266,7 +1333,7 @@ async fn handle_designation(
     let rpt = DesignationReport {
         msg_type: msg_type::DESIGNATION_REPORT,
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: d.appl_id.clone(),
         reporting_pbu_id: d.submitting_pbu_id.clone(),
         submitting_pbu_id: d.submitting_pbu_id.clone(),
@@ -1325,7 +1392,7 @@ async fn handle_evote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, bod
     let rpt = EvoteReport {
         msg_type: msg_type::EVOTE_REPORT,
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: v.appl_id.clone(),
         reporting_pbu_id: v.submitting_pbu_id.clone(),
         submitting_pbu_id: v.submitting_pbu_id.clone(),
@@ -1388,7 +1455,7 @@ async fn handle_password_service(
     let rpt = PasswordServiceReport {
         msg_type: msg_type::PASSWORD_SERVICE_REPORT,
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: p.appl_id.clone(),
         reporting_pbu_id: p.submitting_pbu_id.clone(),
         submitting_pbu_id: p.submitting_pbu_id.clone(),
@@ -1450,7 +1517,7 @@ async fn handle_margin_query(
     let rpt = MarginQueryResult {
         msg_type: msg_type::MARGIN_QUERY_RESULT,
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: m.appl_id.clone(),
         reporting_pbu_id: m.submitting_pbu_id.clone(),
         submitting_pbu_id: m.submitting_pbu_id.clone(),
@@ -1505,7 +1572,7 @@ async fn handle_multileg(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, 
     let rpt = MultilegExecRpt {
         msg_type: MultilegExecRpt::response_msg_type(mt),
         partition_no: ctx.cfg.partition_no,
-        report_index: ctx.stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: o.common.appl_id.clone(),
         reporting_pbu_id: o.common.submitting_pbu_id.clone(),
         submitting_pbu_id: o.common.submitting_pbu_id.clone(),
@@ -1669,6 +1736,14 @@ pub fn build_manual_report(
                 return Err(format!("业务[{}]无成交回报（表3-4），不能手动回复成交", biz.name));
             };
             // 成交数量钳制到 (0, 剩余量]：不传或超限都按剩余量全成
+            // 剩余量不足 1 股（小数股委托或已基本成交）时拒绝手动成交：
+            // 否则下方 clamp(1, 0) 会触发 panic（min > max）
+            if entry.leaves_qty < 1.0 {
+                return Err(format!(
+                    "订单 [{}] 剩余数量不足 1 股，不能手动回复成交",
+                    entry.cl_ord_id
+                ));
+            }
             let fill_shares = qty
                 .map(|q| q as i64)
                 .unwrap_or(entry.leaves_qty as i64)
@@ -1679,7 +1754,7 @@ pub fn build_manual_report(
             let trade = ExecRptTrade {
                 msg_type: trade_msg_type,
                 partition_no: cfg.partition_no,
-                report_index: stats.next_report_index(),
+                report_index: 0, // 发送时由 writer 任务补写
                 appl_id: biz.appl_id.into(),
                 reporting_pbu_id: entry.pbu.clone(),
                 submitting_pbu_id: entry.pbu.clone(),
@@ -1783,7 +1858,7 @@ fn base_manual_ack(
     ExecRptAck {
         msg_type: biz.ack_msg_type,
         partition_no: cfg.partition_no,
-        report_index: stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写
         appl_id: biz.appl_id.into(),
         reporting_pbu_id: entry.pbu.clone(),
         submitting_pbu_id: entry.pbu.clone(),

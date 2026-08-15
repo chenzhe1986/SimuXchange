@@ -257,36 +257,46 @@ async function main() {
         throw new Error("shjj 订单缓存登记不正确");
     }
 
-    // 5. 撤单（在途）→ 应撤单成功：执行报告(32) ExecType='4'
+    // 5. 未同步先撤单（在途）→ 撤单成功回报进缓冲（同步前不发任何执行报告），
+    //    但缓存状态应立即置为已撤
     const CXL = "C" + String(Date.now()).slice(-9);
     sock.write(frame(61, cancelBody(CXL, CL), 3));
-    let f = await readFrame(sock);
-    // ExecRpt body 布局：pbu 8 + set_id 4 + report_index 8 + biz_id 4 → exec_type 在 offset 24
-    const execType = f.body.readUInt8(24);
-    console.log("撤单回报 MsgType:", f.mt, "（应=32），ExecType:", String.fromCharCode(execType), "（应=4）");
-    if (f.mt !== 32 || execType !== 0x34) throw new Error("shjj 在途撤单未成功");
-
-    // 6. 缓存状态已撤
+    await waitMs(200);
     orders = await call("get_orders", { gatewayId: gwId, platformId: pid });
     o = orders.find((x) => x.clOrdId === CL);
     console.log("撤单后缓存状态:", o?.status, "（应=cancelled）");
     if (o?.status !== "cancelled") throw new Error("shjj 缓存状态未更新为已撤");
 
-    // 7. 完成同步 → 补发 pending 里的确认回报 → 终态保护下状态不应回退
+    // 6. 同步前不应收到撤单成功回报（执行报告流等待 207 后统一补发）
+    const early = await Promise.race([
+        readFrame(sock).then(() => true),
+        waitMs(300).then(() => false),
+    ]);
+    console.log("同步前是否收到回报:", early, "（应=false，回报在缓冲中）");
+    if (early) throw new Error("shjj 同步前不应推送撤单回报");
+
+    // 7. 完成同步 → 补发缓冲回报：撤单成功(32) ExecType='4'
+    //    （原委托的确认/成交因订单已撤被发送侧终态检查丢弃）
     sock.write(frame(206, syncBody(), 4));
-    await waitMs(300);
+    const f = await readUntil(sock, 32, []);
+    // ExecRpt body 布局：pbu 8 + set_id 4 + report_index 8 + biz_id 4 → exec_type 在 offset 24
+    const execType = f.body.readUInt8(24);
+    console.log("同步后补发 MsgType:", f.mt, "（应=32），ExecType:", String.fromCharCode(execType), "（应=4）");
+    if (f.mt !== 32 || execType !== 0x34) throw new Error("shjj 同步后未补发撤单成功");
+
+    // 8. 缓存状态仍为已撤（终态保护：补发的在途确认不回退状态）
     orders = await call("get_orders", { gatewayId: gwId, platformId: pid });
     o = orders.find((x) => x.clOrdId === CL);
     console.log("同步补发后缓存状态:", o?.status, "（应仍=cancelled，终态保护）");
     if (o?.status !== "cancelled") throw new Error("shjj 终态保护失效：状态被回退");
 
-    // 8. 再撤已撤订单 → 撤单失败(59)
+    // 9. 再撤已撤订单 → 撤单失败(59)
     sock.write(frame(61, cancelBody("C" + String(Date.now()).slice(-9), CL), 5));
-    f = await readFrame(sock);
-    console.log("二次撤单回报 MsgType:", f.mt, "（应=59 撤单失败）");
-    if (f.mt !== 59) throw new Error("shjj 终态订单撤单未失败");
+    const f2 = await readFrame(sock);
+    console.log("二次撤单回报 MsgType:", f2.mt, "（应=59 撤单失败）");
+    if (f2.mt !== 59) throw new Error("shjj 终态订单撤单未失败");
 
-    // 9. 恢复原策略
+    // 10. 恢复原策略
     sock.destroy();
     try { await call("stop_gateway", { id: gwId }); } catch { /* 忽略 */ }
     if (origMode !== "ackOnly") {

@@ -611,7 +611,7 @@ fn base_ack(
     ExecRptAck {
         msg_type: biz.ack_msg_type,
         partition_no,
-        report_index: stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（保证与线上顺序一致）
         appl_id: fill_or(&c.appl_id, biz.appl_id),
         reporting_pbu_id: c.submitting_pbu_id.clone(),
         submitting_pbu_id: c.submitting_pbu_id.clone(),
@@ -664,7 +664,7 @@ fn build_trade(
     ExecRptTrade {
         msg_type,
         partition_no,
-        report_index: stats.next_report_index(),
+        report_index: 0, // 发送时由 writer 任务补写（保证与线上顺序一致）
         appl_id: fill_or(&c.appl_id, biz.appl_id),
         reporting_pbu_id: c.submitting_pbu_id.clone(),
         submitting_pbu_id: c.submitting_pbu_id.clone(),
@@ -730,13 +730,22 @@ fn gen_fills(st: &StrategyConfig, order: &NewOrder, biz: &BizInfo) -> Vec<(i64, 
             let qtys = split_shares(part, sample_split_count(st));
             with_ladder_prices(st, order, &qtys)
         }
-        // 自定义：直接用用户在界面上填的逐笔数量/价格（跳过数量为 0 的行）
-        StrategyMode::Custom => st
-            .custom_fills
-            .iter()
-            .filter(|f| f.qty > 0.0)
-            .map(|f| (qty_raw(f.qty.round() as i64), px_raw(f.price)))
-            .collect(),
+        // 自定义：直接用用户在界面上填的逐笔数量/价格（跳过数量为 0 的行）。
+        // 累计成交量钳制到委托量以内：明细总和超过委托量时截断（否则回报里
+        // CumQty 会超 OrderQty，协议非法）；价格下限 0.0001 元（0 价成交无效）
+        StrategyMode::Custom => {
+            let mut remaining = total_shares;
+            let mut out = Vec::new();
+            for f in st.custom_fills.iter().filter(|f| f.qty > 0.0) {
+                if remaining <= 0 {
+                    break;
+                }
+                let shares = (f.qty.round() as i64).clamp(1, remaining);
+                remaining -= shares;
+                out.push((qty_raw(shares), px_raw(f.price.max(0.0001))));
+            }
+            out
+        }
         // 只确认/拒单：没有成交
         StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
     }
@@ -1015,6 +1024,31 @@ mod tests {
         let cfg = mk_cfg(StrategyMode::Custom);
         let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
         assert_eq!(plans.len(), 3); // ack + 2 笔自定义成交
+    }
+
+    #[test]
+    fn test_custom_fills_clamped_to_order_qty() {
+        // 明细总量（300+200=500）超过委托量（400）时，逐笔钳制到剩余量：
+        // 第二笔 200 被截为 100，累计成交量不超过委托量（协议非法场景防护）
+        let stats = PlatformStats::default();
+        let order = mk_order(msg_type::NEW_ORDER_CASH, 400, 10.0, b'1');
+        let cfg = mk_cfg(StrategyMode::Custom);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        assert_eq!(plans.len(), 3); // ack + 2 笔
+        let t1 = ExecRptTrade::decode(
+            msg_type::EXEC_RPT_CASH_TRADE,
+            &plans[1].frame[8..plans[1].frame.len() - 4],
+        )
+        .unwrap();
+        assert_eq!(t1.last_qty, 300 * QTY_UNIT);
+        let t2 = ExecRptTrade::decode(
+            msg_type::EXEC_RPT_CASH_TRADE,
+            &plans[2].frame[8..plans[2].frame.len() - 4],
+        )
+        .unwrap();
+        assert_eq!(t2.last_qty, 100 * QTY_UNIT); // 200 被截为剩余 100
+        assert_eq!(t2.cum_qty, 400 * QTY_UNIT); // 累计不超委托量
+        assert_eq!(t2.ord_status, ord_status::FILLED);
     }
 
     #[test]

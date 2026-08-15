@@ -555,7 +555,8 @@ impl Engine {
             .map_err(|e| e)?,
             GatewayCategory::Shbond => session_shbond::build_manual_report(
                 &rp.cfg, &rp.stats, &entry, kind, qty, price, reason,
-            ),
+            )
+            .map_err(|e| e)?,
         };
         // 回报统一从“当前活动连接”发出：平台同一时刻只服务一个柜台连接，
         // 历史订单可能来自已断开的旧连接，手动回复也走当前连接

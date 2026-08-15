@@ -51,10 +51,10 @@ npm run tauri dev    # 启动桌面端（首次编译较慢，约几分钟）
 npm run tauri build
 ```
 
-构建时会自动执行 `scripts/build-all.ps1`：确保 Linux 后端产物
-`target\x86_64-unknown-linux-musl\release\simx-server` 存在（缺失时自动交叉编译），
-并把该文件打进安装包，安装后位于安装目录的 `Linux\simx-server`
-（供 Linux 服务器远程部署用，见第 3 节）。
+构建时会自动执行 `scripts/build-all.ps1`：**每次打包按源码指纹增量编译** Linux 后端
+（服务端代码有改动自动重编，不会打包进旧产物；链接方式自动探测——无 musl 交叉
+工具链时用 rust-lld 自包含链接），并把该文件打进安装包，安装后位于安装目录的
+`Linux\simx-server`（供 Linux 服务器远程部署用，见第 3 节）。
 
 产物：
 - 免安装 exe：`target\release\simuxchange.exe`

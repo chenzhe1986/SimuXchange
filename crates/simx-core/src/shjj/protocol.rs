@@ -166,6 +166,28 @@ pub fn checksum(data: &[u8]) -> u32 {
     data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b)) as u32
 }
 
+/// 是否回报类消息：沪市回报（32 执行报告/59 撤单拒绝/103 成交/302 注册执行回报）
+/// 消息体统一以 Pbu(8)+SetID(4)+ReportIndex(8) 开头，writer 据此补写 ReportIndex；
+/// 申报拒绝(204)/密码服务响应(308)/同步响应(207)/心跳/登录等消息无 ReportIndex。
+pub fn is_report_frame(mt: u32) -> bool {
+    matches!(mt, 32 | 59 | 103 | 302)
+}
+
+/// 发送前把回报记录号 ReportIndex 补进报文并重算校验和。
+///
+/// 回报类消息体统一以 Pbu(char[8]) + SetID(u32,4 字节) + ReportIndex(u64,8 字节) 开头
+/// （见 ExecRpt/TradeRpt/CancelReject/RegistrationRpt 的 encode），因此 ReportIndex
+/// 恒位于帧偏移 16(报文头) + 8 + 4 = 28 处。
+/// ReportIndex 在真实发送时分配（与发送顺序严格一致），避免“生成时分配 +
+/// 延迟发送”导致线上序号乱序（真实柜台按分区校验 ReportIndex 单调递增）。
+pub fn patch_report_index(frame: &mut [u8], report_index: u64) {
+    frame[28..36].copy_from_slice(&report_index.to_be_bytes());
+    // 报文内容变了，校验和要重算（与 finalize_seq 同一思路）
+    let n = frame.len();
+    let cks = checksum(&frame[..n - 4]);
+    frame[n - 4..].copy_from_slice(&cks.to_be_bytes());
+}
+
 /// 组装完整报文：消息头（类型+序号占位+长度）+ 消息体 + 校验和。
 /// MsgSeqNum 先填 0，真正发送前由 [`finalize_seq`] 补上。
 pub fn frame(msg_type: u32, body: &[u8]) -> Vec<u8> {
