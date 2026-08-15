@@ -1,0 +1,15 @@
+[package]
+name = "simx-update-server"
+version = "1.0.0"
+edition = "2021"
+description = "SimuXchange 升级服务器：静态文件服务 + 网页上传管理 + 自动生成 version.json"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# multipart feature：管理页面上传安装包（axum 默认 body 上限 2MB，需配合 DefaultBodyLimit 调大）
+axum = { version = "0.7", features = ["multipart"] }
+
+[dev-dependencies]
+matchit = "0.7"

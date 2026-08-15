@@ -1,0 +1,594 @@
+/* SimuXchange 全局样式 —— 支持五套配色主题
+
+   主题机制：所有颜色统一以 CSS 变量（--bg、--accent 等）定义，
+   组件样式通过 var(--xxx) 引用。切换主题即切换 <html> 的
+   data-theme 属性值，对应主题块中的变量覆盖默认值，全界面随之变色。
+   主题选择与持久化逻辑见 App.vue 的“界面配色主题”部分。 */
+
+/* ---------- 默认主题：优雅白（浅色主题，语义色用加深版保证可读性） ----------
+   启动时 App.vue 会立即设置 data-theme="light"，这里把 :root 也设成同值：
+   即使 data-theme 尚未生效（如加载瞬间）也不会闪一下深色背景。 */
+:root {
+    --bg: #f4f6fa;
+    --bg-soft: #eceff5;
+    --panel: #ffffff;
+    --panel-2: #f1f4f9;
+    --border: #d4dae4;
+    --border-soft: #e2e7ef;
+    --text: #1f2937;
+    --text-dim: #64748b;
+    --text-faint: #94a3b8;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59, 130, 246, 0.12);
+    --accent-hover: #2570eb;
+    --green: #059669;
+    --green-soft: rgba(5, 150, 105, 0.12);
+    --amber: #d97706;
+    --amber-soft: rgba(217, 119, 6, 0.12);
+    --red: #dc2626;
+    --red-soft: rgba(220, 38, 38, 0.1);
+    /* 细节配色：滚动条、按钮悬停、弹窗遮罩、灰色状态点、阴影 */
+    --scroll-thumb: #c6cdd9;
+    --scroll-thumb-hover: #aeb7c6;
+    --btn-hover-bg: #e8edf5;
+    --btn-hover-border: #b9c3d3;
+    --mask: rgba(15, 23, 42, 0.35);
+    --dot-off: #b0b9c8;
+    --shadow-modal: 0 24px 64px rgba(15, 23, 42, 0.18);
+    --shadow-pop: 0 10px 32px rgba(15, 23, 42, 0.16);
+    --radius: 10px;
+    --radius-sm: 7px;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+/* ---------- 经典黑：蓝黑底 + 蓝色点缀 ---------- */
+:root[data-theme="dark"] {
+    --bg: #0e1117;
+    --bg-soft: #151a23;
+    --panel: #1a2029;
+    --panel-2: #202836;
+    --border: #2a3342;
+    --border-soft: #232c3a;
+    --text: #e2e8f2;
+    --text-dim: #8b98ab;
+    --text-faint: #5c6980;
+    --accent: #4f8cff;
+    --accent-soft: rgba(79, 140, 255, 0.14);
+    --accent-hover: #3e7cf5;
+    --green: #34d399;
+    --green-soft: rgba(52, 211, 153, 0.13);
+    --amber: #fbbf24;
+    --amber-soft: rgba(251, 191, 36, 0.12);
+    --red: #f87171;
+    --red-soft: rgba(248, 113, 113, 0.12);
+    --scroll-thumb: #2c3646;
+    --scroll-thumb-hover: #3a4658;
+    --btn-hover-bg: #26303f;
+    --btn-hover-border: #3d4a5e;
+    --mask: rgba(5, 8, 13, 0.62);
+    --dot-off: #4a5568;
+    --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.55);
+    --shadow-pop: 0 10px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------- 现代蓝：深邃海军蓝底 + 亮天蓝点缀 ---------- */
+:root[data-theme="blue"] {
+    --bg: #081c36;
+    --bg-soft: #0c2547;
+    --panel: #112c52;
+    --panel-2: #173a66;
+    --border: #2b4d7d;
+    --border-soft: #1f3d66;
+    --text: #d8e9fb;
+    --text-dim: #8fb2d9;
+    --text-faint: #6085ad;
+    --accent: #38bdf8;
+    --accent-soft: rgba(56, 189, 248, 0.15);
+    --accent-hover: #0ea5e9;
+    --scroll-thumb: #24456e;
+    --scroll-thumb-hover: #30598c;
+    --btn-hover-bg: #1d3f6d;
+    --btn-hover-border: #33608f;
+    --mask: rgba(3, 10, 22, 0.62);
+    --dot-off: #3e5c82;
+}
+
+/* ---------- 深空灰：暖石墨灰底 + 青碧色点缀 ---------- */
+:root[data-theme="gray"] {
+    --bg: #1a1c20;
+    --bg-soft: #212429;
+    --panel: #282b31;
+    --panel-2: #30343c;
+    --border: #3d424b;
+    --border-soft: #33383f;
+    --text: #e8eaee;
+    --text-dim: #a2a8b2;
+    --text-faint: #717884;
+    --accent: #2dd4bf;
+    --accent-soft: rgba(45, 212, 191, 0.14);
+    --accent-hover: #14b8a6;
+    --scroll-thumb: #3a3f47;
+    --scroll-thumb-hover: #494f59;
+    --btn-hover-bg: #333840;
+    --btn-hover-border: #484e58;
+    --mask: rgba(10, 11, 13, 0.62);
+    --dot-off: #545a63;
+}
+
+/* ---------- 极光紫：深紫夜空底 + 亮紫点缀 ---------- */
+:root[data-theme="purple"] {
+    --bg: #0f0a1e;
+    --bg-soft: #161030;
+    --panel: #1d1540;
+    --panel-2: #261c52;
+    --border: #3d2f6e;
+    --border-soft: #2f2458;
+    --text: #ece7f8;
+    --text-dim: #a99ecb;
+    --text-faint: #776b9c;
+    --accent: #c084fc;
+    --accent-soft: rgba(192, 132, 252, 0.16);
+    --accent-hover: #a855f7;
+    --scroll-thumb: #3b2f63;
+    --scroll-thumb-hover: #4c3d80;
+    --btn-hover-bg: #332661;
+    --btn-hover-border: #4c3d80;
+    --mask: rgba(9, 6, 18, 0.64);
+    --dot-off: #554a7c;
+}
+
+/* ---------- 优雅白：浅色主题，语义色也换成加深版保证可读性（默认主题，值同 :root） ---------- */
+:root[data-theme="light"] {
+    --bg: #f4f6fa;
+    --bg-soft: #eceff5;
+    --panel: #ffffff;
+    --panel-2: #f1f4f9;
+    --border: #d4dae4;
+    --border-soft: #e2e7ef;
+    --text: #1f2937;
+    --text-dim: #64748b;
+    --text-faint: #94a3b8;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59, 130, 246, 0.12);
+    --accent-hover: #2570eb;
+    --green: #059669;
+    --green-soft: rgba(5, 150, 105, 0.12);
+    --amber: #d97706;
+    --amber-soft: rgba(217, 119, 6, 0.12);
+    --red: #dc2626;
+    --red-soft: rgba(220, 38, 38, 0.1);
+    --scroll-thumb: #c6cdd9;
+    --scroll-thumb-hover: #aeb7c6;
+    --btn-hover-bg: #e8edf5;
+    --btn-hover-border: #b9c3d3;
+    --mask: rgba(15, 23, 42, 0.35);
+    --dot-off: #b0b9c8;
+    --shadow-modal: 0 24px 64px rgba(15, 23, 42, 0.18);
+    --shadow-pop: 0 10px 32px rgba(15, 23, 42, 0.16);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body,
+#app {
+    height: 100%;
+}
+
+body {
+    font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--scroll-thumb-hover);
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* ---------- 通用控件 ---------- */
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: all 0.15s;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.btn:hover {
+    border-color: var(--btn-hover-border);
+    background: var(--btn-hover-bg);
+}
+
+.btn:active {
+    transform: translateY(1px);
+}
+
+.btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.btn.primary:hover {
+    background: var(--accent-hover);
+}
+
+.btn.success {
+    background: #0f9d6e;
+    border-color: #0f9d6e;
+    color: #fff;
+}
+
+.btn.success:hover {
+    background: #0c8a60;
+}
+
+.btn.danger-ghost {
+    color: var(--red);
+}
+
+.btn.danger-ghost:hover {
+    border-color: var(--red);
+    background: var(--red-soft);
+}
+
+.btn.sm {
+    padding: 3px 10px;
+    font-size: 12px;
+}
+
+.btn.ghost {
+    background: transparent;
+}
+
+input,
+select,
+textarea {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    border-color: var(--accent);
+}
+
+input[type="checkbox"] {
+    width: auto;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+label {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+/* ---------- 徽标 / 状态点 ---------- */
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 20px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    white-space: nowrap;
+    /* 徽章兼作“切换后端”入口：重置 button 默认外观 */
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    font-family: inherit;
+    user-select: none;
+}
+
+.badge.green {
+    background: var(--green-soft);
+    color: var(--green);
+}
+
+.badge.gray {
+    background: rgba(139, 152, 171, 0.12);
+    color: var(--text-dim);
+}
+
+.badge.blue {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.badge.amber {
+    background: var(--amber-soft);
+    color: var(--amber);
+}
+
+.badge.red {
+    background: var(--red-soft);
+    color: var(--red);
+}
+
+.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.dot.on {
+    background: var(--green);
+    box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
+}
+
+.dot.off {
+    background: var(--dot-off);
+}
+
+.dot.pulse {
+    animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    50% {
+        opacity: 0.45;
+    }
+}
+
+/* 后端设置弹窗：已配置后端列表与添加表单 */
+.be-sec-label {
+    display: block;
+    margin: 2px 0 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.be-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+}
+
+.be-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.be-item:hover {
+    border-color: var(--accent);
+}
+
+.be-item.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.be-radio {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    flex-shrink: 0;
+}
+
+.be-item.active .be-radio {
+    border-color: var(--accent);
+    background: radial-gradient(circle, var(--accent) 45%, transparent 50%);
+}
+
+.be-name {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.be-url {
+    flex: 1;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.be-del {
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 50%;
+    background: var(--red-soft);
+    color: var(--red);
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.be-del:hover {
+    background: var(--red);
+    color: #fff;
+}
+
+.be-add {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+/* 名称框固定窄一点，地址框占满剩余宽度（地址较长，防止被截断），端口框固定宽度 */
+.be-add input:nth-child(1) {
+    flex: 0 0 120px;
+}
+
+.be-add input:nth-child(2) {
+    flex: 1;
+}
+
+.be-add input:nth-child(3) {
+    flex: 0 0 76px;
+}
+
+/* ---------- 弹窗 ---------- */
+
+.modal-mask {
+    position: fixed;
+    inset: 0;
+    background: var(--mask);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+}
+
+.modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    width: 560px;
+    max-width: 92vw;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: var(--shadow-modal);
+    animation: modal-in 0.18s ease-out;
+}
+
+@keyframes modal-in {
+    from {
+        opacity: 0;
+        transform: translateY(14px) scale(0.98);
+    }
+}
+
+.modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px 12px;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.modal-body {
+    padding: 4px 20px 16px;
+    overflow-y: auto;
+}
+
+.modal-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 12px 20px 16px;
+    border-top: 1px solid var(--border-soft);
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font-size: 18px;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--text);
+}
+
+/* ---------- 表单布局 ---------- */
+
+.form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 14px;
+}
+
+.form-grid .full {
+    grid-column: 1 / -1;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.field-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.section-title {
+    grid-column: 1 / -1;
+    margin-top: 6px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border-soft);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.5px;
+}
+
+.hint {
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.num {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+}

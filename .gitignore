@@ -1,0 +1,7 @@
+target/
+node_modules/
+dist/
+docs/pdf-extract
+gateways.json
+# 冒烟测试运行时的数据目录（网关配置 + 报文文件，每次运行都会变化）
+scripts/.smoke-data/

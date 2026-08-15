@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"SimuXchange 主窗口默认权限","local":true,"windows":["main"],"permissions":["core:default","core:event:default","core:window:allow-minimize","core:window:allow-toggle-maximize","core:window:allow-is-maximized","core:window:allow-close","core:window:allow-start-dragging"]}}

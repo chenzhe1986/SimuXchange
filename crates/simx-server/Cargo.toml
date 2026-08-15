@@ -1,0 +1,13 @@
+[package]
+name = "simx-server"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+simx-core = { path = "../simx-core" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
+# 启动时检查更新用：轻量 HTTP 客户端（仅 http，不启用 TLS，内网更新服务器足够）
+ureq = { version = "2", default-features = false }

@@ -1,0 +1,11 @@
+# 项目级 cargo 镜像配置：覆盖用户全局配置（全局默认 tuna git 镜像，
+# 拉取不稳定时切到 aliyun sparse 镜像）。删除本文件即恢复全局配置。
+[source.crates-io]
+registry = "https://github.com/rust-lang/crates.io-index"
+replace-with = "aliyun"
+
+[source.aliyun]
+registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+
+[http]
+check-revoke = false
