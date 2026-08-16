@@ -34,7 +34,9 @@
             "icons/icon.ico"
         ],
         "resources": {
-            "../target/x86_64-unknown-linux-musl/release/simx-server": "Linux/simx-server"
+            "../target/x86_64-unknown-linux-musl/release/simx-server": "Linux/simx-server",
+            "../scripts/start.sh": "Linux/start.sh",
+            "../scripts/stop.sh": "Linux/stop.sh"
         }
     }
 }

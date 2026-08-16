@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
-# SimuXchange 后端停止脚本：晚上 10 点由 crontab 调用（也可手动执行）。
-#
-# 优雅停止：先发 TERM 信号让进程自行收尾，最多等 10 秒，
-# 仍未退出再发 KILL 强制结束（一般不会走到这一步）。
 
-if ! pgrep -f "simx-server --listen" > /dev/null 2>&1; then
-    echo "[$(date '+%F %T')] simx-server 未在运行，无需停止"
-    exit 0
-fi
-
-echo "[$(date '+%F %T')] 正在停止 simx-server ..."
+# 停止 simx-server：先 TERM 优雅退出，最多等 10 秒仍未退出再 KILL；
+cd "$(dirname "$0")"
 pkill -f "simx-server --listen"
-
-# 最多等 10 秒，每 1 秒看一次是否已退出
-for i in $(seq 1 10); do
-    if ! pgrep -f "simx-server --listen" > /dev/null 2>&1; then
-        echo "[$(date '+%F %T')] simx-server 已停止"
-        exit 0
-    fi
+for i in {1..10}; do
     sleep 1
+    if ! pgrep -f "simx-server --listen" > /dev/null; then
+        break  # 进程已正常退出，不再等待
+    fi
 done
+pkill -9 -f "simx-server --listen" || true
 
-echo "[$(date '+%F %T')] 10 秒内未正常退出，强制结束"
-pkill -9 -f "simx-server --listen"
+# 无论是否在运行，收尾都会清理 log/ 与 packets/ 下 7 天前的日期目录
+# （这两个目录里按 YYYYMMDD 归档的文件夹，如 20260811，只删 7 天前的）。
+CUTOFF=$(date -d "7 days ago" +%Y%m%d)
+for d in log/*/ packets/*/; do
+    [ -d "$d" ] || continue
+    name=${d%/}; name=${name##*/}
+    [[ "$name" =~ ^[0-9]{8}$ ]] && [ "$name" -lt "$CUTOFF" ] && rm -rf "$d"
+done

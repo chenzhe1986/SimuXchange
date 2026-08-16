@@ -10,6 +10,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 simx-core = { path = "../crates/simx-core" }
 tauri = { version = "2", features = [] }
+# 单实例：重复启动时不再开第二个进程，改为唤起已有实例的窗口
+tauri-plugin-single-instance = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

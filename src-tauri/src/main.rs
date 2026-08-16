@@ -18,7 +18,7 @@ use simx_core::config::AppConfig;
 use simx_core::engine::Engine;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 /// 解析配置/数据目录：优先取可执行文件目录（存在 simx.config.json 时），
 /// 其次取当前工作目录及其上级（开发模式），最后回退到可执行文件目录。
@@ -144,6 +144,15 @@ fn main() {
     let engine_auto = engine.clone();
 
     tauri::Builder::default()
+        // 单实例：重复双击 exe（包括第一次启动窗口没显示出来、用户又开一个的
+        // 情况）不会产生第二个 simuxchange.exe 进程——新进程立即退出，
+        // 回调里把已有实例的主窗口显示并聚焦，用户看到的就是已有实例
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         // manage()：把对象存进 Tauri 的全局状态，command 函数通过
         // State<T> 参数按类型取用（依赖注入）；Mutex 供运行时修改配置
         .manage(Mutex::new(app_config))

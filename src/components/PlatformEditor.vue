@@ -156,13 +156,13 @@ function submit() {
                         <label>平台分区号 (PartitionNo)</label>
                         <input v-model="form.partitionNos" placeholder="如 101,102,103,104（逗号分隔）" />
                     </div>
-                    <div class="field full" v-if="showPassword">
+                    <div class="field" v-if="showPassword">
                         <label class="field-row">
                             <input v-model="form.checkPassword" type="checkbox" />
                             校验登录密码
                         </label>
                     </div>
-                    <div class="field full" v-if="showPassword && form.checkPassword">
+                    <div class="field" v-if="showPassword && form.checkPassword">
                         <label>登录密码 (Password)</label>
                         <input v-model="form.password" />
                     </div>
