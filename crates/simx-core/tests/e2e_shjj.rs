@@ -351,3 +351,63 @@ async fn test_shjj_split_trades_async_delay() {
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 测试五：执行回报同步重发——报单产生回报（分区 SetID=1，记录号 1、2）
+/// 后断开重连，再发 206 同步 begin=1，应收到 207 + 原样重发的历史回报：
+/// 重发帧保留原记录号（柜台按分区对账），MsgSeqNum 按新连接重新编号。
+#[tokio::test]
+async fn test_shjj_sync_resends_history_by_begin() {
+    let dir = std::env::temp_dir().join(format!("simx_shjj_rsync_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18205,
+            StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+
+    // 第一段连接：同步（无历史）→ 报单 → 收确认(32, 记录号1) + 成交(103, 记录号2)
+    let mut s1 = connect_logon_sync(18205).await;
+    s1.write_all(&new_order_frame("RESEND001", 500_000, 12_34000, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut s1).await;
+    assert_eq!(mt, msg_type::EXEC_RPT);
+    assert_eq!(
+        u64::from_be_bytes(body[12..20].try_into().unwrap()),
+        1,
+        "第一条回报记录号应为 1"
+    );
+    let (mt, body) = read_frame(&mut s1).await;
+    assert_eq!(mt, msg_type::TRADE);
+    assert_eq!(
+        u64::from_be_bytes(body[12..20].try_into().unwrap()),
+        2,
+        "第二条回报记录号应为 2"
+    );
+    drop(s1); // 断开
+    tokio::time::sleep(Duration::from_millis(500)).await; // 等旧会话清理完（单连接限制）
+
+    // 重连 + 同步：207 之后应原样重发记录号 1、2 的两条历史回报
+    let mut s2 = connect_logon_sync(18205).await;
+    let (mt, body) = read_frame(&mut s2).await;
+    assert_eq!(mt, msg_type::EXEC_RPT, "应重发申报响应(32)");
+    assert_eq!(
+        u64::from_be_bytes(body[12..20].try_into().unwrap()),
+        1,
+        "重发帧应保留原记录号 1"
+    );
+    let (mt, body) = read_frame(&mut s2).await;
+    assert_eq!(mt, msg_type::TRADE, "应重发成交回报(103)");
+    assert_eq!(
+        u64::from_be_bytes(body[12..20].try_into().unwrap()),
+        2,
+        "重发帧应保留原记录号 2"
+    );
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

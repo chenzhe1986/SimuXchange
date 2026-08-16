@@ -155,21 +155,20 @@ function submit() {
                     <div class="field">
                         <label>平台分区号 (PartitionNo)</label>
                         <input v-model="form.partitionNos" placeholder="如 101,102,103,104（逗号分隔）" />
-                        <span class="hint">多个分区号用逗号分隔；回报按证券代码哈希分配（同一证券恒落同一分区）</span>
                     </div>
-                    <div class="field" v-if="showPassword">
-                        <label class="field-row" style="margin-top: 20px">
+                    <div class="field full" v-if="showPassword">
+                        <label class="field-row">
                             <input v-model="form.checkPassword" type="checkbox" />
                             校验登录密码
                         </label>
                     </div>
-                    <div class="field" v-if="showPassword && form.checkPassword">
+                    <div class="field full" v-if="showPassword && form.checkPassword">
                         <label>登录密码 (Password)</label>
                         <input v-model="form.password" />
                     </div>
 
                     <!-- 平台功能开关：展示收发报文（勾选即自动持久化）+ 缓存订单，
-                         各占一个字段格，说明文字跟在自己的开关下方 -->
+                         并排放在密码校验的下一排 -->
                     <div class="field">
                         <label class="field-row">
                             <input v-model="form.showPackets" type="checkbox" />

@@ -8,7 +8,9 @@
 //! 也不会算错，且比锁快得多。Ordering::Relaxed 表示只需要“计数正确”，
 //! 不要求多个计数器之间的更新顺序，这对统计场景足够了。
 
+use parking_lot::Mutex;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// 平台级统计（原子计数，供会话线程并发更新）。
@@ -29,8 +31,12 @@ pub struct PlatformStats {
     pub cancels: AtomicU64,
     /// 历史累计连接数
     pub total_connections: AtomicU64,
-    /// 回报记录号序列（每条回报递增，协议字段 ReportIndex）
-    pub report_index: AtomicI64,
+    /// 各分区回报记录号（key=分区号：深市 PartitionNo / 沪市 SetID；
+    /// value=该分区当前最大回报记录号）。
+    /// 回报记录号要求“分区内从 1 连续编号”（深交所规范 3.15 节 /
+    /// 上交所按分区回报定位），回报同步重发也按分区校验，
+    /// 因此从单一的全局计数器改为按分区各自累计
+    pub partition_report_index: Mutex<HashMap<i32, i64>>,
     /// 订单编号序列（交易所分配的 OrderID）
     pub order_seq: AtomicI64,
     /// 执行编号序列（每条回报的 ExecID）
@@ -38,9 +44,24 @@ pub struct PlatformStats {
 }
 
 impl PlatformStats {
-    /// 取下一个回报记录号（从 1 开始递增）
-    pub fn next_report_index(&self) -> i64 {
-        self.report_index.fetch_add(1, Ordering::Relaxed) + 1
+    /// 取某分区下一个回报记录号（从 1 开始，分区内连续递增）。
+    /// 由 writer 任务在真实发送回报时调用（分区号从报文里解析）。
+    pub fn next_report_index_for(&self, partition: i32) -> i64 {
+        let mut m = self.partition_report_index.lock();
+        let n = m.entry(partition).or_insert(0);
+        *n += 1;
+        *n
+    }
+
+    /// 某分区当前最大回报记录号（该分区尚未发过回报时为 0）。
+    /// 回报同步响应（沪 207 EndReportIndex / 深 回报结束消息）用它告知柜台
+    /// 该分区已发到第几条。
+    pub fn partition_end_index(&self, partition: i32) -> i64 {
+        self.partition_report_index
+            .lock()
+            .get(&partition)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// 取下一个订单编号：协议要求固定 16 位，不足前面补 0

@@ -74,7 +74,7 @@ cargo build --release -p simx-server
 .\simx-server.exe --listen 0.0.0.0:9800
 ```
 
-网关配置与报文文件等数据保存在 **exe 所在目录**（`gateways.json` / `packets/`）。
+网关配置与报文文件等数据保存在 **exe 所在目录**（`gateways.json` / `packets/` / `log/`）。
 
 加 `--auto-start` 参数后，后端启动完成会**自动恢复上次运行中的网关**（引擎把
 网关启停状态记在 `gateways.json` 的 `wasRunning` 字段里，只启动上次退出时仍在运行的网关）；
@@ -183,7 +183,7 @@ Linux 下在装好 Rust 的机器上同样执行 `cargo build --release -p simx-
 ## 测试
 
 ```powershell
-cargo test -p simx-core        # 68 个单元测试（64 + 4 自动启动）+ 11 个端到端集成测试（深交所 3 + 上交所竞价 4 + 上交所新债券 4）
+cargo test -p simx-core        # 94 个单元测试 + 4 个自动启动 + 21 个端到端集成测试（深交所 11 + 上交所竞价 5 + 上交所新债券 5）
 ```
 
 端到端测试覆盖：TCP 连接 → Logon 握手 →（上交所还含分区序号同步）→ 委托 → 回报字段/校验和验证 → 网关停止 Logout。

@@ -107,7 +107,7 @@ pub fn plan_reports(
         match st.reject_via {
             // 方式一：用执行报告(32)拒单，ExecType/OrdStatus 均为 '8'
             RejectVia::ExecutionReport => {
-                let mut rpt = base_ack(partition_no, order, stats, pbu, &ord_cnfm_id);
+                let mut rpt = base_ack(partition_no, order, pbu, &ord_cnfm_id);
                 rpt.exec_type = exec_type::REJECT;
                 rpt.ord_status = ord_status::REJECTED;
                 rpt.ord_rej_reason = st.reject_reason as u32;
@@ -164,7 +164,7 @@ pub fn plan_reports(
     }
 
     // ---- 确认回报：除拒单外所有策略都先发一条确认 ----
-    let ack = base_ack(partition_no, order, stats, pbu, &ord_cnfm_id);
+    let ack = base_ack(partition_no, order, pbu, &ord_cnfm_id);
     plans.push(PlannedReport {
         delay_ms: st.ack_delay.sample(),
         kind: ReportKind::Ack,
@@ -261,14 +261,13 @@ pub fn plan_reports(
 fn base_ack(
     partition_no: i32,
     order: &NewOrder,
-    stats: &PlatformStats,
     pbu: &str,
     ord_cnfm_id: &str,
 ) -> ExecRpt {
     ExecRpt {
         pbu: pbu.to_string(),
         set_id: partition_no as u32,
-        report_index: stats.next_report_index() as u64,
+        report_index: 0, // 发送时由 writer 任务补写（保证与线上顺序一致）
         biz_id: order.biz_id,
         exec_type: exec_type::NEW,
         biz_pbu: order.biz_pbu.clone(),

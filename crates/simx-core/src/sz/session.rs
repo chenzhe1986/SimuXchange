@@ -37,7 +37,7 @@ use super::protocol::{
 };
 use crate::stats::PlatformStats;
 use super::strategy::{self as strategy, biz_info_by_appl_id, ReportKind};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -263,11 +263,18 @@ pub async fn handle_conn(
         while let Some(mut buf) = rx.recv().await {
             // 回报记录号 ReportIndex 在真实发送时分配并补写进报文：
             // 分配时机与线上发送顺序严格一致，多笔并发回报（含延迟回报）也不会乱序；
-            // 非回报消息（Logon/心跳/业务拒绝/平台状态等）跳过，不占回报序号
+            // 非回报消息（Logon/心跳/业务拒绝/平台状态等）跳过，不占回报序号。
+            // 记录号按分区连续编号（规范 3.15：每个分区从 1 开始），
+            // 分区号从帧偏移 8 处解析（所有回报消息体统一以 PartitionNo 开头）。
+            // 帧里 ReportIndex 非 0 说明是“回报同步重发的历史帧”（重发时保留
+            // 原记录号让柜台对账），跳过重新分配，避免同一条回报重复占号。
             if buf.len() >= 20 {
                 let mt = u32::from_be_bytes(buf[0..4].try_into().unwrap());
                 if protocol::is_report_frame(mt) {
-                    protocol::patch_report_index(&mut buf, stats.next_report_index());
+                    if protocol::frame_report_index(&buf) == 0 {
+                        let partition = protocol::frame_partition(&buf);
+                        protocol::patch_report_index(&mut buf, stats.next_report_index_for(partition));
+                    }
                 }
             }
             // 发送前捕获（补号已完成，捕获字节与线上完全一致），
@@ -280,6 +287,18 @@ pub async fn handle_conn(
                     Vec::new()
                 };
                 r.record_send(&buf, fields);
+                // 回报帧同时登记进“重发缓存”：回报同步请求按 begin 重发时用
+                // （重发帧同 (分区, 记录号) 覆盖，不会重复登记）
+                if buf.len() >= 20 {
+                    let mt = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+                    if protocol::is_report_frame(mt) {
+                        r.record_report(
+                            protocol::frame_partition(&buf),
+                            protocol::frame_report_index(&buf),
+                            &buf,
+                        );
+                    }
+                }
             }
             if wh.write_all(&buf).await.is_err() {
                 break;
@@ -441,15 +460,68 @@ pub async fn handle_conn(
                 break;
             }
             msg_type::REPORT_SYNC => {
-                // 回报同步请求（5.2）：OMS 登录后告知各分区期望的下一条回报记录号。
-                // 模拟器不保存历史回报，且按规范“分区执行报告结束消息”不需要发送，
-                // 因此收到同步请求不回任何消息，只记日志
+                // 回报同步请求（5.2）：OMS 登录后告知各分区期望接收的下一条回报记录号。
+                // 处理流程：校验分区号 → 按 begin 重发该分区历史回报 → 回“回报结束(7)”
+                // 标记该分区回报发送完毕（规范 5.4：OMS 收齐所有分区的回报结束消息
+                // 才认为回报接收完毕）。
                 match ReportSync::decode(mt, &body) {
                     Ok(rs) => {
+                        // 分区号须存在且不重复（规范 3.15：含非法分区号的同步消息
+                        // 会被丢弃，OMS 收到 20106 业务拒绝后必须重新发送同步消息，
+                        // 否则收不到回报）
+                        let valid = ctx.cfg.partitions();
+                        let mut seen: HashSet<i32> = HashSet::new();
+                        let mut bad: Vec<i32> = Vec::new();
+                        for p in &rs.partitions {
+                            if !valid.contains(&p.partition_no) || !seen.insert(p.partition_no) {
+                                bad.push(p.partition_no);
+                            }
+                        }
+                        if !bad.is_empty() {
+                            ctx.log(
+                                "warn",
+                                format!(
+                                    "柜台 {} 回报同步请求含非法/重复分区号 {:?}，回业务拒绝(20106)",
+                                    peer, bad
+                                ),
+                            );
+                            let rej = BusinessReject {
+                                appl_id: String::new(),
+                                transact_time: protocol::now_timestamp(),
+                                submitting_pbu_id: String::new(),
+                                security_id: String::new(),
+                                security_id_source: String::new(),
+                                ref_seq_num: 0,
+                                ref_msg_type: msg_type::REPORT_SYNC,
+                                business_reject_ref_id: String::new(),
+                                business_reject_reason: 20106,
+                                business_reject_text: "回报同步消息含非法分区号".into(),
+                            };
+                            let _ = tx.send(rej.encode()).await;
+                            ctx.stats.business_rejects.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        for p in &rs.partitions {
+                            // 从该记录号开始重发本分区历史回报（含历史连接发过的；
+                            // 未开启报文捕获时无缓存，重发 0 条即功能关闭）。
+                            // 按实测真实交易所行为：发完历史回报后不回“回报结束(7)”，
+                            // 也没有其它结束标记，柜台按回报记录号自行对账
+                            let n = resend_reports_since(&ctx, &tx, p.partition_no, p.report_index)
+                                .await;
+                            if n > 0 {
+                                ctx.log(
+                                    "info",
+                                    format!(
+                                        "按回报同步请求重发分区 {} 的历史回报 {} 条",
+                                        p.partition_no, n
+                                    ),
+                                );
+                            }
+                        }
                         ctx.log(
                             "info",
                             format!(
-                                "柜台 {} 发送回报同步请求（{} 个分区），模拟器无历史回报可同步，不回回报结束消息",
+                                "柜台 {} 回报同步完成（{} 个分区）",
                                 peer,
                                 rs.partitions.len()
                             ),
@@ -544,6 +616,39 @@ pub async fn handle_conn(
         r.mark_dead();
     }
     ctx.log("info", format!("柜台 {} 会话结束", peer));
+}
+
+/// 回报同步重发：把本平台所有连接（含已断开的——记录器保留不删）捕获缓存里、
+/// 指定分区“记录号 >= begin”的回报帧，按记录号升序经当前连接重发。
+/// 返回重发条数。重发帧保留原 ReportIndex（writer 侧见记录号非 0 不再重新
+/// 分配），柜台按 (分区, 记录号) 对账；上交所重发帧的 MsgSeqNum 仍由 writer
+/// 按当前连接重新补号（会话序号，与回报记录号无关）。
+/// 未开启报文捕获时没有缓存，返回 0（重发功能随捕获开关一起关闭）。
+/// 跨平台隔离：ctx.recorders 只登记本平台的连接，别的平台的历史回报取不到。
+/// 三套协议共用（shjj/shbond 复用 sz::session 的 SessionCtx 与 ConnRecorder）。
+pub(crate) async fn resend_reports_since(
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    partition: i32,
+    begin: i64,
+) -> usize {
+    let mut frames: BTreeMap<i64, Vec<u8>> = BTreeMap::new();
+    {
+        let recorders = ctx.recorders.lock().unwrap();
+        for rec in recorders.values() {
+            for (idx, frame) in rec.reports_since(partition, begin) {
+                // 同一 (分区, 记录号) 只可能来自一条连接；合并去重保险
+                frames.insert(idx, frame);
+            }
+        }
+    }
+    let n = frames.len();
+    for (_, frame) in frames {
+        if tx.send(frame).await.is_err() {
+            break; // 连接已断开，剩余不再重发
+        }
+    }
+    n
 }
 
 /// 处理新订单（4.5.1，MsgType=1xxx01，共 28 种业务消息类型）：核心业务入口。

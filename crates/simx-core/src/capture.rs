@@ -22,13 +22,14 @@
 //! - 连接断开后记录器不删除（仅标记离线）：平台弹窗要能按连接时间顺序
 //!   回看历史连接的报文，每条连接一个分组标题（对端地址/接入时间）。
 
+use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 /// 报文方向。序列化为 camelCase → "recv" / "send"，前端据此上色。
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -128,9 +129,15 @@ pub struct ConnRecorder {
     /// 是否仍在线（连接结束时 mark_dead，记录器本身保留）
     alive: AtomicBool,
     /// 内存缓冲（供前端弹窗读取）
-    buf: StdMutex<VecDeque<PacketRecord>>,
+    buf: Mutex<VecDeque<PacketRecord>>,
+    /// 已发送回报帧缓存：分区号 → (回报记录号, 完整帧)。
+    /// 供“回报同步”请求按 begin 重发历史回报（重发帧保留原 ReportIndex，
+    /// 柜台按分区+记录号对账）；记录器在连接断开后保留，因此同一平台
+    /// 历史连接发过的回报也能补发。BTreeMap 按键有序，天然支持
+    /// “记录号 >= begin”区间查询，重发帧同号覆盖即去重。
+    reports: Mutex<HashMap<i32, BTreeMap<i64, Vec<u8>>>>,
     /// 持久化文件写入器（persist 为 true 且成功打开文件时才有）
-    file: Option<StdMutex<BufWriter<File>>>,
+    file: Option<Mutex<BufWriter<File>>>,
 }
 
 impl ConnRecorder {
@@ -153,7 +160,7 @@ impl ConnRecorder {
                 }
                 OpenOptions::new().create(true).append(true).open(p).ok()
             })
-            .map(|f| StdMutex::new(BufWriter::new(f)));
+            .map(|f| Mutex::new(BufWriter::new(f)));
         Self {
             conn_id,
             seq_src,
@@ -161,7 +168,8 @@ impl ConnRecorder {
             peer,
             since,
             alive: AtomicBool::new(true),
-            buf: StdMutex::new(VecDeque::new()),
+            buf: Mutex::new(VecDeque::new()),
+            reports: Mutex::new(HashMap::new()),
             file,
         }
     }
@@ -198,30 +206,48 @@ impl ConnRecorder {
         let hex = to_hex(raw);
         // 写文件：格式与界面展示一致，解析字段作为缩进续行写在原始报文
         // 下方（与原始报文同一文件，方便对照阅读）；逐行 flush 保证掉电不丢
-        if let Some(f) = &self.file {
-            if let Ok(mut w) = f.lock() {
+            if let Some(f) = &self.file {
+                let mut w = f.lock();
                 let _ = writeln!(w, "{} {}  {}", ts, dir.label(), hex);
                 for fd in &fields {
                     let _ = writeln!(w, "{:<19} {:<24}: {}", "", fd.name, fd.value);
                 }
                 let _ = w.flush();
             }
-        }
         let rec = PacketRecord { seq, conn_id: self.conn_id, ts, dir, hex, fields };
-        if let Ok(mut buf) = self.buf.lock() {
-            buf.push_back(rec);
-            // 非持久化模式：只保留最近 MEM_CAP 条
-            if !self.persist {
-                while buf.len() > MEM_CAP {
-                    buf.pop_front();
-                }
+        let mut buf = self.buf.lock();
+        buf.push_back(rec);
+        // 非持久化模式：只保留最近 MEM_CAP 条
+        if !self.persist {
+            while buf.len() > MEM_CAP {
+                buf.pop_front();
             }
+        }
+    }
+
+    /// 登记一条已发送的回报帧（writer 在补写 ReportIndex 后调用）。
+    /// 相同 (分区, 记录号) 只保留一份：回报同步重发的历史帧也会走
+    /// 本方法再次登记，同号覆盖避免下次同步重复补发。
+    pub fn record_report(&self, partition: i32, report_index: i64, frame: &[u8]) {
+        let mut m = self.reports.lock();
+        m.entry(partition)
+            .or_default()
+            .insert(report_index, frame.to_vec());
+    }
+
+    /// 取某分区“记录号 >= begin”的全部已发送回报帧（按记录号升序）。
+    /// 回报同步按 begin 重发时调用；无缓存（捕获开关未开）时返回空。
+    pub fn reports_since(&self, partition: i32, begin: i64) -> Vec<(i64, Vec<u8>)> {
+        let m = self.reports.lock();
+        match m.get(&partition) {
+            Some(map) => map.range(begin..).map(|(k, v)| (*k, v.clone())).collect(),
+            None => Vec::new(),
         }
     }
 
     /// 取 seq 大于 after_seq 的报文（after_seq=0 表示取当前缓冲的全部）
     pub fn page(&self, after_seq: u64) -> PacketPage {
-        let buf = self.buf.lock().unwrap();
+        let buf = self.buf.lock();
         let latest_seq = buf.back().map(|r| r.seq).unwrap_or(0);
         let packets: Vec<PacketRecord> =
             buf.iter().filter(|r| r.seq > after_seq).cloned().collect();
@@ -352,5 +378,37 @@ mod tests {
         assert_eq!(pb.packets[0].seq, 2);
         assert_eq!(pb.packets[0].conn_id, 2);
         assert_eq!(pb.packets[1].seq, 3);
+    }
+
+    #[test]
+    fn report_cache_since_and_dedup() {
+        // 回报同步重发缓存：按分区 + begin 过滤、同号覆盖去重
+        let r = ConnRecorder::new(
+            1,
+            Arc::new(AtomicU64::new(0)),
+            true,
+            None,
+            "127.0.0.1:10001".into(),
+            "09:00:00".into(),
+        );
+        r.record_report(1, 1, b"frame-1");
+        r.record_report(1, 2, b"frame-2");
+        r.record_report(2, 1, b"other-part");
+        // begin 过滤（含等于 begin 的记录）
+        let got = r.reports_since(1, 2);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], (2, b"frame-2".to_vec()));
+        // 全量按记录号升序
+        let all = r.reports_since(1, 1);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, 1);
+        assert_eq!(all[1].0, 2);
+        // 同号覆盖去重：重发帧再登记不会产生重复条目
+        r.record_report(1, 2, b"frame-2-resend");
+        assert_eq!(r.reports_since(1, 1).len(), 2);
+        assert_eq!(r.reports_since(1, 2)[0].1, b"frame-2-resend");
+        // 未登记的记录号范围/分区返回空
+        assert!(r.reports_since(1, 3).is_empty());
+        assert!(r.reports_since(3, 1).is_empty());
     }
 }

@@ -20,6 +20,7 @@
 use crate::capture::{ConnRecorder, PacketPage};
 use crate::config::{GatewayCategory, GatewayConfig, PlatformConfig, StrategyConfig};
 use crate::event::{ConnInfo, EngineEvent};
+use crate::oplog::OpLog;
 use crate::orderbook::{OrderBook, OrderEntry};
 // 三个网关目录的会话模块（类别名保持不变，分派代码无需感知目录）
 use crate::shbond::session as session_shbond;
@@ -72,6 +73,8 @@ struct Inner {
     gateways: Mutex<Vec<GatewayConfig>>,
     /// 正在运行的网关，key 为网关 id
     running: Mutex<HashMap<String, RunningGateway>>,
+    /// 前端操作日志（带前端 IP，按日期存 log/ 目录）
+    oplog: OpLog,
     /// 日志事件广播通道（容量 4096，满了会丢弃最旧的）
     events: broadcast::Sender<EngineEvent>,
 }
@@ -90,9 +93,10 @@ impl Engine {
         let gateways = load_gateways(&data_dir);
         Self {
             inner: Arc::new(Inner {
-                data_dir,
+                data_dir: data_dir.clone(),
                 gateways: Mutex::new(gateways),
                 running: Mutex::new(HashMap::new()),
+                oplog: OpLog::new(data_dir),
                 events,
             }),
         }
@@ -109,6 +113,32 @@ impl Engine {
             .inner
             .events
             .send(EngineEvent::log(level, gateway_id, "", msg));
+    }
+
+    /// 记一条前端操作日志（带前端 IP；由 api::dispatch 与 WebSocket 连接层调用）。
+    /// 写失败静默忽略（辅助记录，不阻塞主流程）。
+    pub fn log_op(&self, ip: &str, msg: &str) {
+        self.inner.oplog.log(ip, msg);
+    }
+
+    /// 按 id 查网关名称（前端操作日志里把 id 换成可读名称用）。
+    /// 查不到返回 None，调用方可用 id 兜底。
+    pub async fn gateway_name(&self, id: &str) -> Option<String> {
+        let gws = self.inner.gateways.lock().await;
+        gws.iter().find(|g| g.id == id).map(|g| g.name.clone())
+    }
+
+    /// 按网关 id + 平台 id 查 (网关名, 平台名)（操作日志用）。
+    /// 查不到返回 None，调用方用原始 id 兜底。
+    pub async fn platform_name(
+        &self,
+        gateway_id: &str,
+        platform_id: &str,
+    ) -> Option<(String, String)> {
+        let gws = self.inner.gateways.lock().await;
+        let gw = gws.iter().find(|g| g.id == gateway_id)?;
+        let plat = gw.platforms.iter().find(|p| p.id == platform_id)?;
+        Some((gw.name.clone(), plat.name.clone()))
     }
 
     /// 新建或更新网关配置并落盘。

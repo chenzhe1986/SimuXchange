@@ -98,48 +98,87 @@ fn err(msg: impl Into<String>) -> Value {
 }
 
 /// 命令分发入口：把 JSON 解析成 Command，转调引擎对应方法，
-/// 再把结果包成统一的 ok/err 响应。无论成败都返回 JSON，不抛异常
-pub async fn dispatch(engine: &Engine, payload: Value) -> Value {
+/// 再把结果包成统一的 ok/err 响应。无论成败都返回 JSON，不抛异常。
+///
+/// client_ip 为发起命令的前端地址（远程模式 = WebSocket 对端 IP；
+/// 本地桌面端 = 127.0.0.1），随每条非轮询命令写入操作日志（oplog），
+/// 便于追溯谁在什么时候做了什么操作。
+pub async fn dispatch(engine: &Engine, payload: Value, client_ip: &str) -> Value {
     let cmd: Command = match serde_json::from_value(payload) {
         Ok(c) => c,
         Err(e) => return err(format!("无效命令: {}", e)),
     };
     match cmd {
+        // 快照/报文/订单列表是前端每秒轮询的只读命令，记日志只会刷屏，跳过
         Command::GetSnapshot => match serde_json::to_value(engine.snapshot().await) {
             Ok(v) => ok(v),
             Err(e) => err(e.to_string()),
         },
-        Command::SaveGateway { gateway } => match engine.save_gateway(gateway).await {
-            Ok(gw) => ok(serde_json::to_value(gw).unwrap_or(Value::Null)),
-            Err(e) => err(e),
-        },
-        Command::DeleteGateway { id } => match engine.delete_gateway(&id).await {
-            Ok(()) => ok(Value::Null),
-            Err(e) => err(e),
-        },
-        Command::StartGateway { id } => match engine.start_gateway(&id).await {
-            Ok(()) => ok(Value::Null),
-            Err(e) => err(e),
-        },
-        Command::StopGateway { id } => match engine.stop_gateway(&id).await {
-            Ok(()) => ok(Value::Null),
-            Err(e) => err(e),
-        },
+        Command::SaveGateway { gateway } => {
+            // id 为空 = 新建（后端会自动生成），否则是编辑保存
+            let op = if gateway.id.is_empty() { "新建网关" } else { "保存网关" };
+            engine.log_op(
+                client_ip,
+                &format!("{} {}（{} 个平台）", op, gateway.name, gateway.platforms.len()),
+            );
+            match engine.save_gateway(gateway).await {
+                Ok(gw) => ok(serde_json::to_value(gw).unwrap_or(Value::Null)),
+                Err(e) => err(e),
+            }
+        }
+        Command::DeleteGateway { id } => {
+            let name = engine.gateway_name(&id).await.unwrap_or_else(|| id.clone());
+            engine.log_op(client_ip, &format!("删除网关 {}", name));
+            match engine.delete_gateway(&id).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
+        Command::StartGateway { id } => {
+            let name = engine.gateway_name(&id).await.unwrap_or_else(|| id.clone());
+            engine.log_op(client_ip, &format!("启动网关 {}", name));
+            match engine.start_gateway(&id).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
+        Command::StopGateway { id } => {
+            let name = engine.gateway_name(&id).await.unwrap_or_else(|| id.clone());
+            engine.log_op(client_ip, &format!("停止网关 {}", name));
+            match engine.stop_gateway(&id).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
         Command::UpdateStrategy {
             gateway_id,
             platform_id,
             strategy,
-        } => match engine
-            .update_strategy(&gateway_id, &platform_id, strategy)
-            .await
-        {
-            Ok(()) => ok(Value::Null),
-            Err(e) => err(e),
-        },
-        Command::ResetStats { id } => match engine.reset_stats(&id).await {
-            Ok(()) => ok(Value::Null),
-            Err(e) => err(e),
-        },
+        } => {
+            let (gw, plat) = engine
+                .platform_name(&gateway_id, &platform_id)
+                .await
+                .unwrap_or_else(|| (gateway_id.clone(), platform_id.clone()));
+            engine.log_op(
+                client_ip,
+                &format!("热更新网关 {} 平台 {} 的模拟回报策略", gw, plat),
+            );
+            match engine
+                .update_strategy(&gateway_id, &platform_id, strategy)
+                .await
+            {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
+        Command::ResetStats { id } => {
+            let name = engine.gateway_name(&id).await.unwrap_or_else(|| id.clone());
+            engine.log_op(client_ip, &format!("重置网关 {} 统计", name));
+            match engine.reset_stats(&id).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
         Command::GetConnPackets {
             gateway_id,
             platform_id,
@@ -188,21 +227,40 @@ pub async fn dispatch(engine: &Engine, payload: Value) -> Value {
             price,
             reason,
             front_reject,
-        } => match engine
-            .send_report(
-                &gateway_id,
-                &platform_id,
-                &cl_ord_id,
-                kind,
-                qty,
-                price,
-                reason,
-                front_reject,
-            )
-            .await
-        {
-            Ok(desc) => ok(json!({ "desc": desc })),
-            Err(e) => err(e),
-        },
+        } => {
+            let (gw, plat) = engine
+                .platform_name(&gateway_id, &platform_id)
+                .await
+                .unwrap_or_else(|| (gateway_id.clone(), platform_id.clone()));
+            let kind_label = match kind {
+                ManualReportKind::Ack => "确认",
+                ManualReportKind::Trade => "成交",
+                ManualReportKind::Reject => "拒单",
+                ManualReportKind::Cancel => "撤单成功",
+            };
+            engine.log_op(
+                client_ip,
+                &format!(
+                    "手动回复订单 {}（{}）：网关 {} 平台 {}",
+                    cl_ord_id, kind_label, gw, plat
+                ),
+            );
+            match engine
+                .send_report(
+                    &gateway_id,
+                    &platform_id,
+                    &cl_ord_id,
+                    kind,
+                    qty,
+                    price,
+                    reason,
+                    front_reject,
+                )
+                .await
+            {
+                Ok(desc) => ok(json!({ "desc": desc })),
+                Err(e) => err(e),
+            }
+        }
     }
 }

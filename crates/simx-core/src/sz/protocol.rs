@@ -449,6 +449,20 @@ pub fn patch_report_index(frame: &mut [u8], report_index: i64) {
     frame[n - 4..].copy_from_slice(&cks.to_be_bytes());
 }
 
+/// 从回报帧里取平台分区号（与 is_report_frame 配合使用，仅回报类消息调用）。
+/// 所有回报类消息体统一以 PartitionNo(i32,4 字节) 开头 → 帧偏移 8 处。
+/// writer 按分区分配 ReportIndex、回报同步按分区重发时都要用它。
+pub fn frame_partition(frame: &[u8]) -> i32 {
+    i32::from_be_bytes(frame[8..12].try_into().unwrap())
+}
+
+/// 从回报帧里取当前 ReportIndex（i64，帧偏移 12）。
+/// 新帧生成时该字段为 0（等 writer 补写）；非 0 说明是“回报同步重发的
+/// 历史帧”（保留原记录号），writer 据此跳过重新分配。
+pub fn frame_report_index(frame: &[u8]) -> i64 {
+    i64::from_be_bytes(frame[12..20].try_into().unwrap())
+}
+
 /// 组装完整报文：消息头（类型+长度）+ 消息体 + 校验和。
 /// 所有往外发的消息最后都经过这个函数包装成字节串。
 pub fn frame(msg_type: u32, body: &[u8]) -> Vec<u8> {

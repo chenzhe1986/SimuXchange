@@ -158,6 +158,20 @@ pub fn patch_report_index(frame: &mut [u8], report_index: u64) {
     frame[n - 4..].copy_from_slice(&cks.to_be_bytes());
 }
 
+/// 从回报帧里取分区号 SetID（u32，帧偏移 16(报文头)+8(Pbu)=24）。
+/// 与 is_report_frame 配合使用，writer 按分区分配 ReportIndex、
+/// 回报同步按分区重发时都要用它。
+pub fn frame_set_id(frame: &[u8]) -> u32 {
+    u32::from_be_bytes(frame[24..28].try_into().unwrap())
+}
+
+/// 从回报帧里取当前 ReportIndex（u64，帧偏移 28）。
+/// 新帧生成时该字段为 0（等 writer 补写）；非 0 说明是“回报同步重发的
+/// 历史帧”（保留原记录号），writer 据此跳过重新分配。
+pub fn frame_report_index(frame: &[u8]) -> u64 {
+    u64::from_be_bytes(frame[28..36].try_into().unwrap())
+}
+
 /// 消息体写入器：把各种类型的字段按规范顺序追加到字节缓冲区
 pub struct BodyWriter {
     buf: Vec<u8>,

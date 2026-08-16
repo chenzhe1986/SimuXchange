@@ -134,11 +134,21 @@ pub async fn handle_conn(
             protocol::finalize_seq(&mut buf, seq);
             // 回报记录号 ReportIndex 在真实发送时分配并补写进报文：
             // 分配时机与线上发送顺序严格一致，多笔并发回报（含延迟回报）也不会乱序；
-            // 非回报消息（心跳/登录/204/207/308 等）跳过，不占回报序号
+            // 非回报消息（心跳/登录/204/207/308 等）跳过，不占回报序号。
+            // 记录号按分区（SetID）连续编号，分区号从帧偏移 24 处解析
+            // （回报消息体统一以 Pbu(8)+SetID(4)+ReportIndex(8) 开头）。
+            // 帧里 ReportIndex 非 0 说明是“回报同步重发的历史帧”（重发时保留
+            // 原记录号让柜台对账），跳过重新分配，避免同一条回报重复占号。
             if buf.len() >= 36 {
                 let mt = u32::from_be_bytes(buf[0..4].try_into().unwrap());
                 if protocol::is_report_frame(mt) {
-                    protocol::patch_report_index(&mut buf, stats.next_report_index() as u64);
+                    if protocol::frame_report_index(&buf) == 0 {
+                        let set_id = protocol::frame_set_id(&buf) as i32;
+                        protocol::patch_report_index(
+                            &mut buf,
+                            stats.next_report_index_for(set_id) as u64,
+                        );
+                    }
                 }
             }
             if let Some(r) = &rec_send {
@@ -150,6 +160,18 @@ pub async fn handle_conn(
                     Vec::new()
                 };
                 r.record_send(&buf, fields);
+                // 回报帧同时登记进“重发缓存”：回报同步请求按 begin 重发时用
+                // （重发帧同 (分区, 记录号) 覆盖，不会重复登记）
+                if buf.len() >= 36 {
+                    let mt = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+                    if protocol::is_report_frame(mt) {
+                        r.record_report(
+                            protocol::frame_set_id(&buf) as i32,
+                            protocol::frame_report_index(&buf) as i64,
+                            &buf,
+                        );
+                    }
+                }
             }
             if wh.write_all(&buf).await.is_err() {
                 break;
@@ -355,13 +377,17 @@ pub async fn handle_conn(
     ctx.log("info", format!("连接 {} 已关闭", peer));
 }
 
-/// 处理执行回报同步(206)：按各分区回 ExecRptSyncRsp(207)，置 synced=true。
+/// 处理执行回报同步(206)：按各分区回 ExecRptSyncRsp(207)，重发历史回报，
+/// 置 synced=true。
 ///
-/// 同步回应中 EndReportIndex 取当前已发送的回报序号，RejReason=0。
+/// 同步回应中 EndReportIndex 取该分区当前已发送的最大回报记录号（分区内
+/// 连续编号），RejReason=0。
 /// 注意：ReportIndex 现在由 writer 在真实发送时分配（与线上顺序一致），
-/// 因此这里读到的全局计数器值就是“已实际发出”的回报条数，不再包含
-/// 已分配未发送的序号（旧实现分配于生成时，会把尚未送出的序号也算进去）。
-/// 同步完成前收到的委托在 pending 缓冲，完成后统一补发。
+/// 因此这里读到的分区计数器值就是“已实际发出”的回报条数，不再包含
+/// 已分配未发送的序号。
+/// 回完 207 后按各分区的 BeginReportIndex 重发本平台捕获缓存里的历史回报
+/// （含历史连接发过的；未开启报文捕获时无缓存则跳过），最后补发同步前
+/// 缓冲的委托回报——重发帧带旧记录号，缓冲帧带新记录号，先旧后新不乱序。
 async fn handle_sync(
     ctx: &SessionCtx,
     tx: &mpsc::Sender<Vec<u8>>,
@@ -377,14 +403,14 @@ async fn handle_sync(
             return;
         }
     };
-    let end_index = ctx.stats.report_index.load(Ordering::Relaxed) as u64;
+    // 各分区 EndReportIndex 取该分区自己的最大记录号（分区内连续编号）
     let rsp: Vec<SyncRspGroup> = groups
         .iter()
         .map(|g| SyncRspGroup {
             pbu: g.pbu.clone(),
             set_id: g.set_id,
             begin_report_index: g.begin_report_index,
-            end_report_index: end_index,
+            end_report_index: ctx.stats.partition_end_index(g.set_id as i32) as u64,
             rej_reason: 0,
             text: "OK".into(),
         })
@@ -394,6 +420,22 @@ async fn handle_sync(
         "info",
         format!("执行回报同步(206) 共 {} 个分区，发送同步回应(207)", groups.len()),
     );
+    // 按 begin 重发各分区历史回报（捕获缓存里才有帧；开关未开则重发 0 条）
+    for g in &groups {
+        let n = crate::sz::session::resend_reports_since(
+            ctx,
+            tx,
+            g.set_id as i32,
+            g.begin_report_index as i64,
+        )
+        .await;
+        if n > 0 {
+            ctx.log(
+                "info",
+                format!("按同步请求重发分区 {} 的历史回报 {} 条", g.set_id, n),
+            );
+        }
+    }
     *synced = true;
     // 同步完成：补发缓冲期内暂存的委托
     if !pending.is_empty() {

@@ -47,10 +47,21 @@ async fn read_frame(stream: &mut TcpStream) -> (u32, Vec<u8>) {
 /// 参数用的是协议里的“放大整数”：qty_100x 是股数×100，
 /// price_n13_4 是价格×10000（例如 12.34 元写成 12_3400）。
 fn new_order_frame(cl_ord_id: &str, qty_100x: i64, price_n13_4: i64, side: u8) -> Vec<u8> {
+    new_order_frame_sec(cl_ord_id, "000001", qty_100x, price_n13_4, side)
+}
+
+/// 同上，但证券代码可指定（多分区测试要用不同证券哈希到不同分区）
+fn new_order_frame_sec(
+    cl_ord_id: &str,
+    security_id: &str,
+    qty_100x: i64,
+    price_n13_4: i64,
+    side: u8,
+) -> Vec<u8> {
     let mut w = BodyWriter::new();
     w.str("010", 3); // ApplID
     w.str("100001", 6); // SubmittingPBUID
-    w.str("000001", 8); // SecurityID
+    w.str(security_id, 8); // SecurityID
     w.str("102", 4); // SecurityIDSource
     w.u16(1); // OwnerType
     w.str("01", 2); // ClearingFirm
@@ -355,11 +366,11 @@ async fn test_platform_mismatch_business_reject() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 测试五：回报同步（5.2）——登录后发送回报同步请求，模拟器无历史回报，
-/// 且按规范“分区执行报告结束消息”不需要发送，因此收到同步请求后
-/// 不应回任何业务报文（读应超时，只有会话心跳级别的帧会被跳过）。
+/// 测试五：回报同步（5.2）——无历史回报时不重发也不回任何结束标记
+/// （按实测真实交易所行为，网关发完历史回报后不回“回报结束(7)”），
+/// 读应超时；含非法分区号时整条同步消息丢弃，回 20106 业务拒绝（规范 3.15）。
 #[tokio::test]
-async fn test_report_sync_returns_no_report_finished() {
+async fn test_report_sync_no_reply_without_history() {
     let dir = std::env::temp_dir().join(format!("simx_test_sync_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let engine = Engine::new(dir.clone());
@@ -384,18 +395,247 @@ async fn test_report_sync_returns_no_report_finished() {
         .await
         .unwrap();
 
-    // 不应收到回报结束消息（MsgType=7）：短暂等待后读应超时
+    // 无历史回报：不重发任何报文，也不回“回报结束”等结束标记，
+    // 短暂等待后读应超时
     let early = tokio::time::timeout(Duration::from_millis(400), read_frame(&mut stream)).await;
     assert!(
         early.is_err(),
-        "回报同步请求不应触发任何响应（模拟器不回回报结束消息）"
+        "无历史回报时同步请求不应触发任何响应（真实交易所不发回报结束消息）"
+    );
+
+    // 非法分区号：整条同步消息丢弃，回 20106 业务拒绝
+    let mut w = BodyWriter::new();
+    w.u32(1);
+    w.i32(99); // 不存在的分区号
+    w.i64(1);
+    stream
+        .write_all(&protocol::frame(msg_type::REPORT_SYNC, &w.into_inner()))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::BUSINESS_REJECT, "非法分区号应回业务拒绝");
+    let ref_msg_type = u32::from_be_bytes(body[37..41].try_into().unwrap());
+    assert_eq!(ref_msg_type, msg_type::REPORT_SYNC, "RefMsgType 应是被拒的同步消息类型");
+    let reason = u16::from_be_bytes(body[51..53].try_into().unwrap());
+    assert_eq!(reason, 20106, "拒单码应为 20106");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试六（重发）：回报同步按 begin 重发历史回报——先报一笔单产生两条回报
+/// （确认记录号 1、成交记录号 2），断开重连后同步 begin=2，应原样重发
+/// 记录号 >= 2 的历史回报（保留原记录号）；发完不回“回报结束(7)”。
+#[tokio::test]
+async fn test_report_sync_resends_history_by_begin() {
+    let dir = std::env::temp_dir().join(format!("simx_test_rsync_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18108,
+            1,
+            StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+
+    // 第一段连接：报一笔单，收确认(200102, 记录号1) + 成交(200115, 记录号2)
+    let mut s1 = connect_and_logon(18108).await;
+    s1.write_all(&new_order_frame("RESEND001", 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut s1).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+    assert_eq!(
+        i64::from_be_bytes(body[4..12].try_into().unwrap()),
+        1,
+        "第一条回报记录号应为 1"
+    );
+    let (mt, body) = read_frame(&mut s1).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_TRADE);
+    assert_eq!(
+        i64::from_be_bytes(body[4..12].try_into().unwrap()),
+        2,
+        "第二条回报记录号应为 2"
+    );
+    drop(s1); // 断开
+    tokio::time::sleep(Duration::from_millis(500)).await; // 等旧会话清理完（单连接限制）
+
+    // 重连 + 同步 begin=2：只重发记录号 2 的成交回报，之后不再有任何报文
+    let mut s2 = connect_and_logon(18108).await;
+    let mut w = BodyWriter::new();
+    w.u32(1);
+    w.i32(1);
+    w.i64(2); // 期望从记录号 2 开始
+    s2.write_all(&protocol::frame(msg_type::REPORT_SYNC, &w.into_inner()))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut s2).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_TRADE, "应重发记录号 2 的成交回报");
+    assert_eq!(
+        i64::from_be_bytes(body[4..12].try_into().unwrap()),
+        2,
+        "重发帧应保留原记录号 2"
+    );
+    // 发完历史回报后不回“回报结束”等结束标记（真实交易所行为）
+    let after = tokio::time::timeout(Duration::from_millis(400), read_frame(&mut s2)).await;
+    assert!(after.is_err(), "重发完后不应再收到任何报文（无回报结束消息）");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试七（多分区重发 + 分区内连续）：双分区平台（分区号 1、2），
+/// 两个证券分别哈希落到不同分区，各产生 2 条回报；重连后按分区同步
+/// begin=1，应每个分区独立重发（记录号各自从 1 连续），互不串扰。
+#[tokio::test]
+async fn test_report_sync_resends_per_partition_contiguous() {
+    let dir = std::env::temp_dir().join(format!("simx_test_pp_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let mut gw = test_gateway(
+        18109,
+        1,
+        StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+    );
+    gw.platforms[0].partition_nos = "1,2".into();
+    let gw = engine.save_gateway(gw).await.unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+
+    // 用与后端相同的哈希（partition_for）挑两个落不同分区的证券
+    let pcfg = &engine.snapshot().await.gateways[0].config.platforms[0];
+    let mut sec_a = String::new();
+    let mut sec_b = String::new();
+    let mut pa = 0;
+    let mut pb = 0;
+    for i in 1..=60 {
+        let sec = format!("{:06}", i);
+        let p = pcfg.partition_for(&sec);
+        if sec_a.is_empty() {
+            sec_a = sec;
+            pa = p;
+        } else if p != pa && sec_b.is_empty() {
+            sec_b = sec;
+            pb = p;
+            break;
+        }
+    }
+    assert!(!sec_b.is_empty(), "应能找到分属两个分区的证券");
+    assert_ne!(pa, pb, "两个证券必须落在不同分区");
+
+    // 第一段连接：两个证券各报一笔，各自产生 2 条回报（分区内记录号 1、2）
+    let mut s1 = connect_and_logon(18109).await;
+    s1.write_all(&new_order_frame_sec("PA0000001", &sec_a, 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    s1.write_all(&new_order_frame_sec("PB0000001", &sec_b, 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    let mut got = std::collections::HashMap::new();
+    for _ in 0..4 {
+        let (mt, body) = read_frame(&mut s1).await;
+        let p = i32::from_be_bytes(body[0..4].try_into().unwrap());
+        let ri = i64::from_be_bytes(body[4..12].try_into().unwrap());
+        let e = got.entry(p).or_insert_with(Vec::new);
+        e.push((mt, ri));
+    }
+    // 每个分区应收到记录号 1、2 各一条（连续）
+    for (p, list) in &got {
+        let mut idx: Vec<i64> = list.iter().map(|x| x.1).collect();
+        idx.sort_unstable();
+        assert_eq!(idx, vec![1, 2], "分区 {} 的记录号应连续 1、2", p);
+    }
+    assert_eq!(got.len(), 2, "两个分区都应收到回报");
+    drop(s1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 重连 + 两个分区一起同步 begin=1：各分区独立重发 2 条 + 回报结束
+    let mut s2 = connect_and_logon(18109).await;
+    let mut w = BodyWriter::new();
+    w.u32(2);
+    w.i32(pa);
+    w.i64(1);
+    w.i32(pb);
+    w.i64(1);
+    s2.write_all(&protocol::frame(msg_type::REPORT_SYNC, &w.into_inner()))
+        .await
+        .unwrap();
+    // 各分区按请求顺序重发 4 条回报（发完不回“回报结束”等结束标记）
+    let mut resent = std::collections::HashMap::new();
+    for _ in 0..4 {
+        let (mt, body) = read_frame(&mut s2).await;
+        let p = i32::from_be_bytes(body[0..4].try_into().unwrap());
+        let ri = i64::from_be_bytes(body[4..12].try_into().unwrap());
+        let e = resent.entry(p).or_insert_with(Vec::new);
+        e.push((mt, ri));
+    }
+    for (p, list) in &resent {
+        let mut idx: Vec<i64> = list.iter().map(|x| x.1).collect();
+        idx.sort_unstable();
+        assert_eq!(idx, vec![1, 2], "分区 {} 重发的记录号应连续 1、2", p);
+    }
+    assert_eq!(resent.len(), 2, "两个分区都应被重发");
+    // 发完 4 条历史回报后不应再有报文（真实交易所不发回报结束消息）
+    let after = tokio::time::timeout(Duration::from_millis(400), read_frame(&mut s2)).await;
+    assert!(after.is_err(), "重发完后不应再收到任何报文（无回报结束消息）");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试八（关闭捕获）：平台未开启“展示收发报文/持久化”时没有捕获缓存，
+/// 回报同步不重发任何历史回报（重发功能随捕获开关一起关闭），
+/// 也不回任何结束标记。
+#[tokio::test]
+async fn test_report_sync_skipped_without_capture() {
+    let dir = std::env::temp_dir().join(format!("simx_test_nocap_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let mut gw = test_gateway(
+        18110,
+        1,
+        StrategyConfig { mode: StrategyMode::FullSingle, ..Default::default() },
+    );
+    // 关闭两个捕获开关：记录器不创建，重发缓存为空
+    gw.platforms[0].show_packets = false;
+    gw.platforms[0].persist_packets = false;
+    let gw = engine.save_gateway(gw).await.unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+
+    // 第一段连接：报一笔单，收 2 条回报
+    let mut s1 = connect_and_logon(18110).await;
+    s1.write_all(&new_order_frame("NOCAP0001", 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut s1).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+    let (mt, _) = read_frame(&mut s1).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_TRADE);
+    drop(s1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 重连 + 同步 begin=1：无捕获缓存不重发，也不回任何结束标记，读应超时
+    let mut s2 = connect_and_logon(18110).await;
+    let mut w = BodyWriter::new();
+    w.u32(1);
+    w.i32(1);
+    w.i64(1);
+    s2.write_all(&protocol::frame(msg_type::REPORT_SYNC, &w.into_inner()))
+        .await
+        .unwrap();
+    let early = tokio::time::timeout(Duration::from_millis(400), read_frame(&mut s2)).await;
+    assert!(
+        early.is_err(),
+        "无捕获缓存时同步请求不应触发任何响应（不重发、不回结束标记）"
     );
 
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 测试六：5.6 交易会话状态——固定收益交易平台（平台号 6）登录成功后，
+/// 测试九：5.6 交易会话状态——固定收益交易平台（平台号 6）登录成功后，
 /// 除平台信息、平台状态外，还应收到交易会话状态消息（MsgType=10），
 /// MarketSegmentID 第一位表示平台号，应为 6。
 #[tokio::test]
@@ -440,6 +680,47 @@ async fn test_fixed_income_session_status() {
     assert!(start > 0 && end > start, "交易会话起止时间应有效");
 
     engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试八（操作日志）：api::dispatch 处理的每条非轮询命令都带前端 IP 写入
+/// <data_dir>/log/<YYYYMMDD>/ops.log，新建/删除网关均留痕。
+#[tokio::test]
+async fn test_oplog_records_dispatch_ops() {
+    let dir = std::env::temp_dir().join(format!("simx_test_oplog_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+
+    // 新建网关：应记“新建网关 XXX”
+    let gw = simx_core::config::GatewayConfig {
+        name: "日志测试网关".into(),
+        ..Default::default()
+    };
+    let v = simx_core::api::dispatch(
+        &engine,
+        serde_json::json!({ "cmd": "save_gateway", "gateway": gw }),
+        "192.168.0.1",
+    )
+    .await;
+    assert_eq!(v["ok"], true, "保存网关应成功：{:?}", v);
+    let date = chrono::Local::now().format("%Y%m%d");
+    let path = dir.join("log").join(date.to_string()).join("ops.log");
+    let content = std::fs::read_to_string(&path).expect("操作日志文件应存在");
+    assert!(content.contains("192.168.0.1"), "日志应含前端 IP");
+    assert!(content.contains("新建网关 日志测试网关"), "日志应含操作描述：{}", content);
+
+    // 删除网关：应记“删除网关 日志测试网关”
+    let id = v["data"]["id"].as_str().unwrap().to_string();
+    let v2 = simx_core::api::dispatch(
+        &engine,
+        serde_json::json!({ "cmd": "delete_gateway", "id": id }),
+        "192.168.0.1",
+    )
+    .await;
+    assert_eq!(v2["ok"], true);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("删除网关 日志测试网关"), "日志应含删除操作：{}", content);
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

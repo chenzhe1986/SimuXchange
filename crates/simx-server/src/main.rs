@@ -18,12 +18,13 @@
 //! 用法：simx-server [--listen 0.0.0.0:9800] [--auto-start] [--update-url <地址>]
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use simx_core::engine::Engine;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -107,7 +108,11 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .unwrap_or_else(|e| panic!("监听 {} 失败: {}", listen, e));
-    axum::serve(listener, app).await.unwrap();
+    // into_make_service_with_connect_info：让每个请求处理器能拿到客户端
+    // SocketAddr（操作日志要记前端 IP，没有它拿不到）
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .unwrap();
 }
 
 /// 启动时向更新服务器检查一次新版本（供 --update-url 参数调用）。
@@ -153,8 +158,12 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// HTTP 请求升级为 WebSocket 连接（浏览器/客户端发起握手时触发）
-async fn ws_handler(ws: WebSocketUpgrade, State(engine): State<Engine>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, engine))
+async fn ws_handler(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ws: WebSocketUpgrade,
+    State(engine): State<Engine>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, engine, peer))
 }
 
 /// 伺候一个 WebSocket 客户端的完整生命周期。
@@ -164,7 +173,12 @@ async fn ws_handler(ws: WebSocketUpgrade, State(engine): State<Engine>) -> impl 
 /// 2. 统一发送任务：从队列取消息逐条写出（与 session.rs 的写通道
 ///    同理：多方都想发消息，经单一队列保证不互相穿插）
 /// 3. 主循环：收命令 → 交给 api::dispatch 处理 → 带原 id 回复
-async fn handle_ws(socket: WebSocket, engine: Engine) {
+///
+/// peer 为前端对端地址：连接建立/断开和每条操作日志都记它的 IP，
+/// 便于追溯是谁（哪台机器）在操作模拟网关。
+async fn handle_ws(socket: WebSocket, engine: Engine, peer: SocketAddr) {
+    let ip = peer.ip().to_string();
+    engine.log_op(&ip, &format!("前端连接建立（{}）", peer));
     let (mut tx, mut rx) = socket.split();
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(1024);
 
@@ -208,7 +222,7 @@ async fn handle_ws(socket: WebSocket, engine: Engine) {
             // 取出请求 id（原样回填）和实际命令体 payload
             let id = v.get("id").cloned().unwrap_or(serde_json::Value::Null);
             let payload = v.get("payload").cloned().unwrap_or(serde_json::Value::Null);
-            let resp = simx_core::api::dispatch(&engine, payload).await;
+            let resp = simx_core::api::dispatch(&engine, payload, &ip).await;
             let reply = serde_json::json!({ "id": id, "resp": resp });
             if out_tx.send(reply.to_string()).await.is_err() {
                 break;
@@ -216,7 +230,8 @@ async fn handle_ws(socket: WebSocket, engine: Engine) {
         }
     }
 
-    // 连接已断：停掉两个后台任务，避免泄漏
+    // 连接已断：停掉两个后台任务，避免泄漏；操作日志记一条断开
     ev_task.abort();
     send_task.abort();
+    engine.log_op(&ip, &format!("前端连接断开（{}）", peer));
 }

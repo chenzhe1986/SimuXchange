@@ -85,13 +85,15 @@ fn set_app_config(
 }
 
 /// 统一控制接口：前端所有操作（启停网关、存配置、拉快照…）都走这一个
-/// command，payload 为 JSON 命令，具体格式见 simx_core::api
+/// command，payload 为 JSON 命令，具体格式见 simx_core::api。
+/// 本地桌面端的前端就在本机（Tauri 进程内调用），操作日志里 IP 固定记
+/// 127.0.0.1；远程模式（WebSocket）由 simx-server 记录真实对端 IP。
 #[tauri::command]
 async fn dispatch(
     engine: State<'_, Engine>,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    Ok(simx_core::api::dispatch(engine.inner(), payload).await)
+    Ok(simx_core::api::dispatch(engine.inner(), payload, "127.0.0.1").await)
 }
 
 /// 下载新版安装包并启动安装（“发现新版本”弹窗里的“下载并安装”按钮触发）。
@@ -147,6 +149,9 @@ fn main() {
         .manage(Mutex::new(app_config))
         .manage(engine.clone())
         .setup(move |app| {
+            // 本地桌面端“前端接入”：操作日志记一条，与远程模式 WebSocket
+            // 接入的日志语义对齐（远程模式记真实对端 IP）
+            engine.log_op("127.0.0.1", "前端接入（本地桌面端）");
             // 日志转发任务：订阅引擎事件，每收到一条就 emit 给前端
             // （前端在 backend.ts 里 listen("engine-event", ...) 接收）
             let handle = app.handle().clone();

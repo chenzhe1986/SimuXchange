@@ -13,6 +13,7 @@
 //! - stats：统计计数（委托/成交数、订单号发生器，三类网关共用）
 //! - capture：连接收发报文捕获（16 进制记录 + 可选持久化到文件）
 //! - orderbook：订单缓存（平台级，界面查看订单列表 + 撤单按状态判断）
+//! - oplog：前端操作日志（带前端 IP 的操作留痕，按日期存 log/ 目录）
 //! - engine：网关生命周期管理（总管家：启停/配置/快照，按分类分派会话）
 //! - event：引擎事件（日志推送到前端的载体）
 //! - api：统一 JSON 控制接口（Tauri 与远程 WebSocket 共用）
@@ -29,6 +30,7 @@ pub mod capture;
 pub mod config;
 pub mod engine;
 pub mod event;
+pub mod oplog;
 pub mod orderbook;
 pub mod shbond;
 pub mod shjj;
