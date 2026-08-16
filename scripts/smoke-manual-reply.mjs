@@ -286,13 +286,47 @@ async function main() {
     o = orders.find((x) => x.clOrdId === CL_C);
     ok(o && o.status === "cancelled", "订单 C 缓存为已撤");
 
-    // 10. 统计校验：委托 3、成交 2（A 两笔回复合并 1 个计数）、拒单 1、撤单 0（撤单成功不占计数）
+    // 9.5 手动确认回报：下单 E → 手动回确认（ExecType='0'），订单保持可继续回复
+    const CL_E = "E" + String(Date.now()).slice(-9);
+    sock.write(frame(100101, newOrderBody(CL_E, 10000, 100100)));
+    f = await readBusiness(sock);
+    ok(f.mt === 200102, `下单 E 收到确认回报（mt=${f.mt}）`);
+    const r5 = await call("send_report", {
+        gatewayId: gwId, platformId: pid, clOrdId: CL_E, kind: "ack",
+    });
+    console.log("  send_report(ack):", r5.desc);
+    f = await readBusiness(sock);
+    ok(f.mt === 200102, `收到手动确认回报（mt=${f.mt}，应=200102）`);
+    ok(f.body.readUInt8(111) === 0x30, "确认回报 ExecType=0（已报）");
+    orders = await call("get_orders", { gatewayId: gwId, platformId: pid });
+    o = orders.find((x) => x.clOrdId === CL_E);
+    ok(o && o.status === "new", "订单 E 缓存仍为已报（确认不改变在途状态）");
+
+    // 9.6 前台拒单：下单 F → 勾选前台拒单（frontReject=true）→ 回业务拒绝消息(MsgType=4)
+    const CL_F = "F" + String(Date.now()).slice(-9);
+    sock.write(frame(100101, newOrderBody(CL_F, 10000, 100100)));
+    f = await readBusiness(sock);
+    ok(f.mt === 200102, `下单 F 收到确认回报（mt=${f.mt}）`);
+    const r6 = await call("send_report", {
+        gatewayId: gwId, platformId: pid, clOrdId: CL_F, kind: "reject",
+        reason: 20009, frontReject: true,
+    });
+    console.log("  send_report(frontReject=true reason=20009):", r6.desc);
+    f = await readBusiness(sock);
+    ok(f.mt === 4, `收到业务拒绝消息（mt=${f.mt}，应=4）`);
+    // MsgType=4 布局：ApplID3+TransactTime8+SubmitPbu6+SecurityID8+SecSrc4+RefSeqNum8+RefMsgType4+RefID10 = 51 → Reason(u16)
+    ok(f.body.readUInt16BE(51) === 20009, `业务拒绝原因代码=20009（实得 ${f.body.readUInt16BE(51)}）`);
+    orders = await call("get_orders", { gatewayId: gwId, platformId: pid });
+    o = orders.find((x) => x.clOrdId === CL_F);
+    ok(o && o.status === "rejected", "订单 F 缓存为已拒绝");
+
+    // 10. 统计校验：委托 5、成交 2（A 两笔回复合并 1 个计数）、拒单 2（B 执行报告 + F 前台拒单）、撤单 0（撤单成功不占计数）
     const snap2 = await call("get_snapshot");
     const ps = snap2.gateways.find((g) => g.config.id === gwId)
         .platforms.find((p) => p.platformId === pid).stats;
-    ok(ps.orders === 3, `统计·委托=${ps.orders}（应=3）`);
+    ok(ps.orders === 5, `统计·委托=${ps.orders}（应=5）`);
     ok(ps.trades === 2, `统计·成交=${ps.trades}（应=2）`);
-    ok(ps.orderRejects === 1, `统计·拒单=${ps.orderRejects}（应=1）`);
+    ok(ps.orderRejects === 2, `统计·拒单=${ps.orderRejects}（应=2，含前台拒单）`);
     ok(ps.cancels === 0, `统计·撤单=${ps.cancels}（应=0，手动撤单不占撤单请求计数）`);
 
     // 11. 平台级报文：跨连接聚合 + 每行带 connId + 连接概要（分组标题数据源）
@@ -369,7 +403,7 @@ async function main() {
     const snap3 = await call("get_snapshot");
     const ps3 = snap3.gateways.find((g) => g.config.id === gwId)
         .platforms.find((p) => p.platformId === pid).stats;
-    ok(ps3.orders === 4, `统计·委托=${ps3.orders}（应=4，含断开前 D）`);
+    ok(ps3.orders === 6, `统计·委托=${ps3.orders}（应=6，含断开前 D 与 E/F）`);
     ok(ps3.trades === 3, `统计·成交=${ps3.trades}（应=3，含 D 的一笔）`);
 
     // 18. 收尾

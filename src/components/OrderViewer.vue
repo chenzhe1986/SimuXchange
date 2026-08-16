@@ -96,6 +96,9 @@ const expanded = ref<OrderEntry | null>(null);
 const replyQty = ref(0);
 const replyPrice = ref(0);
 const replyReason = ref(defaultRejectReason(props.category));
+/** 前台拒单开关（默认不勾选）：勾选后拒单改发业务拒绝消息（Business Reject），
+ *  否则发执行报告（ExecutionReport） */
+const frontReject = ref(false);
 /** 拒单原因码在错误码表里的说明（输入框下方的提示文字） */
 const replyReasonText = computed(() => rejectTextOf(props.category, replyReason.value));
 /** 发送中标记（防止连点重复发送） */
@@ -112,10 +115,11 @@ function expandRow(o: OrderEntry) {
     replyPrice.value = o.price;
     // 拒单原因码默认按网关分类：深圳 20009 / 上海 1025
     replyReason.value = defaultRejectReason(props.category);
+    frontReject.value = false;
 }
 
-/** 发送手动回报：kind 对应后端 ManualReportKind（trade/reject/cancel） */
-async function sendReply(kind: "trade" | "reject" | "cancel") {
+/** 发送手动回报：kind 对应后端 ManualReportKind（ack/trade/reject/cancel） */
+async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
     const o = expanded.value;
     if (!o || sending.value) return;
     if (kind === "trade" && replyQty.value <= 0) {
@@ -139,6 +143,7 @@ async function sendReply(kind: "trade" | "reject" | "cancel") {
         payload.price = replyPrice.value;
     } else if (kind === "reject") {
         payload.reason = replyReason.value;
+        payload.frontReject = frontReject.value;
     }
     const resp = await props.backend?.dispatch(payload);
     sending.value = false;
@@ -148,7 +153,7 @@ async function sendReply(kind: "trade" | "reject" | "cancel") {
     }
     const desc = (resp.data as { desc?: string } | null)?.desc ?? "回报已发送";
     emit("notify", desc);
-    expanded.value = null; // 订单已进入终态，收起面板
+    expanded.value = null; // 收起面板（确认回报后订单仍在途，可再次展开回复）
     await fetchOrders(); // 状态变了，立即刷新列表
 }
 </script>
@@ -234,9 +239,17 @@ async function sendReply(kind: "trade" | "reject" | "cancel") {
                                         <div class="ov-reply">
                                             <div class="ov-reply-title">
                                                 手动回复 · 委托 <span class="num">{{ o.clOrdId }}</span>
-                                                <span class="ov-reply-hint">发送后订单进入终态，不能再回复</span>
+                                                <span class="ov-reply-hint">成交/拒单/撤单发送后订单进入终态；确认回报可重复发送</span>
                                             </div>
                                             <div class="ov-reply-body">
+                                                <!-- 确认回报：无参数，订单保持“已报”状态（不自动回复模式下单子挂起，先回确认） -->
+                                                <div class="ov-reply-block">
+                                                    <div class="ov-reply-label">确认回报</div>
+                                                    <div class="ov-reply-note">执行报告 ExecType=0（已报），订单保持可继续回复</div>
+                                                    <button class="btn sm" :disabled="sending" @click="sendReply('ack')">
+                                                        发送确认
+                                                    </button>
+                                                </div>
                                                 <!-- 成交回报：数量/价格可配置，默认剩余量全成 + 委托价 -->
                                                 <div class="ov-reply-block">
                                                     <div class="ov-reply-label">成交回报</div>
@@ -249,13 +262,17 @@ async function sendReply(kind: "trade" | "reject" | "cancel") {
                                                     </button>
                                                 </div>
                                                 <!-- 拒单回报：拒单原因代码可配置，默认按网关分类（深圳 20009 / 上海 1025），
-                                                     下方提示错误码表里的对应说明 -->
+                                                     下方提示错误码表里的对应说明；勾选“前台拒单”改发业务拒绝消息 -->
                                                 <div class="ov-reply-block">
                                                     <div class="ov-reply-label">拒单回报</div>
                                                     <div class="ov-reply-fields">
                                                         <label>原因代码 <input v-model.number="replyReason" type="number" min="0" step="1" /></label>
                                                         <span class="ov-reply-note" v-if="replyReasonText">{{ replyReasonText }}</span>
                                                     </div>
+                                                    <label class="ov-reply-note ov-reply-check">
+                                                        <input v-model="frontReject" type="checkbox" />
+                                                        前台拒单（回业务拒绝消息 Business Reject，默认发执行报告）
+                                                    </label>
                                                     <button class="btn sm danger-ghost" :disabled="sending" @click="sendReply('reject')">
                                                         发送拒单
                                                     </button>

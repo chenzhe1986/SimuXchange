@@ -382,11 +382,12 @@ pub async fn handle_conn(
                     },
                 };
                 let _ = tx.send(reply.encode()).await;
-                // 登录成功后下发平台信息、平台状态（状态 2 = 开放，可以报单）
+                // 登录成功后下发平台信息、平台状态（状态 2 = 开放，可以报单）。
+                // 平台信息携带全部分区号（支持多分区配置），OMS 按它初始化分区
                 let _ = tx
                     .send(protocol::encode_platform_info(
                         ctx.cfg.platform_type,
-                        &[ctx.cfg.partition_no],
+                        &ctx.cfg.partitions(),
                     ))
                     .await;
                 let _ = tx
@@ -441,23 +442,14 @@ pub async fn handle_conn(
             }
             msg_type::REPORT_SYNC => {
                 // 回报同步请求（5.2）：OMS 登录后告知各分区期望的下一条回报记录号。
-                // 模拟器不保存历史回报，收到后逐分区回“回报结束消息”（5.4），
-                // 告知该分区回报已发送完毕（没有历史回报可补发）。
+                // 模拟器不保存历史回报，且按规范“分区执行报告结束消息”不需要发送，
+                // 因此收到同步请求不回任何消息，只记日志
                 match ReportSync::decode(mt, &body) {
                     Ok(rs) => {
-                        for p in &rs.partitions {
-                            let _ = tx
-                                .send(protocol::encode_report_finished(
-                                    p.partition_no,
-                                    p.report_index,
-                                    ctx.cfg.platform_type,
-                                ))
-                                .await;
-                        }
                         ctx.log(
                             "info",
                             format!(
-                                "柜台 {} 发送回报同步请求（{} 个分区），已回回报结束消息",
+                                "柜台 {} 发送回报同步请求（{} 个分区），模拟器无历史回报可同步，不回回报结束消息",
                                 peer,
                                 rs.partitions.len()
                             ),
@@ -645,7 +637,7 @@ async fn handle_new_order(
     // RwLockReadGuard 不是 Send，跨 await 存活会阻止会话任务在线程间调度
     let plans = {
         let st = ctx.strategy.read().unwrap();
-        strategy::plan_reports(&st, ctx.cfg.partition_no, &order, &ctx.stats)
+        strategy::plan_reports(&st, ctx.cfg.partition_for(&order.common.security_id), &order, &ctx.stats)
     };
     // 所有回报延迟都为 0 时可以当场发完；否则需要另起任务慢慢发
     let all_sync = plans.iter().all(|p| p.delay_ms == 0);
@@ -753,7 +745,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
                 .unwrap_or_else(|| strategy::biz_info(msg_type::NEW_ORDER_CASH));
             let cxl = ExecRptAck {
                 msg_type: biz.ack_msg_type,
-                partition_no: ctx.cfg.partition_no,
+                partition_no: ctx.cfg.partition_for(&req.security_id),
                 report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
                 appl_id: if req.appl_id.is_empty() {
                     biz.appl_id.into()
@@ -808,7 +800,7 @@ async fn handle_cancel(ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body: &[u8]
     // ---- 撤单失败：未开启缓存 / 找不到原单 / 原单已是终态 ----
     // 拼撤单拒绝报文：大部分字段直接回填请求里的值（回报要能对得上号）
     let rej = CancelReject {
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&req.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: if req.appl_id.is_empty() { "010".into() } else { req.appl_id.clone() },
         reporting_pbu_id: req.submitting_pbu_id.clone(),
@@ -927,7 +919,7 @@ async fn handle_quote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, bod
         // 接受报价：报价状态回报回填报价字段，扩展字段照抄请求
         let rpt = QuoteStatusReport {
             msg_type: QuoteStatusReport::response_msg_type(mt),
-            partition_no: ctx.cfg.partition_no,
+            partition_no: ctx.cfg.partition_for(&q.security_id),
             report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
             appl_id: q.appl_id.clone(),
             reporting_pbu_id: q.submitting_pbu_id.clone(),
@@ -1022,7 +1014,7 @@ async fn handle_quote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, bod
         }
         let rpt = QuoteStatusReport {
             msg_type: QuoteStatusReport::response_msg_type(mt),
-            partition_no: ctx.cfg.partition_no,
+            partition_no: ctx.cfg.partition_for(&q.security_id),
             report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
             appl_id: q.appl_id.clone(),
             reporting_pbu_id: q.submitting_pbu_id.clone(),
@@ -1109,7 +1101,7 @@ async fn handle_quote_request(
     }
     let rpt = QuoteRequestAck {
         msg_type: QuoteRequestAck::response_msg_type(mt),
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&q.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: q.appl_id.clone(),
         reporting_pbu_id: q.submitting_pbu_id.clone(),
@@ -1189,7 +1181,7 @@ async fn handle_ioi(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body:
     }
     let rpt = IOIResponse {
         msg_type: msg_type::IOI_RESPONSE,
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&q.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: q.appl_id.clone(),
         reporting_pbu_id: q.submitting_pbu_id.clone(),
@@ -1251,7 +1243,7 @@ async fn handle_tcr(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, body:
     }
     let rpt = TcrAck {
         msg_type: TcrAck::response_msg_type(mt),
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&tcr.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: tcr.appl_id.clone(),
         reporting_pbu_id: tcr.submitting_pbu_id.clone(),
@@ -1332,7 +1324,7 @@ async fn handle_designation(
     }
     let rpt = DesignationReport {
         msg_type: msg_type::DESIGNATION_REPORT,
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&d.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: d.appl_id.clone(),
         reporting_pbu_id: d.submitting_pbu_id.clone(),
@@ -1391,7 +1383,7 @@ async fn handle_evote(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, bod
     }
     let rpt = EvoteReport {
         msg_type: msg_type::EVOTE_REPORT,
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&v.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: v.appl_id.clone(),
         reporting_pbu_id: v.submitting_pbu_id.clone(),
@@ -1454,7 +1446,7 @@ async fn handle_password_service(
     }
     let rpt = PasswordServiceReport {
         msg_type: msg_type::PASSWORD_SERVICE_REPORT,
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&p.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: p.appl_id.clone(),
         reporting_pbu_id: p.submitting_pbu_id.clone(),
@@ -1516,7 +1508,7 @@ async fn handle_margin_query(
     }
     let rpt = MarginQueryResult {
         msg_type: msg_type::MARGIN_QUERY_RESULT,
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&m.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: m.appl_id.clone(),
         reporting_pbu_id: m.submitting_pbu_id.clone(),
@@ -1571,7 +1563,7 @@ async fn handle_multileg(mt: u32, ctx: &SessionCtx, tx: &mpsc::Sender<Vec<u8>>, 
     }
     let rpt = MultilegExecRpt {
         msg_type: MultilegExecRpt::response_msg_type(mt),
-        partition_no: ctx.cfg.partition_no,
+        partition_no: ctx.cfg.partition_for(&o.common.security_id),
         report_index: 0, // 发送时由 writer 任务补写（见 handle_conn）
         appl_id: o.common.appl_id.clone(),
         reporting_pbu_id: o.common.submitting_pbu_id.clone(),
@@ -1689,14 +1681,16 @@ fn session_time_range(now: chrono::DateTime<chrono::Local>, sub: &str) -> (i64, 
     (start, end)
 }
 
-/// 手动回复的回报种类（界面在途单上选择“成交/拒单/撤单成功”时指定）。
+/// 手动回复的回报种类（界面在途单上选择“确认/成交/拒单/撤单成功”时指定）。
 /// 字段名走 snake_case，与前端 send_report 命令的 kind 参数对应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManualReportKind {
+    /// 确认回报（执行报告 ExecType=0，订单保持已报状态、可继续回复）
+    Ack,
     /// 成交回报（可指定成交数量与价格）
     Trade,
-    /// 拒单回报（执行报告形式，可指定拒单原因代码）
+    /// 拒单回报（可指定拒单原因代码；front_reject=true 时改发业务拒绝消息）
     Reject,
     /// 撤单成功回报
     Cancel,
@@ -1723,12 +1717,35 @@ pub fn build_manual_report(
     qty: Option<f64>,
     price: Option<f64>,
     reason: Option<i32>,
+    front_reject: bool,
 ) -> Result<(Vec<u8>, String, OrderUpdate), String> {
     // 按订单缓存的业务标识（深市 ApplID）反查业务特征，决定回报报文类型；
     // 查不到（老缓存/沪市订单）时按现货竞价兜底
     let biz = biz_info_by_appl_id(&entry.biz)
         .unwrap_or_else(|| strategy::biz_info(msg_type::NEW_ORDER_CASH));
     match kind {
+        ManualReportKind::Ack => {
+            // 确认回报：执行报告 ExecType=0/OrdStatus=0（已报），订单保持“已报”
+            // 状态、可继续回复成交/拒单/撤单。交易所订单号尚无则新分配
+            // （不自动回复模式下订单没分配过订单号）
+            let mut rpt = base_manual_ack(cfg, stats, entry, biz);
+            if rpt.order_id.is_empty() {
+                rpt.order_id = stats.next_order_id();
+            }
+            let desc = format!(
+                "手动确认回报({}) ClOrdID={} OrderID={}",
+                biz.ack_msg_type,
+                entry.cl_ord_id,
+                rpt.order_id.trim_start_matches('0')
+            );
+            let update = OrderUpdate {
+                order_id: rpt.order_id.clone(),
+                cum_qty: entry.cum_qty,
+                leaves_qty: entry.leaves_qty,
+                status: OrderStatus::New,
+            };
+            Ok((rpt.encode(), desc, update))
+        }
         ManualReportKind::Trade => {
             // 无成交回报的业务（表 3-4）拒绝手动成交：模拟器不编造交易所
             // 不会发的报文
@@ -1753,7 +1770,7 @@ pub fn build_manual_report(
             let filled = leaves == 0.0;
             let trade = ExecRptTrade {
                 msg_type: trade_msg_type,
-                partition_no: cfg.partition_no,
+                partition_no: cfg.partition_for(&entry.security_id),
                 report_index: 0, // 发送时由 writer 任务补写
                 appl_id: biz.appl_id.into(),
                 reporting_pbu_id: entry.pbu.clone(),
@@ -1798,50 +1815,75 @@ pub fn build_manual_report(
             };
             Ok((trade.encode(), desc, update))
         }
-        // 拒单/撤单成功共用确认报文骨架（2xxx02），仅执行类型/状态/原因不同
-        ManualReportKind::Reject | ManualReportKind::Cancel => {
-            let mut rpt = base_manual_ack(cfg, stats, entry, biz);
-            match kind {
-                ManualReportKind::Reject => {
-                    rpt.exec_type = exec_type::REJECT;
-                    rpt.ord_status = ord_status::REJECTED;
-                    rpt.ord_rej_reason = reason.unwrap_or(1) as u16;
-                    rpt.leaves_qty = 0;
-                    rpt.cum_qty = (entry.cum_qty * 100.0).round() as i64;
-                    let desc = format!(
-                        "手动拒单回报({}) ClOrdID={} 原因代码={}",
-                        biz.ack_msg_type, entry.cl_ord_id, rpt.ord_rej_reason
-                    );
-                    let update = OrderUpdate {
-                        order_id: entry.order_id.clone(),
-                        cum_qty: entry.cum_qty,
-                        leaves_qty: 0.0,
-                        status: OrderStatus::Rejected,
-                    };
-                    Ok((rpt.encode(), desc, update))
-                }
-                ManualReportKind::Cancel => {
-                    rpt.exec_type = exec_type::CANCELLED;
-                    rpt.ord_status = ord_status::CANCELLED;
-                    // 手动撤单没有“撤单请求编号”，原单号同时填 ClOrdID/OrigClOrdID，
-                    // 柜台按任一字段都能关联上
-                    rpt.orig_cl_ord_id = entry.cl_ord_id.clone();
-                    rpt.leaves_qty = 0;
-                    rpt.cum_qty = (entry.cum_qty * 100.0).round() as i64;
-                    let desc = format!(
-                        "手动撤单成功回报({}) ClOrdID={}",
-                        biz.ack_msg_type, entry.cl_ord_id
-                    );
-                    let update = OrderUpdate {
-                        order_id: entry.order_id.clone(),
-                        cum_qty: entry.cum_qty,
-                        leaves_qty: 0.0,
-                        status: OrderStatus::Cancelled,
-                    };
-                    Ok((rpt.encode(), desc, update))
-                }
-                ManualReportKind::Trade => unreachable!(),
+        // 拒单：默认回订单响应及撤单成功执行报告（2xxx02，ExecType=8）；
+        // 勾选“前台拒单”时改回业务拒绝消息（MsgType=4），不进执行报告流
+        ManualReportKind::Reject => {
+            if front_reject {
+                let rej_mt = strategy::order_msg_type_by_appl_id(&entry.biz)
+                    .unwrap_or(msg_type::NEW_ORDER_CASH);
+                let rej = BusinessReject {
+                    appl_id: entry.biz.clone(),
+                    transact_time: protocol::now_timestamp(),
+                    submitting_pbu_id: entry.pbu.clone(),
+                    security_id: entry.security_id.clone(),
+                    security_id_source: "102".into(),
+                    ref_seq_num: 0,
+                    ref_msg_type: rej_mt,
+                    business_reject_ref_id: entry.cl_ord_id.clone(),
+                    business_reject_reason: reason.unwrap_or(1) as u16,
+                    business_reject_text: String::new(),
+                };
+                let desc = format!(
+                    "手动前台拒单(4) ClOrdID={} 原因代码={}",
+                    entry.cl_ord_id, rej.business_reject_reason
+                );
+                let update = OrderUpdate {
+                    order_id: String::new(), // 业务拒绝未分配交易所订单号
+                    cum_qty: entry.cum_qty,
+                    leaves_qty: 0.0,
+                    status: OrderStatus::Rejected,
+                };
+                Ok((rej.encode(), desc, update))
+            } else {
+                let mut rpt = base_manual_ack(cfg, stats, entry, biz);
+                rpt.exec_type = exec_type::REJECT;
+                rpt.ord_status = ord_status::REJECTED;
+                rpt.ord_rej_reason = reason.unwrap_or(1) as u16;
+                rpt.leaves_qty = 0;
+                rpt.cum_qty = (entry.cum_qty * 100.0).round() as i64;
+                let desc = format!(
+                    "手动拒单回报({}) ClOrdID={} 原因代码={}",
+                    biz.ack_msg_type, entry.cl_ord_id, rpt.ord_rej_reason
+                );
+                let update = OrderUpdate {
+                    order_id: entry.order_id.clone(),
+                    cum_qty: entry.cum_qty,
+                    leaves_qty: 0.0,
+                    status: OrderStatus::Rejected,
+                };
+                Ok((rpt.encode(), desc, update))
             }
+        }
+        ManualReportKind::Cancel => {
+            let mut rpt = base_manual_ack(cfg, stats, entry, biz);
+            rpt.exec_type = exec_type::CANCELLED;
+            rpt.ord_status = ord_status::CANCELLED;
+            // 手动撤单没有“撤单请求编号”，原单号同时填 ClOrdID/OrigClOrdID，
+            // 柜台按任一字段都能关联上
+            rpt.orig_cl_ord_id = entry.cl_ord_id.clone();
+            rpt.leaves_qty = 0;
+            rpt.cum_qty = (entry.cum_qty * 100.0).round() as i64;
+            let desc = format!(
+                "手动撤单成功回报({}) ClOrdID={}",
+                biz.ack_msg_type, entry.cl_ord_id
+            );
+            let update = OrderUpdate {
+                order_id: entry.order_id.clone(),
+                cum_qty: entry.cum_qty,
+                leaves_qty: 0.0,
+                status: OrderStatus::Cancelled,
+            };
+            Ok((rpt.encode(), desc, update))
         }
     }
 }
@@ -1857,7 +1899,7 @@ fn base_manual_ack(
 ) -> ExecRptAck {
     ExecRptAck {
         msg_type: biz.ack_msg_type,
-        partition_no: cfg.partition_no,
+        partition_no: cfg.partition_for(&entry.security_id),
         report_index: 0, // 发送时由 writer 任务补写
         appl_id: biz.appl_id.into(),
         reporting_pbu_id: entry.pbu.clone(),

@@ -66,8 +66,10 @@ pub enum Command {
         #[serde(default)]
         after_seq: u64,
     },
-    /// 手动回复一笔在途订单（成交/拒单/撤单成功）；
-    /// qty/price 为自然单位（股/元），不传时用缓存值兜底
+    /// 手动回复一笔在途订单（确认/成交/拒单/撤单成功）；
+    /// qty/price 为自然单位（股/元），不传时用缓存值兜底；
+    /// front_reject=true 时拒单改发业务拒绝消息（Business Reject），
+    /// 否则发执行报告（ExecutionReport）
     #[serde(rename_all = "camelCase")]
     SendReport {
         gateway_id: String,
@@ -80,6 +82,8 @@ pub enum Command {
         price: Option<f64>,
         #[serde(default)]
         reason: Option<i32>,
+        #[serde(default)]
+        front_reject: bool,
     },
 }
 
@@ -183,6 +187,7 @@ pub async fn dispatch(engine: &Engine, payload: Value) -> Value {
             qty,
             price,
             reason,
+            front_reject,
         } => match engine
             .send_report(
                 &gateway_id,
@@ -192,6 +197,7 @@ pub async fn dispatch(engine: &Engine, payload: Value) -> Value {
                 qty,
                 price,
                 reason,
+                front_reject,
             )
             .await
         {

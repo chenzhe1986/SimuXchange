@@ -678,15 +678,6 @@ pub fn encode_platform_info(platform_id: u16, partitions: &[i32]) -> Vec<u8> {
     frame(msg_type::PLATFORM_INFO, &w.into_inner())
 }
 
-/// 回报结束消息（MsgType=7）
-pub fn encode_report_finished(partition_no: i32, report_index: i64, platform_id: u16) -> Vec<u8> {
-    let mut w = BodyWriter::new();
-    w.i32(partition_no);
-    w.i64(report_index);
-    w.u16(platform_id);
-    frame(msg_type::REPORT_FINISHED, &w.into_inner())
-}
-
 /// 业务拒绝消息（MsgType=4，5.1 节）。
 /// 委托未通过基本合法性检查时，交易系统以本消息通知 OMS（无执行报告）。
 #[derive(Debug, Clone, Default)]

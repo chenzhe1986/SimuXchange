@@ -1192,7 +1192,6 @@ onBeforeUnmount(() => {
                     <p class="reward-contact">
                         联系邮箱：<a href="mailto:chenzhe1986@126.com">chenzhe1986@126.com</a>
                     </p>
-                    <p class="reward-license">本项目遵循 GPL 开源协议</p>
                 </div>
             </div>
         </div>
@@ -1596,14 +1595,6 @@ onBeforeUnmount(() => {
 
 .reward-contact a:hover {
     text-decoration: underline;
-}
-
-.reward-license {
-    font-size: 11px;
-    color: var(--text-faint);
-    margin-top: 8px;
-    padding-top: 10px;
-    border-top: 1px dashed var(--border);
 }
 
 /* 布局 */

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 // PlatformEditor.vue —— 平台配置的编辑弹窗（新建和编辑共用）。
 // 表单项随策略模式动态显隐：选“拆单”才显示拆单参数、
-// 选“自定义”才显示成交明细、选“拒单”才显示拒单参数。
+// 选“拒单”才显示拒单参数。
 // 点“保存”时先把数值规范化，再把整份配置 emit 给父组件提交。
 import { computed, reactive, watch } from "vue";
-import type { CustomFill, GatewayCategory, PlatformConfig } from "../types";
-import { platformTypesOf, STRATEGY_MODES, defaultRejectReason } from "../types";
+import type { GatewayCategory, PlatformConfig } from "../types";
+import { defaultPartitionNos, platformTypesOf, STRATEGY_MODES, defaultRejectReason } from "../types";
 import { rejectTextOf } from "../errors";
 
 const props = defineProps<{
@@ -59,15 +59,21 @@ const platformTypes = computed(() => platformTypesOf(props.category));
 // 上交所协议（竞价/新债券）Logon 无密码字段，故仅深交所网关显示密码校验选项
 const showPassword = computed(() => props.category === "sz");
 
-/** 自定义成交明细：加一笔（默认 100 股 / 10 元） */
-function addFill() {
-    form.strategy.customFills.push({ qty: 100, price: 10 });
-}
+/** 自定义成交已删除（有手动回复功能替代），无需 addFill/removeFill */
 
-/** 自定义成交明细：删掉第 i 笔 */
-function removeFill(i: number) {
-    form.strategy.customFills.splice(i, 1);
-}
+// ---- 新建平台：平台类型变化时联动平台名称与分区号默认值 ----
+// 名称 = 平台类型的中文名（如选“综合金融服务平台”）；分区号默认值按类型给
+// （现货竞价/上海 → 101,102,103,104，其它 → 166）；只在新建场景联动，
+// 编辑场景用户改类型不覆盖已填内容
+watch(
+    () => form.platformType,
+    (t) => {
+        if (!props.isNew) return;
+        const label = platformTypesOf(props.category).find((p) => p.value === t)?.label;
+        if (label) form.name = label;
+        form.partitionNos = defaultPartitionNos(t, props.category);
+    },
+);
 
 // ---- 拒单参数的默认值联动（按网关分类） ----
 // 选“拒单”时若原因码还是旧默认值 1，自动换成该分类的默认码
@@ -107,11 +113,6 @@ function submit() {
     s.ackDelay.maxMs = Math.max(s.ackDelay.minMs, s.ackDelay.maxMs || 0);
     s.tradeDelay.minMs = Math.max(0, s.tradeDelay.minMs || 0);
     s.tradeDelay.maxMs = Math.max(s.tradeDelay.minMs, s.tradeDelay.maxMs || 0);
-    // 数量或价格填了 0 的明细行直接丢弃；自定义模式下全删光了就补一笔默认的
-    s.customFills = s.customFills.filter((f: CustomFill) => f.qty > 0 && f.price > 0);
-    if (s.mode === "custom" && s.customFills.length === 0) {
-        s.customFills = [{ qty: 100, price: 10 }];
-    }
     emit("save", JSON.parse(JSON.stringify(form)));
 }
 </script>
@@ -153,7 +154,8 @@ function submit() {
                     </div>
                     <div class="field">
                         <label>平台分区号 (PartitionNo)</label>
-                        <input v-model.number="form.partitionNo" type="number" min="0" />
+                        <input v-model="form.partitionNos" placeholder="如 101,102,103,104（逗号分隔）" />
+                        <span class="hint">多个分区号用逗号分隔；回报按证券代码哈希分配（同一证券恒落同一分区）</span>
                     </div>
                     <div class="field" v-if="showPassword">
                         <label class="field-row" style="margin-top: 20px">
@@ -166,23 +168,21 @@ function submit() {
                         <input v-model="form.password" />
                     </div>
 
-                    <!-- 平台功能开关：展示收发报文（勾选即自动持久化）+ 缓存订单。
-                         两个开关并列一行，不再分组，界面更简洁 -->
-                    <div class="field full">
-                        <div class="field-row" style="gap: 24px">
-                            <label class="field-row">
-                                <input v-model="form.showPackets" type="checkbox" />
-                                展示收发报文
-                            </label>
-                            <label class="field-row">
-                                <input v-model="form.cacheOrders" type="checkbox" />
-                                缓存订单
-                            </label>
-                        </div>
-                        <span class="hint">
-                            展示收发报文：点击平台卡片“报文”可实时查看并按字段解析，同时自动持久化到 packets/ 目录;
-                            缓存订单：可查看订单列表，撤单按真实状态回执
-                        </span>
+                    <!-- 平台功能开关：展示收发报文（勾选即自动持久化）+ 缓存订单，
+                         各占一个字段格，说明文字跟在自己的开关下方 -->
+                    <div class="field">
+                        <label class="field-row">
+                            <input v-model="form.showPackets" type="checkbox" />
+                            展示收发报文
+                        </label>
+                        <span class="hint">点击平台卡片“报文”可实时查看并按字段解析，同时自动持久化到 packets/ 目录</span>
+                    </div>
+                    <div class="field">
+                        <label class="field-row">
+                            <input v-model="form.cacheOrders" type="checkbox" />
+                            缓存订单
+                        </label>
+                        <span class="hint">可查看订单列表，撤单按真实状态回执，并支持界面手动回复</span>
                     </div>
 
                     <div class="section-title">模拟回报策略</div>
@@ -213,19 +213,6 @@ function submit() {
                             <label>价格档位（每笔递增/递减，元）</label>
                             <input v-model.number="form.strategy.priceTick" type="number" step="0.001" min="0" />
                             <span class="hint">买单从委托价逐档递减，卖单逐档递增</span>
-                        </div>
-                    </template>
-
-                    <!-- 自定义模式：逐笔列出成交的数量和价格，可增删 -->
-                    <template v-if="form.strategy.mode === 'custom'">
-                        <div class="field full">
-                            <label>自定义成交明细（数量 / 价格）</label>
-                            <div v-for="(f, i) in form.strategy.customFills" :key="i" class="field-row" style="margin-bottom: 6px">
-                                <input v-model.number="f.qty" type="number" min="1" placeholder="数量" />
-                                <input v-model.number="f.price" type="number" step="0.001" min="0" placeholder="价格" />
-                                <button class="btn sm danger-ghost" @click="removeFill(i)">✕</button>
-                            </div>
-                            <button class="btn sm" @click="addFill">+ 添加一笔</button>
                         </div>
                     </template>
 
@@ -263,7 +250,7 @@ function submit() {
                                 <input v-model.number="form.strategy.ackDelay.maxMs" type="number" min="0" />
                             </div>
                         </div>
-                        <div class="field" v-if="form.strategy.mode !== 'ackOnly'">
+                        <div class="field" v-if="form.strategy.mode !== 'ackOnly' && form.strategy.mode !== 'noAutoReply'">
                             <label>成交回报延迟（最小 ~ 最大）</label>
                             <div class="field-row">
                                 <input v-model.number="form.strategy.tradeDelay.minMs" type="number" min="0" />

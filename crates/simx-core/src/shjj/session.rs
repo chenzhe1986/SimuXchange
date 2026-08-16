@@ -254,10 +254,13 @@ pub async fn handle_conn(
                         platform_state::OPEN,
                     ))
                     .await;
+                // 执行报告信息（208）：本 PBU 下的全部分区号（支持多分区配置），
+                // OMS 按它初始化各分区的回报同步
+                let parts: Vec<u32> = ctx.cfg.partitions().iter().map(|&p| p as u32).collect();
                 let _ = tx
                     .send(protocol::encode_exec_rpt_info(
                         ctx.cfg.platform_type,
-                        &[(pbu.as_str(), &[ctx.cfg.partition_no as u32])],
+                        &[(pbu.as_str(), parts.as_slice())],
                     ))
                     .await;
                 logged_on = true;
@@ -489,7 +492,7 @@ async fn handle_new_order(
 
     let plans = {
         let st = ctx.strategy.read().unwrap();
-        strategy::plan_reports(&st, ctx.cfg.partition_no, &order, &ctx.stats, pbu)
+        strategy::plan_reports(&st, ctx.cfg.partition_for(&order.security_id), &order, &ctx.stats, pbu)
     };
     if !synced {
         // 同步未完成：委托暂存缓冲，待同步后补发
@@ -601,7 +604,7 @@ async fn handle_cancel(
     ctx.stats.cancels.fetch_add(1, Ordering::Relaxed);
     // 表 3.2.1 业务特征：决定回报分区号与是否支持撤单
     let biz = strategy::biz_info(req.biz_id);
-    let set_id = if biz.set_id == 0 { ctx.cfg.partition_no as u32 } else { biz.set_id };
+    let set_id = if biz.set_id == 0 { ctx.cfg.partition_for(&req.security_id) as u32 } else { biz.set_id };
     // 表 3.2.1 撤单列不支持撤单的业务：直接回撤单失败
     if !biz.allow_cancel {
         send_cancel_reject(ctx, tx, &req, pbu, set_id, synced, pending).await;
@@ -862,8 +865,29 @@ pub fn build_manual_report(
     qty: Option<f64>,
     price: Option<f64>,
     reason: Option<i32>,
+    front_reject: bool,
 ) -> Result<(Vec<u8>, String, OrderUpdate), String> {
     match kind {
+        ManualReportKind::Ack => {
+            // 确认回报：执行报告(32) ExecType='0'（申报成功），订单保持“已报”
+            // 状态、可继续回复成交/拒单/撤单。订单确认编号尚无则新分配
+            let mut rpt = base_manual_rpt(cfg, stats, entry);
+            if rpt.ord_cnfm_id.is_empty() {
+                rpt.ord_cnfm_id = stats.next_order_id();
+            }
+            let desc = format!(
+                "手动确认回报(32) ClOrdID={} OrdCnfmID={}",
+                entry.cl_ord_id,
+                rpt.ord_cnfm_id.trim_start_matches('0')
+            );
+            let update = OrderUpdate {
+                order_id: rpt.ord_cnfm_id.clone(),
+                cum_qty: entry.cum_qty,
+                leaves_qty: entry.leaves_qty,
+                status: OrderStatus::New,
+            };
+            Ok((rpt.encode(), desc, update))
+        }
         ManualReportKind::Trade => {
             // 表 3.2.1 无成交确认的业务（如转托管/划转）不能手动回复成交：
             // 这类业务只有申报响应，真实柜台不会收到成交回报
@@ -893,7 +917,7 @@ pub fn build_manual_report(
             let last_px = (fill_px * 100000.0).round() as i64;
             let last_qty = fill_shares * 1000;
             // 现货竞价用登录分区号，其余业务用表 3.2.1 固定 SetID
-            let set_id = if biz.set_id == 0 { cfg.partition_no as u32 } else { biz.set_id };
+            let set_id = if biz.set_id == 0 { cfg.partition_for(&entry.security_id) as u32 } else { biz.set_id };
             let trade = TradeRpt {
                 pbu: entry.pbu.clone(),
                 set_id,
@@ -948,48 +972,69 @@ pub fn build_manual_report(
             };
             Ok((trade.encode(), desc, update))
         }
-        // 拒单/撤单成功共用执行报告骨架（32），仅执行类型/状态/原因不同
-        ManualReportKind::Reject | ManualReportKind::Cancel => {
-            let mut rpt = base_manual_rpt(cfg, stats, entry);
-            match kind {
-                ManualReportKind::Reject => {
-                    rpt.exec_type = exec_type::REJECT;
-                    rpt.ord_status = ord_status::REJECTED;
-                    rpt.ord_rej_reason = reason.unwrap_or(1) as u32;
-                    rpt.leaves_qty = 0;
-                    let desc = format!(
-                        "手动拒单回报(32) ClOrdID={} 原因代码={}",
-                        entry.cl_ord_id, rpt.ord_rej_reason
-                    );
-                    let update = OrderUpdate {
-                        order_id: entry.order_id.clone(),
-                        cum_qty: entry.cum_qty,
-                        leaves_qty: 0.0,
-                        status: OrderStatus::Rejected,
-                    };
-                    Ok((rpt.encode(), desc, update))
-                }
-                ManualReportKind::Cancel => {
-                    rpt.exec_type = exec_type::CANCELLED;
-                    rpt.ord_status = ord_status::CANCELLED;
-                    // 手动撤单没有“撤单请求编号”，原单号同时填 ClOrdID/OrigClOrdID
-                    rpt.orig_cl_ord_id = entry.cl_ord_id.clone();
-                    rpt.leaves_qty = 0;
-                    rpt.cxl_qty = (entry.leaves_qty * 1000.0).round() as i64;
-                    // 撤单成功分配新的确认编号，原订单编号回填到 OrigOrdCnfmID
-                    rpt.ord_cnfm_id = stats.next_order_id();
-                    rpt.orig_ord_cnfm_id = entry.order_id.clone();
-                    let desc = format!("手动撤单成功回报(32) ClOrdID={}", entry.cl_ord_id);
-                    let update = OrderUpdate {
-                        order_id: entry.order_id.clone(),
-                        cum_qty: entry.cum_qty,
-                        leaves_qty: 0.0,
-                        status: OrderStatus::Cancelled,
-                    };
-                    Ok((rpt.encode(), desc, update))
-                }
-                ManualReportKind::Trade => unreachable!(),
+        // 拒单：默认回执行报告(32) ExecType='8'；勾选“前台拒单”时改回
+        // 申报拒绝消息(204)，不进执行报告流
+        ManualReportKind::Reject => {
+            if front_reject {
+                let rej = OrderReject {
+                    biz_id: entry.biz_id,
+                    biz_pbu: entry.biz_pbu.clone(),
+                    cl_ord_id: entry.cl_ord_id.clone(),
+                    security_id: entry.security_id.clone(),
+                    ord_rej_reason: reason.unwrap_or(1) as u32,
+                    trade_date: protocol::now_date(),
+                    transact_time: protocol::now_ntime(),
+                    user_info: entry.user_info.clone(),
+                };
+                let desc = format!(
+                    "手动前台拒单(204) ClOrdID={} 原因代码={}",
+                    entry.cl_ord_id, rej.ord_rej_reason
+                );
+                let update = OrderUpdate {
+                    order_id: String::new(), // 申报拒绝未分配订单确认编号
+                    cum_qty: entry.cum_qty,
+                    leaves_qty: 0.0,
+                    status: OrderStatus::Rejected,
+                };
+                Ok((rej.encode(), desc, update))
+            } else {
+                let mut rpt = base_manual_rpt(cfg, stats, entry);
+                rpt.exec_type = exec_type::REJECT;
+                rpt.ord_status = ord_status::REJECTED;
+                rpt.ord_rej_reason = reason.unwrap_or(1) as u32;
+                rpt.leaves_qty = 0;
+                let desc = format!(
+                    "手动拒单回报(32) ClOrdID={} 原因代码={}",
+                    entry.cl_ord_id, rpt.ord_rej_reason
+                );
+                let update = OrderUpdate {
+                    order_id: entry.order_id.clone(),
+                    cum_qty: entry.cum_qty,
+                    leaves_qty: 0.0,
+                    status: OrderStatus::Rejected,
+                };
+                Ok((rpt.encode(), desc, update))
             }
+        }
+        ManualReportKind::Cancel => {
+            let mut rpt = base_manual_rpt(cfg, stats, entry);
+            rpt.exec_type = exec_type::CANCELLED;
+            rpt.ord_status = ord_status::CANCELLED;
+            // 手动撤单没有“撤单请求编号”，原单号同时填 ClOrdID/OrigClOrdID
+            rpt.orig_cl_ord_id = entry.cl_ord_id.clone();
+            rpt.leaves_qty = 0;
+            rpt.cxl_qty = (entry.leaves_qty * 1000.0).round() as i64;
+            // 撤单成功分配新的确认编号，原订单编号回填到 OrigOrdCnfmID
+            rpt.ord_cnfm_id = stats.next_order_id();
+            rpt.orig_ord_cnfm_id = entry.order_id.clone();
+            let desc = format!("手动撤单成功回报(32) ClOrdID={}", entry.cl_ord_id);
+            let update = OrderUpdate {
+                order_id: entry.order_id.clone(),
+                cum_qty: entry.cum_qty,
+                leaves_qty: 0.0,
+                status: OrderStatus::Cancelled,
+            };
+            Ok((rpt.encode(), desc, update))
         }
     }
 }
@@ -1003,7 +1048,7 @@ fn base_manual_rpt(
 ) -> ExecRpt {
     // 现货竞价用登录分区号，其余业务用表 3.2.1 固定 SetID
     let biz = strategy::biz_info(entry.biz_id);
-    let set_id = if biz.set_id == 0 { cfg.partition_no as u32 } else { biz.set_id };
+    let set_id = if biz.set_id == 0 { cfg.partition_for(&entry.security_id) as u32 } else { biz.set_id };
     ExecRpt {
         pbu: entry.pbu.clone(),
         set_id,
@@ -1110,6 +1155,7 @@ mod tests {
             None,
             None,
             Some(1025),
+            false,
         )
         .unwrap();
         // 帧 = 头16 + 消息体213 + 校验和4；MsgType = 32（申报响应/撤单成功执行报告）
@@ -1148,6 +1194,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 32);
@@ -1169,6 +1216,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 103);
@@ -1191,6 +1239,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert!(r.is_err(), "转托管不应允许手动成交");
         assert!(r.unwrap_err().contains("无成交回报"));
@@ -1198,10 +1247,44 @@ mod tests {
         let mut entry2 = sample_entry();
         entry2.biz_id = BIZ_ID_RIGHTS;
         let (frame, desc, _) = build_manual_report(
-            &cfg, &stats, &entry2, ManualReportKind::Trade, None, None, None,
+            &cfg, &stats, &entry2, ManualReportKind::Trade, None, None, None, false,
         )
         .unwrap();
         assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 103);
         assert!(desc.contains("手动成交回报(103)"), "desc={}", desc);
+    }
+
+    /// 手动确认回报：执行报告(32) ExecType='0'（申报成功），订单保持已报
+    #[test]
+    fn manual_ack_frame_is_new() {
+        let cfg = PlatformConfig::default();
+        let stats = PlatformStats::default();
+        let (frame, desc, update) = build_manual_report(
+            &cfg, &stats, &sample_entry(), ManualReportKind::Ack, None, None, None, false,
+        )
+        .unwrap();
+        assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 32);
+        assert_eq!(frame[40], b'0', "ExecType 必须是 '0'（申报成功）");
+        assert!(desc.contains("手动确认回报(32)"), "desc={}", desc);
+        // 确认不改变在途状态，订单仍可继续回复成交/拒单/撤单
+        assert_eq!(update.status, OrderStatus::New);
+        assert_eq!(update.leaves_qty, 100.0);
+    }
+
+    /// 前台拒单（front_reject=true）：改发申报拒绝(204)，不进执行报告流
+    #[test]
+    fn manual_front_reject_sends_order_reject() {
+        let cfg = PlatformConfig::default();
+        let stats = PlatformStats::default();
+        let (frame, desc, update) = build_manual_report(
+            &cfg, &stats, &sample_entry(), ManualReportKind::Reject, None, None, Some(1025), true,
+        )
+        .unwrap();
+        assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()), 204);
+        assert!(desc.contains("手动前台拒单(204)"), "desc={}", desc);
+        assert_eq!(update.status, OrderStatus::Rejected);
+        // 原因代码 1025 落在 OrdRejReason（204 消息体 offset 34..38：BizID4+BizPbu8+ClOrdID10+SecurityID12）
+        let reason = u32::from_be_bytes(frame[16 + 34..16 + 38].try_into().unwrap());
+        assert_eq!(reason, 1025);
     }
 }

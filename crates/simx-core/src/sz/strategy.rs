@@ -331,12 +331,12 @@ pub fn biz_info(mt: u32) -> BizInfo {
     }
 }
 
-/// 按应用标识 ApplID 反查业务特征（撤单成功回报/手动回报按订单缓存的 ApplID 定位业务）。
+/// ApplID → 新订单消息类型（手动业务拒绝回报填 ref_msg_type 用）。
 ///
 /// 表 3-3 中同一消息类型可对应多个 ApplID（第三位表示委托申报代码），
 /// 例如 100501 同时服务 051 定价 / 052 点击成交；这里把同业务的多值合并。
 /// 查不到时返回 None（兜底由调用方决定）。
-pub fn biz_info_by_appl_id(appl_id: &str) -> Option<BizInfo> {
+pub fn order_msg_type_by_appl_id(appl_id: &str) -> Option<u32> {
     let mt = match appl_id {
         "010" => msg_type::NEW_ORDER_CASH,
         "020" => msg_type::NEW_ORDER_BOND_REPO,
@@ -380,7 +380,13 @@ pub fn biz_info_by_appl_id(appl_id: &str) -> Option<BizInfo> {
         "630" => msg_type::NEW_ORDER_HK_CONNECT,
         _ => return None,
     };
-    Some(biz_info(mt))
+    Some(mt)
+}
+
+/// 按应用标识 ApplID 反查业务特征（撤单成功回报/手动回报按订单缓存的 ApplID 定位业务）。
+/// 查不到时返回 None（兜底由调用方决定）。
+pub fn biz_info_by_appl_id(appl_id: &str) -> Option<BizInfo> {
+    order_msg_type_by_appl_id(appl_id).map(biz_info)
 }
 
 /// 应用标识 → 所属业务平台（表 3-1/表 3-3 各平台业务划分）。
@@ -443,6 +449,13 @@ pub fn plan_reports(
 ) -> Vec<PlannedReport> {
     // 业务特征：决定回报报文类型与是否有成交回报
     let biz = biz_info(order.msg_type);
+
+    // ---- 不自动回复（挂单手动回复）：连确认都不自动回 ----
+    // 订单已在会话层登记进缓存，等柜台在订单界面手动回复确认/成交/拒单/撤单
+    if st.mode == StrategyMode::NoAutoReply {
+        return Vec::new();
+    }
+
     let order_id = stats.next_order_id();
     let mut plans = Vec::new();
 
@@ -705,7 +718,6 @@ fn gen_fills(st: &StrategyConfig, order: &NewOrder, biz: &BizInfo) -> Vec<(i64, 
         match st.mode {
             StrategyMode::PartialSingle => StrategyMode::FullSingle,
             StrategyMode::PartialSplit => StrategyMode::FullSplit,
-            StrategyMode::Custom => StrategyMode::FullSingle,
             m => m,
         }
     };
@@ -730,24 +742,9 @@ fn gen_fills(st: &StrategyConfig, order: &NewOrder, biz: &BizInfo) -> Vec<(i64, 
             let qtys = split_shares(part, sample_split_count(st));
             with_ladder_prices(st, order, &qtys)
         }
-        // 自定义：直接用用户在界面上填的逐笔数量/价格（跳过数量为 0 的行）。
-        // 累计成交量钳制到委托量以内：明细总和超过委托量时截断（否则回报里
-        // CumQty 会超 OrderQty，协议非法）；价格下限 0.0001 元（0 价成交无效）
-        StrategyMode::Custom => {
-            let mut remaining = total_shares;
-            let mut out = Vec::new();
-            for f in st.custom_fills.iter().filter(|f| f.qty > 0.0) {
-                if remaining <= 0 {
-                    break;
-                }
-                let shares = (f.qty.round() as i64).clamp(1, remaining);
-                remaining -= shares;
-                out.push((qty_raw(shares), px_raw(f.price.max(0.0001))));
-            }
-            out
-        }
         // 只确认/拒单：没有成交
-        StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
+        // NoAutoReply 在 plan_reports 已早退（不生成任何计划），这里不可达
+        StrategyMode::NoAutoReply | StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
     }
 }
 
@@ -836,7 +833,7 @@ fn with_ladder_prices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CustomFill, DelayConfig, PlatformConfig};
+    use crate::config::{DelayConfig, PlatformConfig};
     use crate::sz::protocol::OrderCommon;
 
     /// 造一笔指定业务/策略的测试委托（数量单位：股；价格单位：元）
@@ -868,10 +865,6 @@ mod tests {
                 split_count_min: 3,
                 split_count_max: 3,
                 price_tick: 0.01,
-                custom_fills: vec![
-                    CustomFill { qty: 300.0, price: 10.01 },
-                    CustomFill { qty: 200.0, price: 10.02 },
-                ],
                 ack_delay: DelayConfig::default(),
                 trade_delay: DelayConfig::default(),
                 ..Default::default()
@@ -1018,53 +1011,22 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_fills() {
+    fn test_no_auto_reply_empty_plans() {
+        // 不自动回复：不生成任何回报计划（订单在会话层已登记缓存，等手动回复）
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
-        let cfg = mk_cfg(StrategyMode::Custom);
+        let cfg = mk_cfg(StrategyMode::NoAutoReply);
         let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
-        assert_eq!(plans.len(), 3); // ack + 2 笔自定义成交
+        assert!(plans.is_empty());
     }
 
     #[test]
-    fn test_custom_fills_clamped_to_order_qty() {
-        // 明细总量（300+200=500）超过委托量（400）时，逐笔钳制到剩余量：
-        // 第二笔 200 被截为 100，累计成交量不超过委托量（协议非法场景防护）
-        let stats = PlatformStats::default();
-        let order = mk_order(msg_type::NEW_ORDER_CASH, 400, 10.0, b'1');
-        let cfg = mk_cfg(StrategyMode::Custom);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
-        assert_eq!(plans.len(), 3); // ack + 2 笔
-        let t1 = ExecRptTrade::decode(
-            msg_type::EXEC_RPT_CASH_TRADE,
-            &plans[1].frame[8..plans[1].frame.len() - 4],
-        )
-        .unwrap();
-        assert_eq!(t1.last_qty, 300 * QTY_UNIT);
-        let t2 = ExecRptTrade::decode(
-            msg_type::EXEC_RPT_CASH_TRADE,
-            &plans[2].frame[8..plans[2].frame.len() - 4],
-        )
-        .unwrap();
-        assert_eq!(t2.last_qty, 100 * QTY_UNIT); // 200 被截为剩余 100
-        assert_eq!(t2.cum_qty, 400 * QTY_UNIT); // 累计不超委托量
-        assert_eq!(t2.ord_status, ord_status::FILLED);
-    }
-
-    #[test]
-    fn test_custom_fills_downgraded_outside_cash() {
-        // 非竞价业务 + Custom：降级为全部成交单笔
-        let stats = PlatformStats::default();
-        let order = mk_order(msg_type::NEW_ORDER_BOND_REPO, 1000, 10.0, b'1');
-        let cfg = mk_cfg(StrategyMode::Custom);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
-        assert_eq!(plans.len(), 2);
-        let trade = ExecRptTrade::decode(
-            msg_type::EXEC_RPT_BOND_REPO_TRADE,
-            &plans[1].frame[8..plans[1].frame.len() - 4],
-        )
-        .unwrap();
-        assert_eq!(trade.last_qty, 1000 * QTY_UNIT);
+    fn test_legacy_custom_mode_loads_as_ack_only() {
+        // 旧配置 mode="custom"（自定义成交，已废弃）必须仍能反序列化，
+        // 并降级为“只回确认”，防止旧 gateways.json 整体加载失败
+        let old: StrategyConfig =
+            serde_json::from_str(r#"{"mode": "custom"}"#).expect("旧 custom 模式必须可解析");
+        assert_eq!(old.mode, StrategyMode::AckOnly);
     }
 
     #[test]

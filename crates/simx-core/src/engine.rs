@@ -526,6 +526,7 @@ impl Engine {
         qty: Option<f64>,
         price: Option<f64>,
         reason: Option<i32>,
+        front_reject: bool,
     ) -> Result<String, String> {
         let running = self.inner.running.lock().await;
         let rg = running.get(gateway_id).ok_or("网关未在运行")?;
@@ -546,15 +547,15 @@ impl Engine {
         // 深市按业务特征返回 Result（无成交回报的业务不允许手动成交）
         let (frame, desc, update) = match rp.category {
             GatewayCategory::Sz => session_sz::build_manual_report(
-                &rp.cfg, &rp.stats, &entry, kind, qty, price, reason,
+                &rp.cfg, &rp.stats, &entry, kind, qty, price, reason, front_reject,
             )
             .map_err(|e| e)?,
             GatewayCategory::Shjj => session_shjj::build_manual_report(
-                &rp.cfg, &rp.stats, &entry, kind, qty, price, reason,
+                &rp.cfg, &rp.stats, &entry, kind, qty, price, reason, front_reject,
             )
             .map_err(|e| e)?,
             GatewayCategory::Shbond => session_shbond::build_manual_report(
-                &rp.cfg, &rp.stats, &entry, kind, qty, price, reason,
+                &rp.cfg, &rp.stats, &entry, kind, qty, price, reason, front_reject,
             )
             .map_err(|e| e)?,
         };
@@ -573,8 +574,9 @@ impl Engine {
         tx.send(frame)
             .await
             .map_err(|_| "当前连接已断开，无法发送回报".to_string())?;
-        // 统计：成交/拒单计入对应计数；撤单成功不占计数（那是撤单请求的计数）
+        // 统计：确认/成交/拒单计入对应计数；撤单成功不占计数（那是撤单请求的计数）
         match kind {
+            ManualReportKind::Ack => rp.stats.acks.fetch_add(1, Ordering::Relaxed),
             ManualReportKind::Trade => rp.stats.trades.fetch_add(1, Ordering::Relaxed),
             ManualReportKind::Reject => rp.stats.order_rejects.fetch_add(1, Ordering::Relaxed),
             ManualReportKind::Cancel => 0,

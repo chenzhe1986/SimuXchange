@@ -35,19 +35,13 @@ export interface DelayConfig {
     maxMs: number;
 }
 
-/** 自定义成交的一笔明细（qty 单位：股；price 单位：元） */
-export interface CustomFill {
-    qty: number;
-    price: number;
-}
-
 /** 七种回报策略（与后端 strategy.rs 的 StrategyMode 对应） */
 export type StrategyMode =
     | "fullSingle"
     | "fullSplit"
     | "partialSingle"
     | "partialSplit"
-    | "custom"
+    | "noAutoReply"
     | "ackOnly"
     | "reject";
 
@@ -62,8 +56,6 @@ export interface StrategyConfig {
     splitCountMax: number;
     /** 价格阶梯档位（元），拆单成交的逐笔价差 */
     priceTick: number;
-    /** 自定义策略的逐笔成交明细 */
-    customFills: CustomFill[];
     rejectVia: RejectVia;
     /** 拒单原因代码（回填到报文的 OrdRejReason 字段） */
     rejectReason: number;
@@ -89,8 +81,11 @@ export interface PlatformConfig {
     /** 是否校验登录密码 */
     checkPassword: boolean;
     password: string;
-    /** 分区号（回填到回报的 PartitionNo 字段） */
+    /** 平台分区号（兼容单分区旧字段；partitionNos 为空时生效） */
     partitionNo: number;
+    /** 分区号列表（逗号分隔，如 "101,102,103,104"）：
+     *  回报按证券代码哈希分配到其中一个分区（同一证券恒落同一分区） */
+    partitionNos: string;
     /** 是否展示该平台各连接的收发报文（勾选即自动持久化到文件） */
     showPackets: boolean;
     /** 是否把收发报文持久化到文件（已与展示合并：随展示开关联动，
@@ -337,7 +332,7 @@ export const STRATEGY_MODES: { value: StrategyMode; label: string }[] = [
     { value: "fullSplit", label: "全部成交（多笔拆单）" },
     { value: "partialSingle", label: "部分成交（单笔）" },
     { value: "partialSplit", label: "部分成交（多笔拆单）" },
-    { value: "custom", label: "自定义成交" },
+    { value: "noAutoReply", label: "不自动回复（挂单手动回复）" },
     { value: "ackOnly", label: "不成交挂单（只回确认）" },
     { value: "reject", label: "拒单" },
 ];
@@ -377,13 +372,20 @@ export function defaultStrategy(category: GatewayCategory = "sz"): StrategyConfi
         splitCountMin: 2,
         splitCountMax: 5,
         priceTick: 0.01,
-        customFills: [{ qty: 100, price: 10 }],
         rejectVia: "executionReport",
         rejectReason: defaultRejectReason(category),
         rejectText: "模拟拒单",
         ackDelay: { minMs: 0, maxMs: 0 },
         tradeDelay: { minMs: 0, maxMs: 0 },
     };
+}
+
+/** 分区号列表默认值：现货竞价（深市平台类型 1）与上海竞价/新债券
+ *  默认 "101,102,103,104"（多分区按证券哈希分配），其它平台类型默认 "166" */
+export function defaultPartitionNos(platformType: number, category: GatewayCategory = "sz"): string {
+    if (category === "shjj" || category === "shbond") return "101,102,103,104";
+    if (category === "sz" && platformType === 1) return "101,102,103,104";
+    return "166";
 }
 
 /** 新建平台的默认配置（id 留空由后端生成；端口由调用方指定）。
@@ -399,7 +401,8 @@ export function defaultPlatform(port: number, category: GatewayCategory = "sz"):
             compId: "SIMX_TGW",
             checkPassword: false,
             password: "",
-            partitionNo: 1,
+            partitionNo: 101,
+            partitionNos: defaultPartitionNos(0, category),
             showPackets: true,
             persistPackets: true,
             cacheOrders: true,
@@ -416,7 +419,8 @@ export function defaultPlatform(port: number, category: GatewayCategory = "sz"):
             compId: "SIMX_TGW",
             checkPassword: false,
             password: "",
-            partitionNo: 801,
+            partitionNo: 101,
+            partitionNos: defaultPartitionNos(2, category),
             showPackets: true,
             persistPackets: true,
             cacheOrders: true,
@@ -432,7 +436,8 @@ export function defaultPlatform(port: number, category: GatewayCategory = "sz"):
         compId: "SIMX_TGW",
         checkPassword: false,
         password: "",
-        partitionNo: 1,
+        partitionNo: 101,
+        partitionNos: defaultPartitionNos(1, category),
         showPackets: true,
         persistPackets: true,
         cacheOrders: true,

@@ -390,15 +390,6 @@ pub fn encode_exec_rpt_info(platform_id: u16, pbu_set_ids: &[(&str, &[u32])]) ->
     frame(msg_type::EXEC_RPT_INFO, &w.into_inner())
 }
 
-/// 分区执行报告结束消息（MsgType=210）
-pub fn encode_exec_rpt_eos(pbu: &str, set_id: u32, end_report_index: u64) -> Vec<u8> {
-    let mut w = BodyWriter::new();
-    w.str(pbu, 8);
-    w.u32(set_id);
-    w.u64(end_report_index);
-    frame(msg_type::EXEC_RPT_EOS, &w.into_inner())
-}
-
 /// 分区序号同步请求（MsgType=206）中的一个分区项
 #[derive(Debug, Clone, Default)]
 pub struct SyncGroup {

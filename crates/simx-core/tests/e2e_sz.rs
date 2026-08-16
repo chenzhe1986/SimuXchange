@@ -355,10 +355,11 @@ async fn test_platform_mismatch_business_reject() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 测试五：回报同步（5.2）——登录后发送回报同步请求，引擎无历史回报，
-/// 应逐分区回“回报结束消息”（5.4，MsgType=7）告知该分区回报已发送完毕。
+/// 测试五：回报同步（5.2）——登录后发送回报同步请求，模拟器无历史回报，
+/// 且按规范“分区执行报告结束消息”不需要发送，因此收到同步请求后
+/// 不应回任何业务报文（读应超时，只有会话心跳级别的帧会被跳过）。
 #[tokio::test]
-async fn test_report_sync_returns_report_finished() {
+async fn test_report_sync_returns_no_report_finished() {
     let dir = std::env::temp_dir().join(format!("simx_test_sync_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let engine = Engine::new(dir.clone());
@@ -383,15 +384,12 @@ async fn test_report_sync_returns_report_finished() {
         .await
         .unwrap();
 
-    // 期待收到回报结束消息（MsgType=7）
-    let (mt, body) = read_frame(&mut stream).await;
-    assert_eq!(mt, msg_type::REPORT_FINISHED, "回报同步后应回回报结束消息");
-    let partition_no = i32::from_be_bytes(body[0..4].try_into().unwrap());
-    let report_index = i64::from_be_bytes(body[4..12].try_into().unwrap());
-    let platform_id = u16::from_be_bytes(body[12..14].try_into().unwrap());
-    assert_eq!(partition_no, 1);
-    assert_eq!(report_index, 1);
-    assert_eq!(platform_id, 1, "PlatformID 应为本平台号");
+    // 不应收到回报结束消息（MsgType=7）：短暂等待后读应超时
+    let early = tokio::time::timeout(Duration::from_millis(400), read_frame(&mut stream)).await;
+    assert!(
+        early.is_err(),
+        "回报同步请求不应触发任何响应（模拟器不回回报结束消息）"
+    );
 
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);

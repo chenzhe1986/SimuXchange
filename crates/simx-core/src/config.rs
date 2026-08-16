@@ -143,8 +143,13 @@ pub struct PlatformConfig {
     pub check_password: bool,
     /// 登录密码（check_password 为 true 时生效）
     pub password: String,
-    /// 平台分区号（深：回报中的 PartitionNo；沪：分区号 SetID）
+    /// 平台分区号（深：回报中的 PartitionNo；沪：分区号 SetID）。
+    /// 单分区兼容字段：partition_nos 为空/无效时的回退值，也供旧配置加载
     pub partition_no: i32,
+    /// 分区号列表（逗号分隔，如 "101,102,103,104"）：
+    /// 回报按证券代码哈希分配到其中一个分区（同一证券恒落同一分区）；
+    /// 为空时按单分区 partition_no 处理
+    pub partition_nos: String,
     /// 是否在界面上展示该平台各连接的收发报文（打开后连接可点击弹窗查看）
     pub show_packets: bool,
     /// 是否把收发报文持久化到文件（内容与界面展示一致，弹窗可回看全部历史）
@@ -168,11 +173,43 @@ impl Default for PlatformConfig {
             check_password: false,
             password: String::new(),
             partition_no: 1,
+            partition_nos: String::new(),
             show_packets: true,
             persist_packets: true,
             cache_orders: true,
             strategy: StrategyConfig::default(),
         }
+    }
+}
+
+impl PlatformConfig {
+    /// 解析分区号列表（支持逗号/顿号/空格分隔；容错：空或全部无效时
+    /// 回退到单分区 partition_no——旧配置没有 partition_nos 字段也能正常工作）。
+    /// 返回去重后的有序列表。
+    pub fn partitions(&self) -> Vec<i32> {
+        let mut list: Vec<i32> = self
+            .partition_nos
+            .split(|c| c == ',' || c == '，' || c == '、' || c == ' ' || c == ';' || c == '；')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        list.sort_unstable();
+        list.dedup();
+        if list.is_empty() {
+            vec![self.partition_no]
+        } else {
+            list
+        }
+    }
+
+    /// 按证券代码哈希分配分区号：同一证券恒落同一分区（保证该证券的
+    /// 确认/成交/撤单回报都在同一分区，柜台按分区校验序号才成立）。
+    /// 哈希用简单的字节加权和（djb2 变体），确定性、无状态。
+    pub fn partition_for(&self, security_id: &str) -> i32 {
+        let parts = self.partitions();
+        let h = security_id
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        parts[(h as usize) % parts.len()]
     }
 }
 
@@ -201,9 +238,12 @@ pub enum StrategyMode {
     PartialSingle,
     /// 部分成交（多笔拆单）
     PartialSplit,
-    /// 自定义成交：按 custom_fills 逐条回报指定数量/价格
-    Custom,
-    /// 不成交挂单：只回确认，永不成交
+    /// 不自动回复（挂单手动回复）：收到委托只登记订单缓存，不自动回任何回报，
+    /// 由用户在订单界面手动回复确认/成交/拒单/撤单
+    NoAutoReply,
+    /// 不成交挂单：只回确认，永不成交。
+    /// 旧配置里的 custom（自定义成交，已废弃）按此模式加载，保证旧配置不失效
+    #[serde(alias = "custom")]
     AckOnly,
     /// 拒单：回拒绝回报（方式见 RejectVia）
     Reject,
@@ -252,23 +292,6 @@ impl DelayConfig {
     }
 }
 
-/// 自定义成交明细（Custom 模式下每一笔成交的数量与价格，
-/// 这里用“股/元”自然单位，发送时才换算成协议的放大整数）
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CustomFill {
-    /// 成交数量（股）
-    pub qty: f64,
-    /// 成交价格（元）
-    pub price: f64,
-}
-
-impl Default for CustomFill {
-    fn default() -> Self {
-        Self { qty: 100.0, price: 10.0 }
-    }
-}
-
 /// 模拟回报策略配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -280,8 +303,6 @@ pub struct StrategyConfig {
     pub split_count_max: u32,
     /// 价格档位（元），拆单时按档位递增/递减
     pub price_tick: f64,
-    /// 自定义成交明细（Custom 模式）
-    pub custom_fills: Vec<CustomFill>,
     /// 拒单回报方式
     pub reject_via: RejectVia,
     /// 拒单原因代码
@@ -301,7 +322,6 @@ impl Default for StrategyConfig {
             split_count_min: 2,
             split_count_max: 5,
             price_tick: 0.01,
-            custom_fills: vec![CustomFill::default()],
             reject_via: RejectVia::ExecutionReport,
             reject_reason: 1,
             reject_text: "模拟拒单".into(),
@@ -355,5 +375,36 @@ mod tests {
         assert_eq!(back.backends[1].name, "测试机房");
         assert_eq!(back.backends[1].url, "ws://192.168.1.10:9800/ws");
         assert_eq!(back.update_url, "http://192.168.1.10/update");
+    }
+
+    /// 多分区号解析与按证券哈希分配：同一证券恒落同一分区；
+    /// 空/无效配置回退单分区 partition_no
+    #[test]
+    fn partitions_parse_and_hash_assign() {
+        let cfg = PlatformConfig {
+            partition_nos: "101, 102，103、104;105".into(),
+            partition_no: 1,
+            ..Default::default()
+        };
+        // 支持逗号/中文逗号/顿号/空格/分号分隔，自动去重排序
+        assert_eq!(cfg.partitions(), vec![101, 102, 103, 104, 105]);
+        // 同一证券恒同分区；不同证券可能不同分区
+        assert_eq!(cfg.partition_for("000001"), cfg.partition_for("000001"));
+        let p1 = cfg.partition_for("000001");
+        let p2 = cfg.partition_for("000002");
+        assert!(cfg.partitions().contains(&p1) && cfg.partitions().contains(&p2));
+
+        // 无 partition_nos：回退单分区 partition_no
+        let single = PlatformConfig::default();
+        assert_eq!(single.partitions(), vec![1]);
+        assert_eq!(single.partition_for("000001"), 1);
+
+        // 全无效的 partition_nos 也回退
+        let bad = PlatformConfig {
+            partition_nos: "abc,,".into(),
+            partition_no: 7,
+            ..Default::default()
+        };
+        assert_eq!(bad.partitions(), vec![7]);
     }
 }

@@ -18,14 +18,14 @@
 //! - **有无成交确认**：仅 100010 / 300020 / 300021 有成交回报，
 //!   其余业务只回申报响应，成交类策略自动失效
 //! - **是否支持部分成交**：仅现货竞价支持；其余业务把
-//!   PartialSingle/PartialSplit/Custom 等部分成交策略降级为全部成交
+//!   PartialSingle/PartialSplit 等部分成交策略降级为全部成交
 //!
 //! 七种策略与对应剧本：
 //! - FullSingle  全部成交（单笔）：1 确认 + 1 成交
 //! - FullSplit   全部成交（拆单）：1 确认 + N 成交（数量随机拆、价格阶梯）
 //! - PartialSingle 部分成交（单笔）：1 确认 + 1 成交（数量小于委托量）
 //! - PartialSplit  部分成交（拆单）：1 确认 + N 成交（总量小于委托量）
-//! - Custom      自定义：1 确认 + 用户逐笔指定的成交（数量/价格）
+//! - NoAutoReply 不自动回复：订单登记缓存，等界面手动回复
 //! - AckOnly     只确认不成交：1 确认（挂单状态）
 //! - Reject      拒单：1 条拒绝（执行报告 32 ExecType=8 或申报拒绝 204）
 
@@ -245,6 +245,13 @@ pub fn plan_reports(
     let ord_cnfm_id = stats.next_order_id();
     let mut plans = Vec::new();
 
+    // ---- 不自动回复（挂单手动回复）：连确认都不自动回 ----
+    // 订单已在会话层登记进缓存，等柜台在订单界面手动回复确认/成交/拒单/撤单
+    if st.mode == StrategyMode::NoAutoReply {
+        return Vec::new();
+    }
+
+
     // ---- 拒单策略：只回一条拒绝，没有确认也没有成交 ----
     if st.mode == StrategyMode::Reject {
         match st.reject_via {
@@ -450,18 +457,16 @@ fn base_ack(
 /// 这里只决定“成交几笔、每笔多少股、什么价”，不管报文细节。
 ///
 /// 差异点：除现货竞价（100010）外的业务不支持部分成交，把
-/// PartialSingle/PartialSplit/Custom 降级为对应的全部成交策略。
+/// PartialSingle/PartialSplit 降级为对应的全部成交策略。
 fn gen_fills(st: &StrategyConfig, order: &NewOrder, biz: &BizInfo) -> Vec<(i64, i64)> {
     let total_shares = order.order_qty / QTY_UNIT; // 委托股数
     // 非现货业务的部分成交降级：PartialSingle→FullSingle、PartialSplit→FullSplit、
-    // Custom→FullSingle（自定义明细可能出现“未成交完”的部分成交语义）
     let mode = if biz.allow_partial {
         st.mode
     } else {
         match st.mode {
             StrategyMode::PartialSingle => StrategyMode::FullSingle,
             StrategyMode::PartialSplit => StrategyMode::FullSplit,
-            StrategyMode::Custom => StrategyMode::FullSingle,
             m => m,
         }
     };
@@ -486,24 +491,9 @@ fn gen_fills(st: &StrategyConfig, order: &NewOrder, biz: &BizInfo) -> Vec<(i64, 
             let qtys = split_shares(part, sample_split_count(st));
             with_ladder_prices(st, order, &qtys)
         }
-        // 自定义：直接用用户在界面上填的逐笔数量/价格（跳过数量为 0 的行）。
-        // 累计成交量钳制到委托量以内：明细总和超过委托量时截断（否则回报里
-        // CumQty 会超 OrderQty，协议非法）；价格下限 0.0001 元（0 价成交无效）
-        StrategyMode::Custom => {
-            let mut remaining = total_shares;
-            let mut out = Vec::new();
-            for f in st.custom_fills.iter().filter(|f| f.qty > 0.0) {
-                if remaining <= 0 {
-                    break;
-                }
-                let shares = (f.qty.round() as i64).clamp(1, remaining);
-                remaining -= shares;
-                out.push((qty_raw(shares), px_raw(f.price.max(0.0001))));
-            }
-            out
-        }
         // 只确认/拒单：没有成交
-        StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
+        // NoAutoReply 在 plan_reports 已早退（不生成任何计划），这里不可达
+        StrategyMode::NoAutoReply | StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
     }
 }
 
@@ -592,7 +582,7 @@ fn with_ladder_prices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CustomFill, DelayConfig, PlatformConfig};
+    use crate::config::{DelayConfig, PlatformConfig};
     use super::protocol::BIZ_ID_CASH_AUCTION;
 
     /// 造一笔测试委托（数量单位：股；价格单位：元）
@@ -619,10 +609,6 @@ mod tests {
                 split_count_min: 3,
                 split_count_max: 3,
                 price_tick: 0.01,
-                custom_fills: vec![
-                    CustomFill { qty: 300.0, price: 10.01 },
-                    CustomFill { qty: 200.0, price: 10.02 },
-                ],
                 ack_delay: DelayConfig::default(),
                 trade_delay: DelayConfig::default(),
                 ..Default::default()
@@ -697,15 +683,6 @@ mod tests {
         let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1");
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, ReportKind::Ack);
-    }
-
-    #[test]
-    fn test_custom_fills() {
-        let stats = PlatformStats::default();
-        let order = mk_order(1000, 10.0, b'1');
-        let cfg = mk_cfg(StrategyMode::Custom);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1");
-        assert_eq!(plans.len(), 3); // ack + 2 笔自定义成交
     }
 
     #[test]
