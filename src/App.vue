@@ -228,11 +228,23 @@ function inputCtxMenu(e: MouseEvent, el: HTMLInputElement | HTMLTextAreaElement)
     ]);
 }
 
-/** 全局按键：按 Esc 关闭右键菜单 */
+/** 全局按键：按 Esc 关闭右键菜单、主题选择与所有弹窗
+ * （平台编辑/订单/报文/新建网关/删除确认/后端设置/赞赏/关于/更新提示）。
+ * 同一时刻一般只有一个弹窗打开，全部置 false 简化处理；
+ * 子组件弹窗（平台编辑/订单/报文）的显隐由本组件状态控制，一并关闭 */
 function onGlobalKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
         closeCtxMenu();
         showThemePicker.value = false;
+        if (gwEditor.show) gwEditor.show = false;
+        if (pfEditor.show) pfEditor.show = false;
+        if (pvViewer.show) pvViewer.show = false;
+        if (ovViewer.show) ovViewer.show = false;
+        if (backendSettings.show) backendSettings.show = false;
+        if (confirmBox.show) confirmBox.show = false;
+        if (updateBox.show) updateBox.show = false;
+        showReward.value = false;
+        showAbout.value = false;
     }
 }
 
@@ -1073,6 +1085,7 @@ onBeforeUnmount(() => {
             :platform="pfEditor.platform"
             :category="selectedGw?.config.category ?? 'sz'"
             :is-new="pfEditor.isNew"
+            :gateway-running="selectedGw?.running ?? false"
             @save="savePlatform"
             @close="pfEditor.show = false"
         />
@@ -1186,7 +1199,7 @@ onBeforeUnmount(() => {
                     <button class="modal-close" @click="showReward = false">✕</button>
                 </div>
                 <div class="modal-body reward-body">
-                    <p class="reward-text">如果这个项目对你有帮助，欢迎请作者喝杯咖啡 ☕</p>
+                    <p class="reward-text">如果这个项目对你有帮助，欢迎请作者喝杯奶茶 ☕</p>
                     <img :src="rewardQr" class="reward-qr" alt="支付宝赞赏二维码" />
                     <p class="reward-tip">支付宝扫码赞赏</p>
                     <p class="reward-contact">

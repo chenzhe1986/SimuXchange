@@ -806,3 +806,236 @@ async fn test_quote_platform2_accept_and_reject() {
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 测试十（撤单自动回报模式）：配置“回撤单拒单 + 前台拒单 + 原因码 1234”，
+/// 无论原单是否在途都回业务拒绝(4)（不进执行报告流），
+/// 原因码 = 配置值、RefMsgType/RefID 指向撤单请求（表 5-2）。
+#[tokio::test]
+async fn test_cancel_always_reject_front_reject() {
+    let dir = std::env::temp_dir().join(format!("simx_test_cxl_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18111,
+            1,
+            StrategyConfig {
+                mode: StrategyMode::AckOnly, // 只回确认，避免成交回报干扰撤单断言
+                cancel_mode: simx_core::config::CancelMode::AlwaysReject,
+                cancel_reject_reason: 1234,
+                cancel_front_reject: true,
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+    let mut stream = connect_and_logon(18111).await;
+
+    // 报一笔单（在途），收确认回报
+    stream
+        .write_all(&new_order_frame("CXLREJ001", 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+
+    // 撤单请求（190007）：原单明明在途，回撤单拒单模式下也一律拒单
+    let mut w = BodyWriter::new();
+    w.str("010", 3); // ApplID
+    w.str("100001", 6); // SubmittingPBUID
+    w.str("000001", 8); // SecurityID
+    w.str("102", 4); // SecurityIDSource
+    w.u16(1); // OwnerType
+    w.str("01", 2); // ClearingFirm
+    w.i64(protocol::now_timestamp()); // TransactTime
+    w.str("", 8); // UserInfo
+    w.str("CXL000001", 10); // ClOrdID（本笔撤单请求）
+    w.str("CXLREJ001", 10); // OrigClOrdID（原始订单）
+    w.ch(b'1'); // Side
+    w.str("", 16); // OrderID
+    w.i64(500_00); // OrderQty
+    stream
+        .write_all(&protocol::frame(msg_type::ORDER_CANCEL_REQUEST, &w.into_inner()))
+        .await
+        .unwrap();
+
+    // 期望业务拒绝(4)：RefMsgType=190007、RefID=撤单 ClOrdID、原因码=1234
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::BUSINESS_REJECT, "回撤单拒单+前台拒单应回业务拒绝(4)");
+    let ref_msg_type = u32::from_be_bytes(body[37..41].try_into().unwrap());
+    assert_eq!(ref_msg_type, msg_type::ORDER_CANCEL_REQUEST, "RefMsgType 应为撤单请求");
+    assert_eq!(&body[41..51], b"CXL000001 ", "业务拒绝 RefID 应为撤单 ClOrdID（表 5-2）");
+    let reason = u16::from_be_bytes(body[51..53].try_into().unwrap());
+    assert_eq!(reason, 1234, "业务拒绝原因码应为配置值");
+
+    // 统计：撤单请求计数 +1、业务拒绝计数 +1
+    let snap = engine.snapshot().await;
+    let p = &snap.gateways[0].platforms[0];
+    assert_eq!(p.stats.cancels, 1);
+    assert_eq!(p.stats.business_rejects, 1);
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试十一（撤单回报延迟热更新）：配置撤单延迟 300ms 后撤单，撤单成功回报
+/// 延迟到达；热更新撤单延迟为 0 后再次撤单，回报立即返回——验证撤单回报延迟
+/// 走运行时共享区读取，与报单策略/回报延迟一样支持网关运行中热更新。
+#[tokio::test]
+async fn test_cancel_delay_hot_reload() {
+    let dir = std::env::temp_dir().join(format!("simx_test_cxldelay_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18112,
+            1,
+            StrategyConfig {
+                mode: StrategyMode::AckOnly, // 只回确认，避免成交回报干扰撤单断言
+                cancel_delay: simx_core::config::DelayConfig { min_ms: 300, max_ms: 300 },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+    let mut stream = connect_and_logon(18112).await;
+
+    // 撤单请求（190007）构造：原单在途 → 默认模式回撤单成功(200102 ExecType=4)
+    let cancel_req = |cl: &str, orig: &str| {
+        let mut w = BodyWriter::new();
+        w.str("010", 3); // ApplID
+        w.str("100001", 6); // SubmittingPBUID
+        w.str("000001", 8); // SecurityID
+        w.str("102", 4); // SecurityIDSource
+        w.u16(1); // OwnerType
+        w.str("01", 2); // ClearingFirm
+        w.i64(protocol::now_timestamp()); // TransactTime
+        w.str("", 8); // UserInfo
+        w.str(cl, 10); // ClOrdID（本笔撤单请求）
+        w.str(orig, 10); // OrigClOrdID（原始订单）
+        w.ch(b'1'); // Side
+        w.str("", 16); // OrderID
+        w.i64(500_00); // OrderQty
+        protocol::frame(msg_type::ORDER_CANCEL_REQUEST, &w.into_inner())
+    };
+
+    // 报单（在途），收确认
+    stream
+        .write_all(&new_order_frame("CXLD001", 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+
+    // 撤单：撤单成功回报应延迟 ≥300ms
+    let t0 = std::time::Instant::now();
+    stream.write_all(&cancel_req("CXLC001", "CXLD001")).await.unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    let elapsed = t0.elapsed().as_millis();
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK, "撤单成功应回执行报告");
+    assert!(
+        elapsed >= 280,
+        "撤单回报应延迟 >=300ms，实际 {}ms",
+        elapsed
+    );
+
+    // 热更新：撤单延迟改为 0
+    let pid = engine.snapshot().await.gateways[0].config.platforms[0].id.clone();
+    let mut st = engine.snapshot().await.gateways[0].config.platforms[0].strategy.clone();
+    st.cancel_delay = simx_core::config::DelayConfig::default();
+    engine.update_strategy(&gw.id, &pid, st).await.unwrap();
+
+    // 再报单（在途），收确认
+    stream
+        .write_all(&new_order_frame("CXLD002", 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+
+    // 再撤单：撤单成功回报应立即返回（< 200ms）
+    let t1 = std::time::Instant::now();
+    stream.write_all(&cancel_req("CXLC002", "CXLD002")).await.unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    let elapsed2 = t1.elapsed().as_millis();
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+    assert!(
+        elapsed2 < 200,
+        "热更新后撤单回报应立即返回，实际 {}ms",
+        elapsed2
+    );
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 测试十二（撤单自动回报模式：全部撤单成功）：无论原单在途/终态/不存在，
+/// 一律回撤单成功（200102 ExecType=4）；不存在订单也成功（与默认模式不同）。
+#[tokio::test]
+async fn test_cancel_always_success() {
+    let dir = std::env::temp_dir().join(format!("simx_test_cxlsucc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18113,
+            1,
+            StrategyConfig {
+                mode: StrategyMode::AckOnly, // 只回确认，避免成交回报干扰撤单断言
+                cancel_mode: simx_core::config::CancelMode::AlwaysSuccess,
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+    let mut stream = connect_and_logon(18113).await;
+
+    // 撤单请求（190007）构造
+    let cancel_req = |cl: &str, orig: &str| {
+        let mut w = BodyWriter::new();
+        w.str("010", 3); // ApplID
+        w.str("100001", 6); // SubmittingPBUID
+        w.str("000001", 8); // SecurityID
+        w.str("102", 4); // SecurityIDSource
+        w.u16(1); // OwnerType
+        w.str("01", 2); // ClearingFirm
+        w.i64(protocol::now_timestamp()); // TransactTime
+        w.str("", 8); // UserInfo
+        w.str(cl, 10); // ClOrdID（本笔撤单请求）
+        w.str(orig, 10); // OrigClOrdID（原始订单）
+        w.ch(b'1'); // Side
+        w.str("", 16); // OrderID
+        w.i64(500_00); // OrderQty
+        protocol::frame(msg_type::ORDER_CANCEL_REQUEST, &w.into_inner())
+    };
+
+    // 1) 报单（在途），收确认 → 撤单成功
+    stream
+        .write_all(&new_order_frame("CXLS001", 500_00, 12_3400, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+    stream.write_all(&cancel_req("CXLC001", "CXLS001")).await.unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK, "在途订单撤单应成功");
+    assert_eq!(body[111], b'4', "ExecType 应为 '4'（已撤）");
+
+    // 2) 已撤（终态）订单再撤 → 仍成功（全部撤单成功模式）
+    stream.write_all(&cancel_req("CXLC002", "CXLS001")).await.unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK, "终态订单撤单也应成功");
+    assert_eq!(body[111], b'4', "ExecType 应为 '4'（已撤）");
+
+    // 3) 不存在的订单撤单 → 仍成功（与默认模式回拒单不同）
+    stream.write_all(&cancel_req("CXLC003", "NO_SUCH000")).await.unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK, "不存在订单撤单也应成功");
+    assert_eq!(body[111], b'4', "ExecType 应为 '4'（已撤）");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

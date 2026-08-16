@@ -15,7 +15,7 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
     {
         version: "1.0.0",
-        notes: ["初始版本，支持深圳竞价、上海竞价、上海新债券平台"],
+        notes: ["支持深交所Binary协议文档V1.32版，上海竞价文档V0.54版，上海新债券文档V1.93版"],
     },
 ];
 

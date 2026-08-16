@@ -146,7 +146,7 @@ pub struct PlatformConfig {
     /// 平台分区号（深：回报中的 PartitionNo；沪：分区号 SetID）。
     /// 单分区兼容字段：partition_nos 为空/无效时的回退值，也供旧配置加载
     pub partition_no: i32,
-    /// 分区号列表（逗号分隔，如 "101,102,103,104"）：
+    /// 分区号列表（逗号分隔，如 "115,116,117,118"）：
     /// 回报按证券代码哈希分配到其中一个分区（同一证券恒落同一分区）；
     /// 为空时按单分区 partition_no 处理
     pub partition_nos: String,
@@ -226,7 +226,7 @@ pub fn platform_type_name(t: u16) -> &'static str {
     }
 }
 
-/// 模拟回报策略模式（本软件的核心：收到委托后按哪种套路回报）
+/// 报单自动回报模式（本软件的核心：收到委托后按哪种套路回报）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StrategyMode {
@@ -257,6 +257,19 @@ pub enum RejectVia {
     ExecutionReport,
     /// 业务拒绝消息 MsgType=4
     BusinessReject,
+}
+
+/// 撤单自动回报模式（收到柜台撤单请求后怎么回）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CancelMode {
+    /// 默认：原单在途（已报/部分成交）→ 撤单成功；找不到原单或原单已是终态 → 撤单拒单
+    #[default]
+    Default,
+    /// 全部撤单成功：无论原单状态（在途/终态/找不到）一律回撤单成功
+    AlwaysSuccess,
+    /// 全部撤单拒绝：无论原单状态一律回撤单拒单
+    AlwaysReject,
 }
 
 /// 延迟配置（毫秒）。三种情况：
@@ -313,6 +326,14 @@ pub struct StrategyConfig {
     pub ack_delay: DelayConfig,
     /// 成交回报延迟（多笔成交时为相邻两笔间隔）
     pub trade_delay: DelayConfig,
+    /// 撤单自动回报模式（默认按原单状态撤单成功/拒单；也可配置一律拒单）
+    pub cancel_mode: CancelMode,
+    /// 撤单拒单原因代码（回填到撤单拒单/业务拒绝消息）
+    pub cancel_reject_reason: u16,
+    /// 前台拒单：撤单拒单时改发业务拒绝消息（深市 MsgType=4 / 沪市 204）
+    pub cancel_front_reject: bool,
+    /// 撤单回报延迟（撤单成功与撤单拒单回报均适用）
+    pub cancel_delay: DelayConfig,
 }
 
 impl Default for StrategyConfig {
@@ -327,6 +348,10 @@ impl Default for StrategyConfig {
             reject_text: "模拟拒单".into(),
             ack_delay: DelayConfig::default(),
             trade_delay: DelayConfig::default(),
+            cancel_mode: CancelMode::Default,
+            cancel_reject_reason: 1,
+            cancel_front_reject: false,
+            cancel_delay: DelayConfig::default(),
         }
     }
 }

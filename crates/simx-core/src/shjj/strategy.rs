@@ -2,7 +2,7 @@
 //!
 //! # 职责
 //!
-//! 与 sz/strategy.rs 同构：输入一笔委托 + 平台策略配置，输出一串
+//! 与 sz/strategy.rs 同构：输入一笔委托 + 平台“报单自动回报模式”配置，输出一串
 //! PlannedReport（每条含发送前等待时长与报文内容），由 shjj::session
 //! 按计划发送。区别仅在报文格式与数量/价格放大倍数：
 //! - 确认/拒单/撤成用 ExecutionReport（MsgType=32）
@@ -262,7 +262,10 @@ pub fn plan_reports(
                 rpt.ord_status = ord_status::REJECTED;
                 rpt.ord_rej_reason = st.reject_reason as u32;
                 rpt.leaves_qty = 0;
-                rpt.cxl_qty = order.order_qty;
+                // 拒单不是撤单：CxlQty（撤单数量）必须为 0，
+                // TimeInForce 也不回填委托值（拒单回报不涉及成交时效）
+                rpt.cxl_qty = 0;
+                rpt.time_in_force = 0;
                 plans.push(PlannedReport {
                     delay_ms: st.ack_delay.sample(),
                     kind: ReportKind::Reject,

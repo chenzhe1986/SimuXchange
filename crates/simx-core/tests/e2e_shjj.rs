@@ -411,3 +411,78 @@ async fn test_shjj_sync_resends_history_by_begin() {
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 测试六（撤单自动回报模式）：配置“回撤单拒单 + 原因码 999”，
+/// 无论原单是否在途都回撤单失败(59)，原因码 = 配置值；
+/// 热更新切“前台拒单”后再撤单，改回申报拒绝(204)，原因码不变。
+#[tokio::test]
+async fn test_shjj_cancel_modes_and_front_reject() {
+    let dir = std::env::temp_dir().join(format!("simx_shjj_cxlm_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18206,
+            StrategyConfig {
+                mode: StrategyMode::AckOnly, // 只回确认，避免成交回报干扰撤单断言
+                cancel_mode: simx_core::config::CancelMode::AlwaysReject,
+                cancel_reject_reason: 999,
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+    engine.start_gateway(&gw.id).await.unwrap();
+    let mut stream = connect_logon_sync(18206).await;
+
+    // 报一笔单（在途），收确认
+    stream
+        .write_all(&new_order_frame("CXL000003", 100_000, 10_00000, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT);
+
+    // 撤单请求（61）：原单在途也一律回撤单失败(59)，原因码=999
+    let cancel_frame = |cl_ord_id: &str| {
+        let mut w = BodyWriter::new();
+        w.u32(BIZ_ID_CASH_AUCTION);
+        w.str("PBU00001", 8);
+        w.str(cl_ord_id, 10); // 本笔撤单编号
+        w.str("600000", 12);
+        w.str("B880000001", 13);
+        w.u8(1);
+        w.ch(b'1');
+        w.str("CXL000003", 10); // 原订单编号
+        w.u64(protocol::now_ntime());
+        w.str("BR01", 8);
+        w.str("", 32);
+        protocol::frame(msg_type::CANCEL_ORDER, &w.into_inner())
+    };
+    stream.write_all(&cancel_frame("CXL000011")).await.unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::CANCEL_REJECT, "回撤单拒单模式应回撤单失败(59)");
+    // CancelReject 体：Pbu8 + SetID4 + RepIdx8 + BizID4 + BizPbu8 + ClOrdID10
+    // + SecurityID12 + OrigClOrdID10 + BranchID8 = 72，CxlRejReason 在 72..76
+    let reason = u32::from_be_bytes(body[72..76].try_into().unwrap());
+    assert_eq!(reason, 999, "撤单失败原因码应为配置值");
+
+    // 热更新：切“前台拒单”（原因码不变）→ 再撤单应回申报拒绝(204)
+    let mut st = engine.snapshot().await.gateways[0].config.platforms[0]
+        .strategy
+        .clone();
+    st.cancel_front_reject = true;
+    engine
+        .update_strategy(&gw.id, &engine.snapshot().await.gateways[0].config.platforms[0].id, st)
+        .await
+        .unwrap();
+    stream.write_all(&cancel_frame("CXL000012")).await.unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::ORDER_REJECT, "前台拒单后应回申报拒绝(204)");
+    // OrderReject 体：BizID4 + BizPbu8 + ClOrdID10 + SecurityID12 → OrdRejReason 偏移 34..38
+    let reason = u32::from_be_bytes(body[34..38].try_into().unwrap());
+    assert_eq!(reason, 999, "申报拒绝原因码应沿用撤单拒单原因码");
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -2,10 +2,13 @@
 // PlatformEditor.vue —— 平台配置的编辑弹窗（新建和编辑共用）。
 // 表单项随策略模式动态显隐：选“拆单”才显示拆单参数、
 // 选“拒单”才显示拒单参数。
+// 网关运行中编辑时：基础信息（名称/类型/地址/端口/CompID/分区号）与
+// 功能开关（展示收发报文/缓存订单）置灰不可改、不显示登录校验密码区，
+// 仅“报单自动回报模式 / 撤单自动回报模式 / 回报延迟”可改（后端热更新实时生效）。
 // 点“保存”时先把数值规范化，再把整份配置 emit 给父组件提交。
 import { computed, reactive, watch } from "vue";
 import type { GatewayCategory, PlatformConfig } from "../types";
-import { defaultPartitionNos, platformTypesOf, STRATEGY_MODES, defaultRejectReason } from "../types";
+import { CANCEL_MODES, defaultPartitionNos, platformTypesOf, STRATEGY_MODES, defaultRejectReason } from "../types";
 import { rejectTextOf } from "../errors";
 
 const props = defineProps<{
@@ -15,6 +18,8 @@ const props = defineProps<{
     category: GatewayCategory;
     /** true = 新建，false = 编辑（只影响标题文字） */
     isNew: boolean;
+    /** 所属网关是否运行中（运行中基础字段置灰、隐藏密码区，仅策略可热更新） */
+    gatewayRunning: boolean;
 }>();
 
 // 两个出口：保存（带着改好的配置）/ 关闭（什么都不做）
@@ -23,14 +28,40 @@ const emit = defineEmits<{
     (e: "close"): void;
 }>();
 
-// 深拷贝一份进行编辑，取消时不影响原数据
-const form = reactive<PlatformConfig>(JSON.parse(JSON.stringify(props.platform)));
+// 深拷贝一份进行编辑，取消时不影响原数据；
+// 策略字段做兜底：旧版后端/旧配置返回的策略可能缺新增字段（撤单模式/
+// 撤单延迟等），缺了就补默认值，避免模板访问 undefined 报错
+const form = reactive<PlatformConfig>(normalizePlatform(props.platform));
+
+/** 补全平台配置里的策略字段缺省值（向后兼容旧数据） */
+function normalizePlatform(p: PlatformConfig): PlatformConfig {
+    const s = p.strategy ?? {};
+    const d = { minMs: 0, maxMs: 0 };
+    return {
+        ...p,
+        strategy: {
+            mode: s.mode ?? "fullSingle",
+            splitCountMin: s.splitCountMin ?? 2,
+            splitCountMax: s.splitCountMax ?? 5,
+            priceTick: s.priceTick ?? 0.01,
+            rejectVia: s.rejectVia ?? "executionReport",
+            rejectReason: s.rejectReason ?? 1,
+            rejectText: s.rejectText ?? "模拟拒单",
+            ackDelay: s.ackDelay ?? { ...d },
+            tradeDelay: s.tradeDelay ?? { ...d },
+            cancelMode: s.cancelMode ?? "default",
+            cancelRejectReason: s.cancelRejectReason ?? 1,
+            cancelFrontReject: s.cancelFrontReject ?? false,
+            cancelDelay: s.cancelDelay ?? { ...d },
+        },
+    };
+}
 
 // 父组件换了一个平台进来时，把表单内容整体替换成新的
 watch(
     () => props.platform,
     (p) => {
-        Object.assign(form, JSON.parse(JSON.stringify(p)));
+        Object.assign(form, normalizePlatform(p));
         initRejectDefaults();
     },
 );
@@ -62,9 +93,8 @@ const showPassword = computed(() => props.category === "sz");
 /** 自定义成交已删除（有手动回复功能替代），无需 addFill/removeFill */
 
 // ---- 新建平台：平台类型变化时联动平台名称与分区号默认值 ----
-// 名称 = 平台类型的中文名（如选“综合金融服务平台”）；分区号默认值按类型给
-// （现货竞价/上海 → 101,102,103,104，其它 → 166）；只在新建场景联动，
-// 编辑场景用户改类型不覆盖已填内容
+// 名称 = 平台类型的中文名（如选“综合金融服务平台”）；分区号按平台类型给默认值；
+// 只在新建场景联动，编辑场景用户改类型不覆盖已填内容
 watch(
     () => form.platformType,
     (t) => {
@@ -113,6 +143,8 @@ function submit() {
     s.ackDelay.maxMs = Math.max(s.ackDelay.minMs, s.ackDelay.maxMs || 0);
     s.tradeDelay.minMs = Math.max(0, s.tradeDelay.minMs || 0);
     s.tradeDelay.maxMs = Math.max(s.tradeDelay.minMs, s.tradeDelay.maxMs || 0);
+    s.cancelDelay.minMs = Math.max(0, s.cancelDelay.minMs || 0);
+    s.cancelDelay.maxMs = Math.max(s.cancelDelay.minMs, s.cancelDelay.maxMs || 0);
     emit("save", JSON.parse(JSON.stringify(form)));
 }
 </script>
@@ -127,14 +159,15 @@ function submit() {
             </div>
             <div class="modal-body">
                 <div class="form-grid">
-                    <!-- 基础信息：名称/类型/监听地址端口/CompID/分区号/密码 -->
+                    <!-- 基础信息：名称/类型/监听地址端口/CompID/分区号（网关运行中置灰，
+                         仅策略与回报延迟可热更新，其余字段需停止网关后才能改） -->
                     <div class="field">
                         <label>平台名称</label>
-                        <input v-model="form.name" placeholder="如：现货集中竞价交易平台" />
+                        <input v-model="form.name" placeholder="如：现货集中竞价交易平台" :disabled="gatewayRunning" />
                     </div>
                     <div class="field">
                         <label>平台类型 (PlatformID)</label>
-                        <select v-model.number="form.platformType">
+                        <select v-model.number="form.platformType" :disabled="gatewayRunning">
                             <option v-for="t in platformTypes" :key="t.value" :value="t.value">
                                 {{ t.value }} - {{ t.label }}
                             </option>
@@ -142,53 +175,57 @@ function submit() {
                     </div>
                     <div class="field">
                         <label>监听地址</label>
-                        <input v-model="form.listenHost" placeholder="0.0.0.0" />
+                        <input v-model="form.listenHost" placeholder="0.0.0.0" :disabled="gatewayRunning" />
                     </div>
                     <div class="field">
                         <label>监听端口</label>
-                        <input v-model.number="form.port" type="number" min="1" max="65535" />
+                        <input v-model.number="form.port" type="number" min="1" max="65535" :disabled="gatewayRunning" />
                     </div>
                     <div class="field">
                         <label>网关 CompID（回报中的 SenderCompID）</label>
-                        <input v-model="form.compId" maxlength="20" />
+                        <input v-model="form.compId" maxlength="20" :disabled="gatewayRunning" />
                     </div>
                     <div class="field">
                         <label>平台分区号 (PartitionNo)</label>
-                        <input v-model="form.partitionNos" placeholder="如 101,102,103,104（逗号分隔）" />
+                        <input v-model="form.partitionNos" placeholder="如 115,116,117,118（逗号分隔）" :disabled="gatewayRunning" />
                     </div>
-                    <div class="field" v-if="showPassword">
-                        <label class="field-row">
-                            <input v-model="form.checkPassword" type="checkbox" />
-                            校验登录密码
-                        </label>
-                    </div>
-                    <div class="field" v-if="showPassword && form.checkPassword">
-                        <label>登录密码 (Password)</label>
-                        <input v-model="form.password" />
+                    <!-- 登录校验密码（仅网关停止/新建时显示；运行中隐藏）：
+                         勾选框与密码输入框横向同一排；勾选后输入框才出现 -->
+                    <div class="field full" v-if="showPassword && !gatewayRunning">
+                        <div class="field-row">
+                            <label class="field-row">
+                                <input v-model="form.checkPassword" type="checkbox" />
+                                校验登录密码
+                            </label>
+                            <label class="field-row" v-if="form.checkPassword">
+                                登录密码
+                                <input v-model="form.password" />
+                            </label>
+                        </div>
                     </div>
 
                     <!-- 平台功能开关：展示收发报文（勾选即自动持久化）+ 缓存订单，
-                         并排放在密码校验的下一排 -->
+                         同一排显示（不受密码区影响）；网关运行中置灰 -->
                     <div class="field">
                         <label class="field-row">
-                            <input v-model="form.showPackets" type="checkbox" />
+                            <input v-model="form.showPackets" type="checkbox" :disabled="gatewayRunning" />
                             展示收发报文
                         </label>
                         <span class="hint">点击平台卡片“报文”可实时查看并按字段解析，同时自动持久化到 packets/ 目录</span>
                     </div>
                     <div class="field">
                         <label class="field-row">
-                            <input v-model="form.cacheOrders" type="checkbox" />
+                            <input v-model="form.cacheOrders" type="checkbox" :disabled="gatewayRunning" />
                             缓存订单
                         </label>
                         <span class="hint">可查看订单列表，撤单按真实状态回执，并支持界面手动回复</span>
                     </div>
 
-                    <div class="section-title">模拟回报策略</div>
+                    <div class="section-title">报单自动回报模式（未成交的挂单可以在平台-订单手动发送回报）</div>
 
-                    <!-- 回报模式下拉框；选不同模式下面显示不同的参数区 -->
+                    <!-- 报单自动回报模式下拉框；选不同模式下面显示不同的参数区 -->
                     <div class="field full">
-                        <label>回报模式</label>
+                        <label>自动回报模式</label>
                         <select v-model="form.strategy.mode">
                             <option v-for="m in STRATEGY_MODES" :key="m.value" :value="m.value">
                                 {{ m.label }}
@@ -238,6 +275,30 @@ function submit() {
                         </div>
                     </template>
 
+                    <div class="section-title">撤单自动回报模式</div>
+
+                    <!-- 撤单模式：默认（存在挂单撤单成功、否则拒单）/ 回撤单拒单 -->
+                    <div class="field full">
+                        <label>撤单模式</label>
+                        <select v-model="form.strategy.cancelMode">
+                            <option v-for="m in CANCEL_MODES" :key="m.value" :value="m.value">
+                                {{ m.label }}
+                            </option>
+                        </select>
+                    </div>
+                    <div class="field" v-if="form.strategy.cancelMode === 'alwaysReject'">
+                        <label>撤单拒单原因码</label>
+                        <input v-model.number="form.strategy.cancelRejectReason" type="number" min="0" />
+                        <span class="hint">回填到撤单拒单/业务拒绝消息的原因字段</span>
+                    </div>
+                    <div class="field">
+                        <label class="field-row">
+                            <input v-model="form.strategy.cancelFrontReject" type="checkbox" />
+                            前台拒单
+                        </label>
+                        <span class="hint">勾选后撤单拒单改发业务拒绝消息（深交所 MsgType=4 / 上交所 204）</span>
+                    </div>
+
                     <!-- 回报延迟：拒单模式没有成交，所以不显示；只挂单模式只有确认延迟 -->
                     <template v-if="form.strategy.mode !== 'reject'">
                         <div class="section-title">回报延迟（毫秒，最小 = 最大为固定延迟，全 0 同步回报）</div>
@@ -256,6 +317,15 @@ function submit() {
                                 <span class="hint">~</span>
                                 <input v-model.number="form.strategy.tradeDelay.maxMs" type="number" min="0" />
                             </div>
+                        </div>
+                        <div class="field">
+                            <label>撤单回报延迟（最小 ~ 最大）</label>
+                            <div class="field-row">
+                                <input v-model.number="form.strategy.cancelDelay.minMs" type="number" min="0" />
+                                <span class="hint">~</span>
+                                <input v-model.number="form.strategy.cancelDelay.maxMs" type="number" min="0" />
+                            </div>
+                            <span class="hint">撤单成功与撤单拒单回报均适用</span>
                         </div>
                     </template>
                 </div>

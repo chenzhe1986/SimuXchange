@@ -25,7 +25,7 @@
 //! writer 任务发送前由 protocol::finalize_seq 统一补号，
 //! 因此报文捕获的字节与线上实际发送完全一致。
 
-use crate::config::PlatformConfig;
+use crate::config::{CancelMode, PlatformConfig};
 use crate::event::ConnInfo;
 use crate::orderbook::{OrderEntry, OrderStatus, OrderUpdate};
 use crate::stats::PlatformStats;
@@ -328,7 +328,7 @@ pub async fn handle_conn(
                 handle_new_order(&ctx, &tx, &body, &pbu, synced, &mut pending, conn_id, &report_tasks).await;
             }
             msg_type::CANCEL_ORDER if logged_on => {
-                handle_cancel(&ctx, &tx, &body, &pbu, synced, &mut pending).await;
+                handle_cancel(&ctx, &tx, &body, &pbu, synced, &mut pending, &report_tasks).await;
             }
             other => {
                 if !logged_on {
@@ -592,10 +592,15 @@ fn dispatch_reports(
     report_tasks.lock().push(h);
 }
 
-/// 处理撤单(61)：平台开启“缓存订单”时按订单真实状态回复：
-/// - 原单在途（已报/部分成交）→ 撤单成功：回执行报告(32) ExecType=4 已撤
-/// - 原单已是终态（全成/已拒/已撤）或找不到 → 撤单失败：回撤单失败(59)
-/// 未开启缓存时维持旧行为（一律撤单失败）。
+/// 处理撤单(61)：按撤单自动回报模式回复。
+///
+/// 撤单自动回报模式（StrategyConfig.cancel_mode）：
+/// - 默认模式：开启“缓存订单”时按原单状态回复——原单在途（已报/部分成交）
+///   → 撤单成功（执行报告 32，ExecType=4 已撤）；找不到或已是终态 → 撤单拒单
+/// - 回撤单拒单模式：无论原单状态一律撤单拒单
+/// 撤单拒单默认回撤单失败(59)；勾选“前台拒单”（cancel_front_reject）时改发
+/// 申报拒绝(204)，原因代码取 cancel_reject_reason。
+/// 撤单成功与拒单回报都按 cancel_delay 延迟发送（0 = 同步）。
 ///
 /// 执行回报同步未完成时，撤单成功/失败回报同样进 pending 缓冲等 207 后补发：
 /// 否则柜台会先收到撤单成功、后收到该委托延迟补发的申报确认/成交，状态错乱
@@ -607,6 +612,7 @@ async fn handle_cancel(
     pbu: &str,
     synced: bool,
     pending: &mut Vec<PlannedReport>,
+    report_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) {
     let req = match CancelOrder::decode(body) {
         Ok(r) => r,
@@ -616,86 +622,169 @@ async fn handle_cancel(
         }
     };
     ctx.stats.cancels.fetch_add(1, Ordering::Relaxed);
+    let set_id = ctx.cfg.partition_for(&req.security_id) as u32;
+    // 撤单自动回报配置在块作用域内读取（读锁不跨 await 存活）
+    let (cancel_mode, cancel_reason, front_reject, delay_ms) = {
+        let st = ctx.strategy.read().unwrap();
+        (
+            st.cancel_mode,
+            st.cancel_reject_reason,
+            st.cancel_front_reject,
+            st.cancel_delay.sample(),
+        )
+    };
+    // 回撤单拒单模式：不按原单状态，一律拒单
+    if cancel_mode == CancelMode::AlwaysReject {
+        send_cancel_reject(
+            ctx, tx, &req, pbu, set_id, synced, pending, cancel_reason, front_reject, delay_ms,
+            report_tasks,
+        )
+        .await;
+        return;
+    }
 
-    // ---- 有订单缓存：先尝试按原单状态撤单 ----
-    if let Some(ob) = &ctx.orders {
-        // 原单存在且在途才允许撤（find 拿的是撤单前的快照，剩余量用于回报）
-        if let Some(entry) = ob.find(&req.orig_cl_ord_id) {
-            if entry.status.is_inflight() {
-                ob.cancel_inflight(&req.orig_cl_ord_id); // 缓存状态置为已撤
-                // 撤单成功回报：32 执行报告，ExecType=4 / OrdStatus=4（已撤）
-                let cxl = ExecRpt {
-                    pbu: pbu.to_string(),
-                    set_id: ctx.cfg.partition_for(&req.security_id) as u32,
-                    report_index: 0, // 发送时由 writer 任务补写
-                    biz_id: req.biz_id,
-                    exec_type: exec_type::CANCELLED,
-                    biz_pbu: req.biz_pbu.clone(),
-                    cl_ord_id: req.cl_ord_id.clone(),
-                    security_id: req.security_id.clone(),
-                    account: entry.account.clone(),
-                    owner_type: req.owner_type,
-                    side: req.side,
-                    price: (entry.price * 100000.0) as i64,
-                    order_qty: (entry.qty * 1000.0) as i64,
-                    leaves_qty: 0,
-                    cxl_qty: (entry.leaves_qty * 1000.0) as i64,
-                    ord_type: entry.ord_type,
-                    time_in_force: 0,
-                    ord_status: ord_status::CANCELLED,
-                    credit_tag: String::new(),
-                    orig_cl_ord_id: req.orig_cl_ord_id.clone(),
-                    clearing_firm: String::new(),
-                    branch_id: entry.branch.clone(),
-                    ord_rej_reason: 0,
-                    // 本撤单回报分配新确认编号，原订单编号回填到 OrigOrdCnfmID
-                    ord_cnfm_id: ctx.stats.next_order_id(),
-                    orig_ord_cnfm_id: entry.order_id.clone(),
-                    trade_date: protocol::now_date(),
-                    transact_time: protocol::now_ntime(),
-                    user_info: req.user_info.clone(),
-                };
-                if !synced {
-                    // 同步未完成：撤单成功回报进缓冲，与委托回报一起等 207 后按
-                    // 到达顺序补发（原委托的确认/成交会被发送侧的终态检查丢弃，
-                    // 柜台只收到撤单成功）
-                    pending.push(PlannedReport {
-                        delay_ms: 0,
-                        kind: ReportKind::Cancel,
-                        frame: cxl.encode(),
-                        desc: format!(
-                            "撤单成功(32) ClOrdID={} OrigClOrdID={}（同步后补发）",
-                            req.cl_ord_id, req.orig_cl_ord_id
-                        ),
-                        cl_ord_id: req.orig_cl_ord_id.clone(),
-                        order_update: Some(OrderUpdate {
-                            order_id: entry.order_id.clone(),
-                            cum_qty: entry.cum_qty,
-                            leaves_qty: 0.0,
-                            status: OrderStatus::Cancelled,
-                        }),
-                    });
-                } else {
-                    let _ = tx.send(cxl.encode()).await;
+    // ---- 默认模式：有订单缓存先尝试按原单状态撤单 ----
+    // 全部撤单成功模式（AlwaysSuccess）：无论有无缓存/原单状态，一律回撤单成功
+    if cancel_mode == CancelMode::AlwaysSuccess || ctx.orders.is_some() {
+        let entry = ctx.orders.as_ref().and_then(|ob| ob.find(&req.orig_cl_ord_id));
+        let inflight = entry.as_ref().is_some_and(|e| e.status.is_inflight());
+        if inflight || cancel_mode == CancelMode::AlwaysSuccess {
+            // 在途订单标记为已撤（缓存一致性）；终态/找不到/无缓存不改变缓存
+            if inflight {
+                if let Some(ob) = &ctx.orders {
+                    ob.cancel_inflight(&req.orig_cl_ord_id);
                 }
-                ctx.log(
-                    "info",
-                    format!(
-                        "收到撤单 ClOrdID={} OrigClOrdID={}，原单在途，已回撤单成功(32){}",
-                        req.cl_ord_id,
-                        req.orig_cl_ord_id,
-                        if synced { "" } else { "（同步后补发）" }
-                    ),
-                );
-                return;
             }
+            let e = entry.as_ref();
+            // 撤单成功回报：32 执行报告，ExecType=4 / OrdStatus=4（已撤）。
+            // 订单号/价格/数量优先回填原单缓存，找不到原单时用请求字段/默认值兜底
+            let cxl = ExecRpt {
+                pbu: pbu.to_string(),
+                set_id,
+                report_index: 0, // 发送时由 writer 任务补写
+                biz_id: req.biz_id,
+                exec_type: exec_type::CANCELLED,
+                biz_pbu: req.biz_pbu.clone(),
+                cl_ord_id: req.cl_ord_id.clone(),
+                security_id: req.security_id.clone(),
+                account: e.map(|x| x.account.clone()).unwrap_or_else(|| req.account.clone()),
+                owner_type: req.owner_type,
+                side: req.side,
+                price: e.map(|x| (x.price * 100000.0) as i64).unwrap_or(0),
+                order_qty: e.map(|x| (x.qty * 1000.0) as i64).unwrap_or(0),
+                leaves_qty: 0,
+                cxl_qty: e.map(|x| (x.leaves_qty * 1000.0) as i64).unwrap_or(0),
+                ord_type: e.map(|x| x.ord_type).unwrap_or(0),
+                time_in_force: 0,
+                ord_status: ord_status::CANCELLED,
+                credit_tag: String::new(),
+                orig_cl_ord_id: req.orig_cl_ord_id.clone(),
+                clearing_firm: String::new(),
+                branch_id: e.map(|x| x.branch.clone()).unwrap_or_else(|| req.branch_id.clone()),
+                ord_rej_reason: 0,
+                // 本撤单回报分配新确认编号，原订单编号回填到 OrigOrdCnfmID
+                ord_cnfm_id: ctx.stats.next_order_id(),
+                orig_ord_cnfm_id: e.map(|x| x.order_id.clone()).unwrap_or_default(),
+                trade_date: protocol::now_date(),
+                transact_time: protocol::now_ntime(),
+                user_info: req.user_info.clone(),
+            };
+            if !synced {
+                // 同步未完成：撤单成功回报进缓冲，与委托回报一起等 207 后按
+                // 到达顺序补发（原委托的确认/成交会被发送侧的终态检查丢弃，
+                // 柜台只收到撤单成功）
+                pending.push(PlannedReport {
+                    delay_ms,
+                    kind: ReportKind::Cancel,
+                    frame: cxl.encode(),
+                    desc: format!(
+                        "撤单成功(32) ClOrdID={} OrigClOrdID={}（同步后补发）",
+                        req.cl_ord_id, req.orig_cl_ord_id
+                    ),
+                    cl_ord_id: req.orig_cl_ord_id.clone(),
+                    order_update: Some(OrderUpdate {
+                        order_id: e.map(|x| x.order_id.clone()).unwrap_or_default(),
+                        cum_qty: e.map(|x| x.cum_qty).unwrap_or(0.0),
+                        leaves_qty: 0.0,
+                        status: OrderStatus::Cancelled,
+                    }),
+                });
+            } else {
+                crate::sz::session::send_cancel_report(tx, cxl.encode(), delay_ms, report_tasks)
+                    .await;
+            }
+            ctx.log(
+                "info",
+                format!(
+                    "收到撤单 ClOrdID={} OrigClOrdID={}，已回撤单成功(32){}",
+                    req.cl_ord_id,
+                    req.orig_cl_ord_id,
+                    if synced { "" } else { "（同步后补发）" }
+                ),
+            );
+            return;
         }
     }
 
-    // ---- 撤单失败：未开启缓存 / 找不到原单 / 原单已是终态 ----
+    // ---- 撤单拒单：未开启缓存 / 找不到原单 / 原单已是终态 ----
+    send_cancel_reject(
+        ctx, tx, &req, pbu, set_id, synced, pending, cancel_reason, front_reject, delay_ms,
+        report_tasks,
+    )
+    .await;
+}
+
+/// 构造并发送撤单拒单：默认回撤单失败(59，原因码可配置)；勾选“前台拒单”
+/// 时改发申报拒绝(204，原因码填 OrdRejReason)。同步未完成时进 pending 缓冲
+/// （与撤单成功同一规则，等 207 后补发），延迟在补发/直发时生效。
+async fn send_cancel_reject(
+    ctx: &SessionCtx,
+    tx: &mpsc::Sender<Vec<u8>>,
+    req: &CancelOrder,
+    pbu: &str,
+    set_id: u32,
+    synced: bool,
+    pending: &mut Vec<PlannedReport>,
+    reason: u16,
+    front_reject: bool,
+    delay_ms: u64,
+    report_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+) {
+    if front_reject {
+        // 前台拒单：改发申报拒绝(204)，不进执行报告流
+        let rej = OrderReject {
+            biz_id: req.biz_id,
+            biz_pbu: req.biz_pbu.clone(),
+            cl_ord_id: req.cl_ord_id.clone(),
+            security_id: req.security_id.clone(),
+            ord_rej_reason: reason as u32,
+            trade_date: protocol::now_date(),
+            transact_time: protocol::now_ntime(),
+            user_info: req.user_info.clone(),
+        };
+        let desc = format!(
+            "收到撤单 ClOrdID={} OrigClOrdID={}，回申报拒绝(204) 原因={}",
+            req.cl_ord_id, req.orig_cl_ord_id, reason
+        );
+        if !synced {
+            pending.push(PlannedReport {
+                delay_ms,
+                kind: ReportKind::Cancel,
+                frame: rej.encode(),
+                desc: format!("{}（同步后补发）", desc),
+                cl_ord_id: req.orig_cl_ord_id.clone(),
+                order_update: None, // 拒单不改订单状态
+            });
+        } else {
+            crate::sz::session::send_cancel_report(tx, rej.encode(), delay_ms, report_tasks).await;
+        }
+        ctx.stats.business_rejects.fetch_add(1, Ordering::Relaxed);
+        ctx.log("info", desc);
+        return;
+    }
     let rej = CancelReject {
         pbu: pbu.to_string(),
-        set_id: ctx.cfg.partition_for(&req.security_id) as u32,
+        set_id,
         report_index: 0, // 发送时由 writer 任务补写
         biz_id: req.biz_id,
         biz_pbu: req.biz_pbu.clone(),
@@ -703,20 +792,20 @@ async fn handle_cancel(
         security_id: req.security_id.clone(),
         orig_cl_ord_id: req.orig_cl_ord_id.clone(),
         branch_id: req.branch_id.clone(),
-        cxl_rej_reason: 1, // 1 = 未知订单（或原单不可撤）
+        cxl_rej_reason: reason as u32, // 原因码可配置（默认 1 = 未知订单/原单不可撤）
         trade_date: protocol::now_date(),
         transact_time: protocol::now_ntime(),
         user_info: req.user_info.clone(),
     };
     let desc = format!(
-        "收到撤单 ClOrdID={} OrigClOrdID={}，原单不存在或不可撤，回撤单失败(59)",
-        req.cl_ord_id, req.orig_cl_ord_id
+        "收到撤单 ClOrdID={} OrigClOrdID={}，原单不存在或不可撤，回撤单失败(59) 原因={}",
+        req.cl_ord_id, req.orig_cl_ord_id, reason
     );
     if !synced {
         // 同步未完成：撤单失败也是执行报告流消息（带 ReportIndex），
         // 同样进缓冲等 207 后补发，避免柜台在同步前收到执行报告
         pending.push(PlannedReport {
-            delay_ms: 0,
+            delay_ms,
             kind: ReportKind::Cancel,
             frame: rej.encode(),
             desc: format!("{}（同步后补发）", desc),
@@ -724,7 +813,7 @@ async fn handle_cancel(
             order_update: None, // 撤单失败不改订单状态
         });
     } else {
-        let _ = tx.send(rej.encode()).await;
+        crate::sz::session::send_cancel_report(tx, rej.encode(), delay_ms, report_tasks).await;
     }
     ctx.log("info", desc);
 }
@@ -763,7 +852,7 @@ pub fn build_manual_report(
                 order_id: rpt.ord_cnfm_id.clone(),
                 cum_qty: entry.cum_qty,
                 leaves_qty: entry.leaves_qty,
-                status: OrderStatus::New,
+                status: entry.status,
             };
             Ok((rpt.encode(), desc, update))
         }
@@ -786,6 +875,13 @@ pub fn build_manual_report(
             let filled = leaves == 0.0;
             let last_px = (fill_px * 100000.0).round() as i64;
             let last_qty = fill_shares * 1000;
+            // 交易所订单确认编号：尚无则新分配（不自动回复模式下订单没分配过），
+            // 回报与订单缓存用同一号，保证多笔回报一致
+            let order_id = if entry.order_id.is_empty() {
+                stats.next_order_id()
+            } else {
+                entry.order_id.clone()
+            };
             let trade = TradeRpt {
                 pbu: entry.pbu.clone(),
                 set_id: cfg.partition_for(&entry.security_id) as u32,
@@ -815,11 +911,7 @@ pub fn build_manual_report(
                 clearing_firm: entry.clearing_firm.clone(),
                 branch_id: entry.branch.clone(),
                 trd_cnfm_id: stats.next_exec_id(),
-                ord_cnfm_id: if entry.order_id.is_empty() {
-                    stats.next_order_id()
-                } else {
-                    entry.order_id.clone()
-                },
+                ord_cnfm_id: order_id.clone(),
                 trade_date: protocol::now_date(),
                 transact_time: protocol::now_ntime(),
                 user_info: entry.user_info.clone(),
@@ -829,7 +921,7 @@ pub fn build_manual_report(
                 entry.cl_ord_id, fill_px, fill_shares, leaves
             );
             let update = OrderUpdate {
-                order_id: entry.order_id.clone(),
+                order_id: order_id.clone(),
                 cum_qty: entry.cum_qty + fill_shares as f64,
                 leaves_qty: leaves,
                 status: if filled {
@@ -876,7 +968,7 @@ pub fn build_manual_report(
                     entry.cl_ord_id, rpt.ord_rej_reason
                 );
                 let update = OrderUpdate {
-                    order_id: entry.order_id.clone(),
+                    order_id: rpt.ord_cnfm_id.clone(),
                     cum_qty: entry.cum_qty,
                     leaves_qty: 0.0,
                     status: OrderStatus::Rejected,

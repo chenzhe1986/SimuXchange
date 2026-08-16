@@ -35,7 +35,7 @@ export interface DelayConfig {
     maxMs: number;
 }
 
-/** 七种回报策略（与后端 strategy.rs 的 StrategyMode 对应） */
+/** 报单自动回报模式（与后端 strategy.rs 的 StrategyMode 对应） */
 export type StrategyMode =
     | "fullSingle"
     | "fullSplit"
@@ -47,6 +47,9 @@ export type StrategyMode =
 
 /** 拒单方式：执行回报(200102) 或 业务拒绝消息(MsgType=4) */
 export type RejectVia = "executionReport" | "businessReject";
+
+/** 撤单自动回报模式（与后端 config.rs 的 CancelMode 对应） */
+export type CancelMode = "default" | "alwaysSuccess" | "alwaysReject";
 
 /** 回报策略配置（平台编辑器里能改的都在这） */
 export interface StrategyConfig {
@@ -65,6 +68,14 @@ export interface StrategyConfig {
     ackDelay: DelayConfig;
     /** 成交回报延迟（拆单时每笔单独抽样） */
     tradeDelay: DelayConfig;
+    /** 撤单自动回报模式 */
+    cancelMode: CancelMode;
+    /** 撤单拒单原因代码（回填到撤单拒单/业务拒绝消息） */
+    cancelRejectReason: number;
+    /** 前台拒单：撤单拒单时改发业务拒绝消息 */
+    cancelFrontReject: boolean;
+    /** 撤单回报延迟（撤单成功与撤单拒单回报） */
+    cancelDelay: DelayConfig;
 }
 
 /** 一个模拟交易平台（= 一个 TCP 监听端口）的配置 */
@@ -83,7 +94,7 @@ export interface PlatformConfig {
     password: string;
     /** 平台分区号（兼容单分区旧字段；partitionNos 为空时生效） */
     partitionNo: number;
-    /** 分区号列表（逗号分隔，如 "101,102,103,104"）：
+    /** 分区号列表（逗号分隔，如 "115,116,117,118"）：
      *  回报按证券代码哈希分配到其中一个分区（同一证券恒落同一分区） */
     partitionNos: string;
     /** 是否展示该平台各连接的收发报文（勾选即自动持久化到文件） */
@@ -326,18 +337,25 @@ export function platformTypesOf(category: GatewayCategory): { value: number; lab
     return PLATFORM_TYPES;
 }
 
-/** 策略下拉框选项（value 必须与后端枚举的 camelCase 名一致） */
+/** 报单自动回报模式下拉框选项（value 必须与后端枚举的 camelCase 名一致） */
 export const STRATEGY_MODES: { value: StrategyMode; label: string }[] = [
-    { value: "fullSingle", label: "全部成交（单笔）" },
-    { value: "fullSplit", label: "全部成交（多笔拆单）" },
-    { value: "partialSingle", label: "部分成交（单笔）" },
-    { value: "partialSplit", label: "部分成交（多笔拆单）" },
-    { value: "noAutoReply", label: "不自动回复（挂单手动回复）" },
-    { value: "ackOnly", label: "不成交挂单（只回确认）" },
-    { value: "reject", label: "拒单" },
+    { value: "fullSingle", label: "全部成交" },
+    { value: "partialSingle", label: "部分成交" },
+    { value: "fullSplit", label: "全部成交（随机拆多笔）" },
+    { value: "partialSplit", label: "部分成交（随机拆多笔）" },
+    { value: "ackOnly", label: "只回确认回报" },
+    { value: "reject", label: "自动拒单" },
+    { value: "noAutoReply", label: "关闭自动回报" },
 ];
 
-/** 策略枚举值 → 中文标签（未知值原样返回） */
+/** 撤单自动回报模式下拉框选项（value 与后端 CancelMode 的 camelCase 名一致） */
+export const CANCEL_MODES: { value: CancelMode; label: string }[] = [
+    { value: "default", label: "默认（存在挂单时自动撤单成功，否则撤单拒单）" },
+    { value: "alwaysSuccess", label: "全部撤单成功" },
+    { value: "alwaysReject", label: "全部撤单拒绝" },
+];
+
+/** 报单模式枚举值 → 中文标签（未知值原样返回） */
 export function strategyModeLabel(mode: StrategyMode): string {
     return STRATEGY_MODES.find((m) => m.value === mode)?.label ?? mode;
 }
@@ -364,8 +382,9 @@ export function defaultRejectReason(category: GatewayCategory): number {
     return category === "sz" ? 20009 : 1025;
 }
 
-/** 新建平台时的默认策略：全部成交（单笔）、无延迟。
- *  拒单参数按网关分类给默认值（深圳 20009 / 上海 1025） */
+/** 新建平台时的默认报单自动回报模式：全部成交、无延迟；
+ *  拒单参数按网关分类给默认值（深圳 20009 / 上海 1025）；
+ *  撤单自动回报默认“存在挂单撤单成功、否则拒单”，无延迟 */
 export function defaultStrategy(category: GatewayCategory = "sz"): StrategyConfig {
     return {
         mode: "fullSingle",
@@ -377,15 +396,24 @@ export function defaultStrategy(category: GatewayCategory = "sz"): StrategyConfi
         rejectText: "模拟拒单",
         ackDelay: { minMs: 0, maxMs: 0 },
         tradeDelay: { minMs: 0, maxMs: 0 },
+        cancelMode: "default",
+        cancelRejectReason: 1,
+        cancelFrontReject: false,
+        cancelDelay: { minMs: 0, maxMs: 0 },
     };
 }
 
-/** 分区号列表默认值：现货竞价（深市平台类型 1）与上海竞价/新债券
- *  默认 "101,102,103,104"（多分区按证券哈希分配），其它平台类型默认 "166" */
+/** 分区号按平台类型给默认值； */
 export function defaultPartitionNos(platformType: number, category: GatewayCategory = "sz"): string {
-    if (category === "shjj" || category === "shbond") return "101,102,103,104";
-    if (category === "sz" && platformType === 1) return "101,102,103,104";
-    return "166";
+    if (category === "shjj") return "1,2,3,4,5,6";
+    if (category === "shbond") return "801";
+    if (category === "sz" && platformType === 1) return "115,116,117,118";
+    if (category === "sz" && platformType === 2) return "128";
+    if (category === "sz" && platformType === 3) return "138";
+    if (category === "sz" && platformType === 4) return "148";
+    if (category === "sz" && platformType === 5) return "158";
+    if (category === "sz" && platformType === 6) return "168";
+    return "188";
 }
 
 /** 新建平台的默认配置（id 留空由后端生成；端口由调用方指定）。

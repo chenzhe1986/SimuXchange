@@ -183,7 +183,7 @@ Linux 下在装好 Rust 的机器上同样执行 `cargo build --release -p simx-
 ## 测试
 
 ```powershell
-cargo test -p simx-core        # 94 个单元测试 + 4 个自动启动 + 21 个端到端集成测试（深交所 11 + 上交所竞价 5 + 上交所新债券 5）
+cargo test -p simx-core        # 94 个单元测试 + 4 个自动启动 + 23 个端到端集成测试（深交所 12 + 上交所竞价 6 + 上交所新债券 5）
 ```
 
 端到端测试覆盖：TCP 连接 → Logon 握手 →（上交所还含分区序号同步）→ 委托 → 回报字段/校验和验证 → 网关停止 Logout。
