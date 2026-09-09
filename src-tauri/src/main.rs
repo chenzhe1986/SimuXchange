@@ -96,6 +96,57 @@ async fn dispatch(
     Ok(simx_core::api::dispatch(engine.inner(), payload, "127.0.0.1").await)
 }
 
+/// "AI 生成脚本"的模型 API 透传（PlatformEditor 的「AI 生成脚本」按钮触发）。
+///
+/// 为什么要桌面壳代发：模型接口不返回 CORS 头，WebView 里的前端 fetch 会被
+/// 浏览器拦截。本 command 只做一次 HTTPS 转发——url / 请求头 / 请求体都由
+/// 前端拼好（模型配置在 src/llm.ts 里维护），壳不理解任何业务语义；
+/// 模拟引擎（simx-core / Linux 后端）完全不参与该功能。
+///
+/// TLS 注意：ureq 的 native-tls 特性只编译实现、不会作为默认后端启用
+/// （默认是 rustls，本项目为避开 ring 的 C/汇编编译没开），必须在这里用
+/// AgentBuilder::tls_connector 显式挂上系统 TLS（Windows = schannel）。
+/// 大模型推理可能较慢，整体超时放宽到 180 秒。
+#[tauri::command]
+async fn llm_chat(
+    url: String,
+    headers: std::collections::HashMap<String, String>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 系统原生 TLS 连接器（Windows 上是 schannel）；创建失败极少见（本地
+        // 安全环境异常），报错文本直接给前端弹窗
+        let tls = native_tls::TlsConnector::new()
+            .map_err(|e| format!("初始化系统 TLS 失败: {}", e))?;
+        let agent = ureq::AgentBuilder::new()
+            .tls_connector(std::sync::Arc::new(tls))
+            .timeout(std::time::Duration::from_secs(180))
+            .build();
+        let mut req = agent.post(&url);
+        for (k, v) in &headers {
+            req = req.set(k, v);
+        }
+        // HTTP 状态码错误（4xx/5xx）也归入 Err，把服务端的错误说明带给前端
+        let resp = req.send_json(body).map_err(|e| match e {
+            ureq::Error::Status(code, resp) => {
+                let text = resp.into_string().unwrap_or_default();
+                format!(
+                    "模型接口返回 {}: {}",
+                    code,
+                    text.chars().take(400).collect::<String>()
+                )
+            }
+            other => format!("调用模型接口失败: {}", other),
+        })?;
+        let text = resp
+            .into_string()
+            .map_err(|e| format!("读取模型响应失败: {}", e))?;
+        serde_json::from_str(&text).map_err(|e| format!("模型响应不是合法 JSON: {}", e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 下载新版安装包并启动安装（“发现新版本”弹窗里的“下载并安装”按钮触发）。
 ///
 /// 下载到用户“下载”目录（文件名取 URL 最后一段），完成后直接启动安装程序
@@ -194,8 +245,37 @@ fn main() {
             get_app_config,
             set_app_config,
             dispatch,
-            download_update
+            download_update,
+            llm_chat
         ])
         .run(tauri::generate_context!())
         .expect("SimuXchange 启动失败");
+}
+
+// 单元测试：默认忽略（要联网），手动验证 ureq + 系统 TLS 链路是否通畅：
+//   cargo test --manifest-path src-tauri/Cargo.toml tls_native_smoke -- --ignored --nocapture
+// 场景正是 llm_chat 依赖的 HTTPS 通道：TLS 后端没接上时 ureq 会报
+// "no TLS backend is configured"（踩过的坑，见 llm_chat 注释）；
+// 接上后向模型接口发一次无鉴权 GET，服务端应回 HTTP 400（缺 model 参数）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn tls_native_smoke() {
+        let tls = native_tls::TlsConnector::new().expect("初始化系统 TLS 失败");
+        let agent = ureq::AgentBuilder::new()
+            .tls_connector(std::sync::Arc::new(tls))
+            .timeout(std::time::Duration::from_secs(30))
+            .build();
+        let result = agent
+            .get("https://chatapi.weixin.qq.com/openai/v1/models")
+            .call();
+        match result {
+            // 服务端拒绝缺 model 参数的请求：说明 TLS 握手与 HTTPS 请求已打通
+            Err(ureq::Error::Status(code, _)) => assert_eq!(code, 400, "TLS 通了但响应异常"),
+            other => panic!("TLS 链路未打通（后端没挂上或网络不通）：{:?}", other.map(|_| ())),
+        }
+    }
 }

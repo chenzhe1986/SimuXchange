@@ -7,7 +7,7 @@
 // 仅“报单自动回报模式 / 撤单自动回报模式 / 回报延迟”可改（后端热更新实时生效）。
 // 点“保存”时先把数值规范化，再把整份配置 emit 给父组件提交；
 // Lua 脚本的语法校验由后端在保存时强制执行，编辑中可用“检查脚本”按钮即时校验。
-import { computed, reactive, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import type { GatewayCategory, PlatformConfig } from "../types";
 import type { Backend } from "../backend";
 import {
@@ -19,6 +19,8 @@ import {
     STRATEGY_MODES,
 } from "../types";
 import LuaEditor from "./LuaEditor.vue";
+import LuaDocViewer from "./LuaDocViewer.vue";
+import { generateLuaScript } from "../llm";
 import { rejectTextOf } from "../errors";
 
 const props = defineProps<{
@@ -34,11 +36,13 @@ const props = defineProps<{
     backend: Backend | null;
 }>();
 
-// 三个出口：保存（带着改好的配置）/ 关闭 / notify（检查结果转 toast 上报父组件）
+// 四个出口：保存 / 关闭 / notify（检查结果转 toast）/ scriptError（AI 生成
+// 的"不支持/需补充/失败"提示走带标题的详情弹窗，由父组件打开）
 const emit = defineEmits<{
     (e: "save", p: PlatformConfig): void;
     (e: "close"): void;
     (e: "notify", text: string, isError?: boolean): void;
+    (e: "scriptError", text: string, title?: string): void;
 }>();
 
 // 深拷贝一份进行编辑，取消时不影响原数据；
@@ -180,6 +184,47 @@ async function checkScript() {
         emit("notify", resp.error ?? "脚本语法错误", true);
     }
 }
+
+// ---- AI 生成脚本（纯前端调大模型，模拟引擎不参与） ----
+/** 自然语言需求输入框内容 */
+const aiPrompt = ref("");
+/** 生成中标记：按钮转圈文字、期间禁用其他按钮 */
+const generating = ref(false);
+/** 脚本手册弹窗开关 */
+const docShow = ref(false);
+
+/** 「AI 生成脚本」：把自然语言需求发给大模型，按三种结果分别处理——
+ *  生成成功（脚本填入编辑器，用户原话转为注释头）/ 当前不支持（弹窗说明
+ *  具体不支持点）/ 信息不足（弹窗展示模型的追问）。网络或格式异常也弹窗 */
+async function generateScript() {
+    const input = aiPrompt.value.trim();
+    if (!input) {
+        emit("notify", "请先输入要生成的回报逻辑描述", true);
+        return;
+    }
+    generating.value = true;
+    try {
+        const r = await generateLuaScript(input);
+        if (r.type === "script") {
+            // 用户逻辑原样作为注释头插到脚本最前（逐行加 -- 前缀；行号
+            // 随之下移，但报错行号与编辑器行号始终一致，不影响排错）
+            const header = input
+                .split("\n")
+                .map((line) => "-- " + line)
+                .join("\n");
+            form.strategy.luaScript = header + "\n" + r.script;
+            emit("notify", "脚本已生成，可继续手动调整");
+        } else if (r.type === "unsupported") {
+            emit("scriptError", r.reason, "当前不支持该功能");
+        } else {
+            emit("scriptError", r.question, "AI 需要更多信息");
+        }
+    } catch (e) {
+        emit("scriptError", String(e), "AI 生成失败");
+    } finally {
+        generating.value = false;
+    }
+}
 </script>
 
 <template>
@@ -308,7 +353,7 @@ async function checkScript() {
                         </div>
                     </template>
 
-                    <!-- Lua 脚本回报模式：语法高亮编辑器 + 即时检查。
+                    <!-- Lua 脚本回报模式：语法高亮编辑器 + AI 生成 + 即时检查。
                          脚本在保存时由后端强制校验语法，运行时沙箱化执行 -->
                     <template v-if="form.strategy.mode === 'luaScript'">
                         <div class="field full">
@@ -316,12 +361,30 @@ async function checkScript() {
                             <LuaEditor v-model="form.strategy.luaScript" :height="240" />
                             <span class="hint">
                                 变量 ord 为委托字段、ctx 为环境信息；return "confirm" / "trade" / "reject"
-                                或回报计划表（拒单的方式/原因/文本在脚本里指定），完整说明见 docs/Lua脚本回报编写说明.md
+                                或回报计划表（拒单的方式/原因/文本在脚本里指定），完整说明见「脚本手册」
                             </span>
                         </div>
+                        <div class="field full">
+                            <label>AI 生成脚本（用自然语言描述回报逻辑）</label>
+                            <textarea
+                                v-model="aiPrompt"
+                                rows="2"
+                                placeholder="例：委托数量>1000 拒单；500~800 回确认加一半数量成交；其余全部成交"
+                            ></textarea>
+                        </div>
                         <div class="field">
-                            <button class="btn sm" type="button" @click="checkScript">检查脚本</button>
-                            <span class="hint">只校验语法，不保存配置</span>
+                            <div class="field-row">
+                                <button class="btn sm" type="button" @click="checkScript" :disabled="generating">
+                                    检查脚本
+                                </button>
+                                <button class="btn sm primary" type="button" @click="generateScript" :disabled="generating">
+                                    {{ generating ? "生成中…" : "AI 生成脚本" }}
+                                </button>
+                                <button class="btn sm" type="button" @click="docShow = true" :disabled="generating">
+                                    脚本手册
+                                </button>
+                            </div>
+                            <span class="hint">AI 按需求生成脚本并填入上方编辑器，生成后可继续手动调整；不支持的逻辑会说明原因</span>
                         </div>
                     </template>
 
@@ -385,5 +448,8 @@ async function checkScript() {
                 <button class="btn primary" @click="submit">保存</button>
             </div>
         </div>
+
+        <!-- 脚本手册弹窗（内嵌 docs/ 下的编写说明，Markdown 渲染） -->
+        <LuaDocViewer v-if="docShow" @close="docShow = false" />
     </div>
 </template>

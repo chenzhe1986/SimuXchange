@@ -49,7 +49,9 @@ SimuXchange/
 ├─ src-tauri/           # Tauri 2 桌面壳（包名 simuxchange，内嵌 simx-core）
 ├─ src/                 # 前端 Vue 3 + TypeScript
 │  ├─ App.vue           # 主页面（全部界面状态与交互）
-│  ├─ components/       # PlatformCard / PlatformEditor / LogPanel / PacketViewer（收发报文弹窗）/ OrderViewer（订单弹窗）/ LuaEditor（Lua 脚本编辑器，CodeMirror 6）
+│  ├─ components/       # PlatformCard / PlatformEditor / LogPanel / PacketViewer（收发报文弹窗）/ OrderViewer（订单弹窗）/ LuaEditor（Lua 脚本编辑器，CodeMirror 6）/ LuaDocViewer（脚本手册弹窗，marked 渲染）
+│  ├─ llmPrompt.ts      # "AI 生成脚本"的系统提示词（编写说明的模型友好版提炼）
+│  ├─ llm.ts            # "AI 生成脚本"的大模型调用（配置写死在顶部 TODO 处；纯前端 + Tauri 壳透传，引擎不参与）
 │  ├─ types.ts          # 前后端共享数据结构（与 Rust 结构体手工对应）
 │  ├─ backend.ts        # 后端抽象层：LocalBackend(Tauri invoke) / RemoteBackend(WebSocket)
 │  ├─ changelog.ts      # APP_VERSION / CHANGELOG（“ⓘ 关于”弹窗的版本号与更新说明）
@@ -112,6 +114,9 @@ SimuXchange/
   强制语法校验（`lua_engine::check_syntax`），api 命令 `validate_lua_script` 供前端
   即时校验；编译缓存挂 `SessionCtx.lua_cache`（mlua 须开 `send` feature 才能放进
   SessionCtx）。编写文档：docs/Lua脚本回报编写说明.md。
+  前端另有「AI 生成脚本」（llm.ts 调大模型、系统提示词在 llmPrompt.ts；模型接口
+  无 CORS 头，桌面壳 llm_chat command 透传 HTTPS，引擎不参与）与「脚本手册」
+  （LuaDocViewer 内嵌渲染编写说明文档）。
 - **撤单自动回报模式**：默认（原单在途→撤单成功，否则撤单拒单）/ 全部撤单成功（一律成功，
   无订单缓存也成功）/ 全部撤单拒单（一律拒单，原因码 cancel_reject_reason 可配置）；
   勾选 cancel_front_reject（前台拒单）时撤单拒单

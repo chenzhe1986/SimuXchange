@@ -15,8 +15,12 @@ tauri-plugin-single-instance = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-# 更新下载用：轻量 HTTP 客户端（仅 http，不启用 TLS，内网更新服务器足够）
-ureq = { version = "2", default-features = false }
+# 轻量 HTTP 客户端：更新下载只需 http；"AI 生成脚本"的模型接口是 https。
+# 注意 ureq 的 native-tls 特性只编译实现、不会自动启用（rustls 才是默认后端），
+# 必须在代码里 AgentBuilder::tls_connector(...) 显式挂上（见 main.rs 的 llm_chat）；
+# native-tls 在 Windows 走系统 schannel，纯 Rust 绑定无 C 编译负担
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
 
 [features]
 # 发布版默认启用 custom-protocol：将 dist 前端资源嵌入 exe；

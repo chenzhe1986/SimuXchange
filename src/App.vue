@@ -378,9 +378,9 @@ const ovViewer = reactive({
 });
 /** 通用确认框：先把“确认后要做的事”存进 action，用户点确定才执行 */
 const confirmBox = reactive({ show: false, text: "", action: null as null | (() => void) });
-/** Lua 脚本错误弹窗：保存平台时脚本校验失败弹出（错误详情可能多行，
- *  toast 放不下；编辑弹窗保持打开，关掉本弹窗可继续改脚本） */
-const scriptErrorBox = reactive({ show: false, text: "" });
+/** 脚本/AI 提示详情弹窗：保存平台时脚本校验失败、AI 生成的"不支持/需补充/
+ *  失败"等信息（可能多行，toast 放不下）；编辑弹窗保持打开可继续修改 */
+const scriptErrorBox = reactive({ show: false, text: "", title: "Lua 脚本错误" });
 
 // ---------- 提示 ----------
 /** 屏幕下方的消息气泡（操作成功/失败都用它提示，自动消失） */
@@ -396,9 +396,10 @@ function showToast(text: string, isError = false) {
     toastTimer = window.setTimeout(() => (toast.show = false), isError ? 4200 : 2200);
 }
 
-/** 弹出 Lua 脚本错误详情弹窗（保存平台时校验失败用） */
-function showScriptError(text: string) {
+/** 弹出脚本/AI 提示详情弹窗（title 为弹窗标题，缺省"Lua 脚本错误"） */
+function showScriptError(text: string, title = "Lua 脚本错误") {
     scriptErrorBox.text = text;
+    scriptErrorBox.title = title;
     scriptErrorBox.show = true;
 }
 
@@ -1118,6 +1119,7 @@ onBeforeUnmount(() => {
             @save="savePlatform"
             @close="pfEditor.show = false"
             @notify="(t, e) => showToast(t, e)"
+            @script-error="(t, title) => showScriptError(t, title)"
         />
 
         <!-- 收发报文弹窗（点击平台卡片上的“报文”按钮时打开） -->
@@ -1221,10 +1223,10 @@ onBeforeUnmount(() => {
             </div>
         </div>
 
-        <!-- Lua 脚本错误弹窗：保存平台时脚本校验失败弹出，编辑弹窗保持打开 -->
+        <!-- Lua 脚本/AI 提示详情弹窗：校验失败或 AI 结果非"生成成功"时弹出 -->
         <div v-if="scriptErrorBox.show" class="modal-mask" @mousedown.self="scriptErrorBox.show = false">
             <div class="modal" style="width: 480px">
-                <div class="modal-head"><span>Lua 脚本错误</span></div>
+                <div class="modal-head"><span>{{ scriptErrorBox.title }}</span></div>
                 <div class="modal-body">
                     <pre
                         style="
