@@ -1039,3 +1039,192 @@ async fn test_cancel_always_success() {
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 测试十五：Lua 脚本回报模式——按委托数量分档的示例脚本（编写说明文档首例）。
+/// >1000 拒单（执行报告 200102，ExecType=8）；800~1000 只回确认；
+/// 500~800 确认 + 部分成交（一半数量）；≤500 确认 + 全部成交。
+/// 顺带验证：带语法错误的脚本在保存网关与热更新策略时都被后端拒绝。
+#[tokio::test]
+async fn test_lua_script_mode_flow() {
+    let dir = std::env::temp_dir().join(format!("simx_sz_lua_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+
+    let script = r#"
+if ord.OrderQty > 1000 then
+    return "reject"
+elseif ord.OrderQty > 800 then
+    return "confirm"
+elseif ord.OrderQty > 500 then
+    return { { kind = "confirm" }, { kind = "trade", qty = math.floor(ord.OrderQty / 2) } }
+else
+    return "trade"
+end
+"#;
+    let gw = engine
+        .save_gateway(test_gateway(
+            18114,
+            1,
+            StrategyConfig {
+                mode: StrategyMode::LuaScript,
+                lua_script: script.into(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("保存网关失败");
+    // 语法错误的脚本：保存网关与热更新策略都必须失败（弹窗报错的数据来源）
+    let bad = test_gateway(
+        18114,
+        1,
+        StrategyConfig {
+            mode: StrategyMode::LuaScript,
+            lua_script: "if ord.OrderQty > 1000 then return \"reject\"".into(),
+            ..Default::default()
+        },
+    );
+    assert!(engine.save_gateway(bad).await.is_err(), "语法错误的脚本应导致保存网关失败");
+    assert!(
+        engine
+            .update_strategy(
+                &gw.id,
+                &gw.platforms[0].id,
+                StrategyConfig {
+                    mode: StrategyMode::LuaScript,
+                    lua_script: "return ==".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err(),
+        "语法错误的脚本应导致策略热更新失败"
+    );
+
+    engine.start_gateway(&gw.id).await.expect("启动网关失败");
+    let mut stream = connect_and_logon(18114).await;
+
+    // 单 1：1200 股 → 拒单（执行报告 200102，ExecType=8，原因码=默认 1）
+    stream
+        .write_all(&new_order_frame("LUA0000001", 1200_00, 10_0000, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK, "数量>1000 应为拒单回报");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.i32().unwrap(); // PartitionNo
+    let _ = r.i64().unwrap(); // ReportIndex
+    let _ = r.str(3).unwrap(); // ApplID
+    let _ = r.str(6).unwrap(); // ReportingPBUID
+    let _ = r.str(6).unwrap(); // SubmittingPBUID
+    let _ = r.str(8).unwrap(); // SecurityID
+    let _ = r.str(4).unwrap(); // SecurityIDSource
+    let _ = r.u16().unwrap(); // OwnerType
+    let _ = r.str(2).unwrap(); // ClearingFirm
+    let _ = r.i64().unwrap(); // TransactTime
+    let _ = r.str(8).unwrap(); // UserInfo
+    let _ = r.str(16).unwrap(); // OrderID
+    assert_eq!(r.str(10).unwrap(), "LUA0000001"); // ClOrdID
+    let _ = r.str(10).unwrap(); // OrigClOrdID
+    let _ = r.str(16).unwrap(); // ExecID
+    assert_eq!(r.ch().unwrap(), b'8'); // ExecType=拒绝
+    assert_eq!(r.ch().unwrap(), b'8'); // OrdStatus=拒绝
+    assert_eq!(r.u16().unwrap(), 1); // OrdRejReason=默认原因码
+
+    // 单 2：900 股 → 只回确认（200102，ExecType=0）
+    stream
+        .write_all(&new_order_frame("LUA0000002", 900_00, 10_0000, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK, "800~1000 应只回确认");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.i32().unwrap();
+    let _ = r.i64().unwrap();
+    let _ = r.str(3).unwrap();
+    let _ = r.str(6).unwrap();
+    let _ = r.str(6).unwrap();
+    let _ = r.str(8).unwrap();
+    let _ = r.str(4).unwrap();
+    let _ = r.u16().unwrap();
+    let _ = r.str(2).unwrap();
+    let _ = r.i64().unwrap();
+    let _ = r.str(8).unwrap();
+    let _ = r.str(16).unwrap();
+    assert_eq!(r.str(10).unwrap(), "LUA0000002");
+    let _ = r.str(10).unwrap();
+    let _ = r.str(16).unwrap();
+    assert_eq!(r.ch().unwrap(), b'0'); // ExecType=已报
+    assert_eq!(r.ch().unwrap(), b'0'); // OrdStatus=已报
+
+    // 单 3：600 股 → 确认 + 部分成交 300 股（脚本里 math.floor(600/2)）
+    stream
+        .write_all(&new_order_frame("LUA0000003", 600_00, 10_0000, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_TRADE, "500~800 应有部分成交");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.i32().unwrap();
+    let _ = r.i64().unwrap();
+    let _ = r.str(3).unwrap();
+    let _ = r.str(6).unwrap();
+    let _ = r.str(6).unwrap();
+    let _ = r.str(8).unwrap();
+    let _ = r.str(4).unwrap();
+    let _ = r.u16().unwrap();
+    let _ = r.str(2).unwrap();
+    let _ = r.i64().unwrap();
+    let _ = r.str(8).unwrap();
+    let _ = r.str(16).unwrap();
+    assert_eq!(r.str(10).unwrap(), "LUA0000003");
+    let _ = r.str(16).unwrap(); // ExecID
+    assert_eq!(r.ch().unwrap(), b'F'); // ExecType=成交
+    assert_eq!(r.ch().unwrap(), b'1'); // OrdStatus=部分成交
+    assert_eq!(r.i64().unwrap(), 10_0000); // LastPx=委托价（脚本未指定价格）
+    assert_eq!(r.i64().unwrap(), 300_00); // LastQty=300 股
+    assert_eq!(r.i64().unwrap(), 300_00); // LeavesQty
+    assert_eq!(r.i64().unwrap(), 300_00); // CumQty
+
+    // 单 4：400 股 → 确认 + 全部成交（字符串快捷方式 "trade"）
+    stream
+        .write_all(&new_order_frame("LUA0000004", 400_00, 10_0000, b'1'))
+        .await
+        .unwrap();
+    let (mt, _) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_ACK);
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_CASH_TRADE, "≤500 应全部成交");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.i32().unwrap();
+    let _ = r.i64().unwrap();
+    let _ = r.str(3).unwrap();
+    let _ = r.str(6).unwrap();
+    let _ = r.str(6).unwrap();
+    let _ = r.str(8).unwrap();
+    let _ = r.str(4).unwrap();
+    let _ = r.u16().unwrap();
+    let _ = r.str(2).unwrap();
+    let _ = r.i64().unwrap();
+    let _ = r.str(8).unwrap();
+    let _ = r.str(16).unwrap();
+    assert_eq!(r.str(10).unwrap(), "LUA0000004");
+    let _ = r.str(16).unwrap();
+    assert_eq!(r.ch().unwrap(), b'F');
+    assert_eq!(r.ch().unwrap(), b'2'); // OrdStatus=全部成交
+    assert_eq!(r.i64().unwrap(), 10_0000); // LastPx=委托价（10 元 × 10000）
+    assert_eq!(r.i64().unwrap(), 400_00); // LastQty
+    assert_eq!(r.i64().unwrap(), 0); // LeavesQty
+
+    // 统计校验：4 笔委托 = 3 确认 + 2 成交 + 1 拒单
+    let snap = engine.snapshot().await;
+    let p = &snap.gateways[0].platforms[0];
+    assert_eq!(p.stats.orders, 4);
+    assert_eq!(p.stats.acks, 3);
+    assert_eq!(p.stats.trades, 2);
+    assert_eq!(p.stats.order_rejects, 1);
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

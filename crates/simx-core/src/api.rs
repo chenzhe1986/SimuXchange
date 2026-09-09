@@ -85,6 +85,10 @@ pub enum Command {
         #[serde(default)]
         front_reject: bool,
     },
+    /// 校验 Lua 回报脚本语法（只编译不执行、不落盘），供前端"检查脚本"
+    /// 按钮即时反馈；保存时的强制校验在 update_strategy / save_gateway 内部。
+    /// 无状态只读，不记操作日志（避免编辑过程中频繁检查刷屏）
+    ValidateLuaScript { script: String },
 }
 
 /// 拼“成功”响应
@@ -262,5 +266,9 @@ pub async fn dispatch(engine: &Engine, payload: Value, client_ip: &str) -> Value
                 Err(e) => err(e),
             }
         }
+        Command::ValidateLuaScript { script } => match crate::lua_engine::check_syntax(&script) {
+            Ok(()) => ok(json!({ "message": "脚本语法正确" })),
+            Err(e) => err(e),
+        },
     }
 }

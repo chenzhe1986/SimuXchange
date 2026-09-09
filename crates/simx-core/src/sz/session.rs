@@ -26,6 +26,7 @@
 use crate::capture::ConnRecorder;
 use crate::config::{CancelMode, PlatformConfig, StrategyConfig};
 use crate::event::{ConnInfo, EngineEvent};
+use crate::lua_engine;
 use crate::orderbook::{OrderBook, OrderEntry, OrderStatus, OrderUpdate};
 use super::protocol::{
     self as protocol, exec_type, msg_type, ord_status, BusinessReject, CancelReject,
@@ -69,6 +70,10 @@ pub struct SessionCtx {
     /// 运行时回报策略（模拟策略/回报延迟可热更新：网关运行中修改
     /// 后对后续委托实时生效；每次生成回报计划时加锁读取最新值）
     pub strategy: Arc<std::sync::RwLock<StrategyConfig>>,
+    /// Lua 回报脚本的编译缓存（"Lua 脚本回报"模式用，三套协议共用）：
+    /// 按脚本内容缓存已编译的 Lua 运行时，策略热更新后自动重新编译；
+    /// 所有连接共享同一个缓存（Mutex 串行化访问）
+    pub lua_cache: Arc<lua_engine::ScriptCache>,
     /// 平台统计计数器（委托数/成交数…），各连接共同累加
     pub stats: Arc<PlatformStats>,
     /// 当前存活连接表：连接建立时登记、断开时移除，供前端展示
@@ -739,10 +744,33 @@ async fn handle_new_order(
     // 生成回报计划（具体几条确认/成交、延迟多少，由运行时策略配置决定；
     // 策略支持热更新，每次委托都读取最新值，改动即时生效）
     // 注意：策略读锁只在生成计划期间持有，不跨越 await 点——
-    // RwLockReadGuard 不是 Send，跨 await 存活会阻止会话任务在线程间调度
+    // RwLockReadGuard 不是 Send，跨 await 存活会阻止会话任务在线程间调度；
+    // Lua 脚本模式在这里同步执行脚本（无 await，非 Send 值同样不跨 await）
     let plans = {
         let st = ctx.strategy.read().unwrap();
-        strategy::plan_reports(&st, ctx.cfg.partition_for(&order.common.security_id), &order, &ctx.stats)
+        // 柜台地址从连接表取（连接建立时登记），给 Lua 脚本的 ctx.PeerAddr 用
+        let peer_str = ctx
+            .connections
+            .lock()
+            .unwrap()
+            .get(&conn_id)
+            .map(|c| c.peer.clone())
+            .unwrap_or_default();
+        let lua_env = lua_engine::ScriptEnv {
+            cache: &ctx.lua_cache,
+            category: "sz",
+            gateway: &ctx.gateway_name,
+            platform: &ctx.cfg.name,
+            peer: &peer_str,
+            log: &|level, msg| ctx.log(level, msg),
+        };
+        strategy::plan_reports(
+            &st,
+            ctx.cfg.partition_for(&order.common.security_id),
+            &order,
+            &ctx.stats,
+            &lua_env,
+        )
     };
     // 所有回报延迟都为 0 时可以当场发完；否则需要另起任务慢慢发
     let all_sync = plans.iter().all(|p| p.delay_ms == 0);

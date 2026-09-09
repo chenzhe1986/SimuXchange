@@ -15,16 +15,18 @@
 //! - **是否支持部分成交**：仅现货集中竞价（010）支持；其余业务把
 //!   PartialSingle/PartialSplit/Custom 等部分成交策略降级为全部成交
 //!
-//! 七种报单自动回报模式与对应剧本：
+//! 八种报单自动回报模式与对应剧本：
 //! - FullSingle  全部成交（单笔）：1 确认 + 1 成交
 //! - FullSplit   全部成交（拆单）：1 确认 + N 成交（数量随机拆、价格阶梯）
 //! - PartialSingle 部分成交（单笔）：1 确认 + 1 成交（数量小于委托量）
 //! - PartialSplit  部分成交（拆单）：1 确认 + N 成交（总量小于委托量）
-//! - Custom      自定义：1 确认 + 用户逐笔指定的成交（数量/价格）
+//! - Custom      自定义：1 确认 + 用户逐笔指定的成交（数量/价格）（已废弃）
 //! - AckOnly     只确认不成交：1 确认（挂单状态）
 //! - Reject      拒单：1 条拒绝（可选拒单回报 2xxx02 或业务拒绝 4）
+//! - LuaScript   Lua 脚本：执行用户脚本，按返回值逐条生成回报（见 plan_reports_lua）
 
 use crate::config::{RejectVia, StrategyConfig, StrategyMode};
+use crate::lua_engine::{ScriptEnv, ScriptKind};
 use crate::orderbook::{OrderStatus, OrderUpdate};
 use super::protocol::{
     self as protocol, exec_type, msg_type, ord_status, BusinessReject, ExecRptAck, ExecRptTrade,
@@ -433,19 +435,24 @@ fn qty_raw(shares: i64) -> i64 {
 /// 为一笔新订单生成回报计划（本模块唯一对外入口）。
 ///
 /// 总体逻辑：
-/// 1. 拒单策略 → 只生成 1 条拒绝，直接返回
-/// 2. 其他策略 → 先生成 1 条确认，再由 gen_fills 算出成交明细，
+/// 1. 不自动回复 → 空计划直接返回（订单留在缓存等手动回复）
+/// 2. Lua 脚本模式 → 执行用户脚本，按返回值逐条生成回报（见 plan_reports_lua）
+/// 3. 拒单策略 → 只生成 1 条拒绝，直接返回
+/// 4. 其他策略 → 先生成 1 条确认，再由 gen_fills 算出成交明细，
 ///    逐笔生成成交回报（累计成交量/剩余量/订单状态逐步推进）
-/// 3. 按业务特征（biz_info）决定确认/成交报告的报文类型；
+/// 5. 按业务特征（biz_info）决定确认/成交报告的报文类型；
 ///    无成交回报的业务跳过成交环节，只回确认
 ///
 /// st 为策略配置（可来自运行时热更新的共享区）、partition_no 为平台分区号，
-/// 两条回报的延迟由 st 的 ack_delay / trade_delay 抽样得到。
+/// 两条回报的延迟由 st 的 ack_delay / trade_delay 抽样得到；
+/// env 为 Lua 脚本模式的执行环境（脚本缓存/网关平台信息/日志回调），
+/// 非 Lua 模式下不使用，但统一携带以便签名一致。
 pub fn plan_reports(
     st: &StrategyConfig,
     partition_no: i32,
     order: &NewOrder,
     stats: &PlatformStats,
+    env: &ScriptEnv,
 ) -> Vec<PlannedReport> {
     // 业务特征：决定回报报文类型与是否有成交回报
     let biz = biz_info(order.msg_type);
@@ -454,6 +461,11 @@ pub fn plan_reports(
     // 订单已在会话层登记进缓存，等柜台在订单界面手动回复确认/成交/拒单/撤单
     if st.mode == StrategyMode::NoAutoReply {
         return Vec::new();
+    }
+
+    // ---- Lua 脚本模式：回报剧本完全由用户脚本决定 ----
+    if st.mode == StrategyMode::LuaScript {
+        return plan_reports_lua(st, partition_no, order, stats, env);
     }
 
     let order_id = stats.next_order_id();
@@ -465,12 +477,7 @@ pub fn plan_reports(
             // 方式一：用执行报告(2xxx02)拒单，在确认报文基础上
             // 把执行类型/订单状态改成“已拒绝”并带上拒绝原因代码
             RejectVia::ExecutionReport => {
-                let mut rpt = base_ack(partition_no, order, &biz, stats, &order_id);
-                rpt.exec_type = exec_type::REJECT;
-                rpt.ord_status = ord_status::REJECTED;
-                rpt.ord_rej_reason = st.reject_reason;
-                rpt.leaves_qty = 0;
-                rpt.cum_qty = 0;
+                let rpt = build_reject_rpt(partition_no, order, &biz, stats, &order_id, st.reject_reason);
                 plans.push(PlannedReport {
                     delay_ms: st.ack_delay.sample(),
                     kind: ReportKind::Reject,
@@ -490,18 +497,7 @@ pub fn plan_reports(
             }
             // 方式二：用独立的业务拒绝消息(MsgType=4)，可携带文字说明
             RejectVia::BusinessReject => {
-                let rej = BusinessReject {
-                    appl_id: fill_or(&order.common.appl_id, biz.appl_id),
-                    transact_time: protocol::now_timestamp(),
-                    submitting_pbu_id: order.common.submitting_pbu_id.clone(),
-                    security_id: order.common.security_id.clone(),
-                    security_id_source: order.common.security_id_source.clone(),
-                    ref_seq_num: 0,
-                    ref_msg_type: order.msg_type,
-                    business_reject_ref_id: order.common.cl_ord_id.clone(),
-                    business_reject_reason: st.reject_reason,
-                    business_reject_text: st.reject_text.clone(),
-                };
+                let rej = build_business_reject_msg(order, &biz, st.reject_reason, &st.reject_text);
                 plans.push(PlannedReport {
                     delay_ms: st.ack_delay.sample(),
                     kind: ReportKind::BusinessReject,
@@ -596,6 +592,272 @@ pub fn plan_reports(
     }
 
     plans
+}
+
+/// Lua 脚本模式（StrategyMode::LuaScript）的回报计划生成：
+///
+/// 1. 把委托字段装进 `ord` 表（自然单位：价格元、数量股），由 lua_engine
+///    执行脚本得到一串 [`ScriptPlan`]（脚本返回值，见编写说明文档）；
+/// 2. 逐条转成 PlannedReport：确认/拒单复用上面的构造逻辑（抽成了
+///    build_reject_rpt / build_business_reject_msg 供固定拒单模式共用），
+///    成交项按顺序推进累计成交量 cum / 剩余量 leaves（最后一笔成交完
+///    订单转"全部成交"，未成交完保持"部分成交"在途）；
+/// 3. 脚本执行出错（语法已在保存时拦截，这里只可能是运行时错误：访问
+///    nil、死循环超限等）：本笔委托**不自动回报**（返回空计划），错误
+///    通过 env.log 写到前端日志面板。
+pub fn plan_reports_lua(
+    st: &StrategyConfig,
+    partition_no: i32,
+    order: &NewOrder,
+    stats: &PlatformStats,
+    env: &ScriptEnv,
+) -> Vec<PlannedReport> {
+    let items = match env.run(&st.lua_script, partition_no, |lua| build_ord_table(lua, order)) {
+        Ok(items) => items,
+        Err(e) => {
+            (env.log)(
+                "error",
+                format!(
+                    "Lua 回报脚本执行失败，本笔委托 ClOrdID={} 不自动回报：{}",
+                    order.common.cl_ord_id, e
+                ),
+            );
+            return Vec::new();
+        }
+    };
+
+    let biz = biz_info(order.msg_type);
+    let order_id = stats.next_order_id();
+    let cl_ord_id = order.common.cl_ord_id.clone();
+    let total_raw = order.common.order_qty; // 委托数量（放大单位）
+    let mut cum_raw: i64 = 0; // 已累计成交（放大单位）
+    let mut plans = Vec::new();
+
+    for item in items {
+        match item.kind {
+            // ---- 确认回报：ExecType=0 已报，剩余量 = 委托全量 ----
+            ScriptKind::Confirm => {
+                let ack = base_ack(partition_no, order, &biz, stats, &order_id);
+                plans.push(PlannedReport {
+                    delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                    kind: ReportKind::Ack,
+                    frame: ack.encode(),
+                    desc: format!(
+                        "确认回报({}) ClOrdID={} OrderID={}（Lua）",
+                        biz.ack_msg_type,
+                        cl_ord_id,
+                        order_id.trim_start_matches('0')
+                    ),
+                    cl_ord_id: cl_ord_id.clone(),
+                    order_update: Some(OrderUpdate {
+                        order_id: order_id.clone(),
+                        cum_qty: 0.0,
+                        leaves_qty: total_raw as f64 / QTY_UNIT as f64,
+                        status: OrderStatus::New,
+                    }),
+                });
+            }
+            // ---- 成交回报：qty 缺省 = 剩余全部，price 缺省 = 委托价 ----
+            ScriptKind::Trade => {
+                // 表 3-4 无成交回报的业务（trade_msg_type = None）：
+                // 忽略成交项并提示（与固定模式的降级行为一致）
+                let Some(trade_msg_type) = biz.trade_msg_type else {
+                    (env.log)(
+                        "warn",
+                        format!(
+                            "Lua 脚本返回成交回报，但业务 {}（{}）无成交回报，该项已忽略",
+                            biz.appl_id, biz.name
+                        ),
+                    );
+                    continue;
+                };
+                // 脚本给的是"股"（f64），向下取整换算回放大整数
+                let remaining = ((total_raw - cum_raw) / QTY_UNIT).max(0);
+                let shares = item.qty.map(|q| q as i64).unwrap_or(remaining);
+                let fill_qty = shares.saturating_mul(QTY_UNIT).max(0);
+                cum_raw += fill_qty;
+                let leaves = (total_raw - cum_raw).max(0);
+                let status = if leaves == 0 {
+                    ord_status::FILLED
+                } else {
+                    ord_status::PARTIALLY_FILLED
+                };
+                let fill_px = item.price.map(px_raw).unwrap_or(order.common.price);
+                let trade = build_trade(
+                    partition_no, order, &biz, stats, &order_id, trade_msg_type,
+                    fill_qty, fill_px, cum_raw, leaves, status,
+                );
+                plans.push(PlannedReport {
+                    delay_ms: item.delay_ms.unwrap_or_else(|| st.trade_delay.sample()),
+                    kind: ReportKind::Trade,
+                    frame: trade.encode(),
+                    desc: format!(
+                        "成交回报({}) ClOrdID={} 价格={:.4} 数量={} 剩余={}（Lua）",
+                        trade_msg_type,
+                        cl_ord_id,
+                        fill_px as f64 / PX_UNIT,
+                        fill_qty / QTY_UNIT,
+                        leaves / QTY_UNIT
+                    ),
+                    cl_ord_id: cl_ord_id.clone(),
+                    order_update: Some(OrderUpdate {
+                        order_id: order_id.clone(),
+                        cum_qty: cum_raw as f64 / QTY_UNIT as f64,
+                        leaves_qty: leaves as f64 / QTY_UNIT as f64,
+                        status: if leaves == 0 {
+                            OrderStatus::Filled
+                        } else {
+                            OrderStatus::Partial
+                        },
+                    }),
+                });
+            }
+            // ---- 拒单回报：via/reason/text 缺省取策略配置 ----
+            ScriptKind::Reject => {
+                let via = item
+                    .via_business
+                    .map(|b| {
+                        if b {
+                            RejectVia::BusinessReject
+                        } else {
+                            RejectVia::ExecutionReport
+                        }
+                    })
+                    .unwrap_or(st.reject_via);
+                match via {
+                    RejectVia::ExecutionReport => {
+                        // 深市原因码字段宽 u16，超出部分截断
+                        let reason = item
+                            .reason
+                            .map(|r| r.min(u16::MAX as u32) as u16)
+                            .unwrap_or(st.reject_reason);
+                        let rpt = build_reject_rpt(partition_no, order, &biz, stats, &order_id, reason);
+                        plans.push(PlannedReport {
+                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            kind: ReportKind::Reject,
+                            frame: rpt.encode(),
+                            desc: format!(
+                                "拒单回报({}) ClOrdID={} 原因代码={}（Lua）",
+                                biz.ack_msg_type, cl_ord_id, reason
+                            ),
+                            cl_ord_id: cl_ord_id.clone(),
+                            order_update: Some(OrderUpdate {
+                                order_id: order_id.clone(),
+                                cum_qty: 0.0,
+                                leaves_qty: 0.0,
+                                status: OrderStatus::Rejected,
+                            }),
+                        });
+                    }
+                    RejectVia::BusinessReject => {
+                        let reason = item
+                            .reason
+                            .map(|r| r.min(u16::MAX as u32) as u16)
+                            .unwrap_or(st.reject_reason);
+                        let text = item.text.unwrap_or_else(|| st.reject_text.clone());
+                        let rej = build_business_reject_msg(order, &biz, reason, &text);
+                        plans.push(PlannedReport {
+                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            kind: ReportKind::BusinessReject,
+                            frame: rej.encode(),
+                            desc: format!("业务拒绝(4) ClOrdID={} 原因={}（Lua）", cl_ord_id, text),
+                            cl_ord_id: cl_ord_id.clone(),
+                            order_update: Some(OrderUpdate {
+                                order_id: String::new(), // 业务拒绝未分配交易所订单号
+                                cum_qty: 0.0,
+                                leaves_qty: 0.0,
+                                status: OrderStatus::Rejected,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    plans
+}
+
+/// 把深市新订单装进 Lua 的 `ord` 表。
+/// 字段名与报文解析（ParsedField）显示的交易所规范名一致；价格/数量从
+/// 协议放大整数换算成自然单位（元/股），Side/OrdType 等单字节字段转字符串。
+/// 收录公共字段全量 + 竞价类业务常用扩展字段（其余扩展字段暂未暴露）。
+fn build_ord_table(lua: &mlua::Lua, order: &NewOrder) -> mlua::Result<mlua::Table> {
+    let c = &order.common;
+    let t = lua.create_table()?;
+    t.set("MsgType", order.msg_type)?; // 消息类型（数字，如 100101）
+    t.set("ApplID", c.appl_id.as_str())?;
+    t.set("PBU", c.submitting_pbu_id.as_str())?;
+    t.set("SecurityID", c.security_id.as_str())?;
+    t.set("SecurityIDSource", c.security_id_source.as_str())?;
+    t.set("OwnerType", c.owner_type)?;
+    t.set("ClearingFirm", c.clearing_firm.as_str())?;
+    t.set("TransactTime", c.transact_time)?;
+    t.set("UserInfo", c.user_info.as_str())?;
+    t.set("ClOrdID", c.cl_ord_id.as_str())?;
+    t.set("AccountID", c.account_id.as_str())?;
+    t.set("BranchID", c.branch_id.as_str())?;
+    t.set("OrderRestrictions", c.order_restrictions.as_str())?;
+    t.set("Side", byte_as_str(c.side))?; // "1"买 "2"卖
+    t.set("OrdType", byte_as_str(c.ord_type))?; // "1"市价 "2"限价 "U"本方最优
+    t.set("OrderQty", c.order_qty as f64 / QTY_UNIT as f64)?; // 股
+    t.set("Price", c.price as f64 / PX_UNIT)?; // 元
+    // 主要扩展字段（存在与否各业务不同，未用到的为默认值 0/空串）
+    let e = &order.extend;
+    t.set("StopPx", e.stop_px as f64 / PX_UNIT)?;
+    t.set("MinQty", e.min_qty as f64 / QTY_UNIT as f64)?;
+    t.set("MaxPriceLevels", e.max_price_levels)?;
+    t.set("TimeInForce", e.time_in_force)?;
+    t.set("CashMargin", e.cash_margin)?;
+    t.set("LowLimitPrice", e.low_limit_price as f64 / PX_UNIT)?;
+    t.set("HighLimitPrice", e.high_limit_price as f64 / PX_UNIT)?;
+    t.set("CashOrderQty", e.cash_order_qty as f64 / PX_UNIT)?; // 金额，元
+    t.set("LotType", byte_as_str(e.lot_type))?;
+    Ok(t)
+}
+
+/// u8 字节（ASCII）转字符串，如 b'1' → "1"（Side/OrdType 在协议里是单字节）
+fn byte_as_str(b: u8) -> String {
+    (b as char).to_string()
+}
+
+/// 构造执行报告形式的拒单报文：确认报文基础上把执行类型/订单状态改成
+/// "已拒绝"并带上原因代码（固定拒单模式与 Lua 脚本拒单共用）
+fn build_reject_rpt(
+    partition_no: i32,
+    order: &NewOrder,
+    biz: &BizInfo,
+    stats: &PlatformStats,
+    order_id: &str,
+    reason: u16,
+) -> ExecRptAck {
+    let mut rpt = base_ack(partition_no, order, biz, stats, order_id);
+    rpt.exec_type = exec_type::REJECT;
+    rpt.ord_status = ord_status::REJECTED;
+    rpt.ord_rej_reason = reason;
+    rpt.leaves_qty = 0;
+    rpt.cum_qty = 0;
+    rpt
+}
+
+/// 构造业务拒绝消息（MsgType=4，可携带文字说明；固定拒单模式与 Lua 脚本拒单共用）
+fn build_business_reject_msg(
+    order: &NewOrder,
+    biz: &BizInfo,
+    reason: u16,
+    text: &str,
+) -> BusinessReject {
+    BusinessReject {
+        appl_id: fill_or(&order.common.appl_id, biz.appl_id),
+        transact_time: protocol::now_timestamp(),
+        submitting_pbu_id: order.common.submitting_pbu_id.clone(),
+        security_id: order.common.security_id.clone(),
+        security_id_source: order.common.security_id_source.clone(),
+        ref_seq_num: 0,
+        ref_msg_type: order.msg_type,
+        business_reject_ref_id: order.common.cl_ord_id.clone(),
+        business_reject_reason: reason,
+        business_reject_text: text.to_string(),
+    }
 }
 
 /// 无成交回报业务：订单保持已报状态，模拟真实柜台“申报成功、等待后续处理”的场景。
@@ -743,8 +1005,11 @@ fn gen_fills(st: &StrategyConfig, order: &NewOrder, biz: &BizInfo) -> Vec<(i64, 
             with_ladder_prices(st, order, &qtys)
         }
         // 只确认/拒单：没有成交
-        // NoAutoReply 在 plan_reports 已早退（不生成任何计划），这里不可达
-        StrategyMode::NoAutoReply | StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
+        // NoAutoReply 在 plan_reports 已早退（不生成任何计划），这里不可达；
+        // LuaScript 同样在 plan_reports 早退走脚本分支，不进 gen_fills
+        StrategyMode::NoAutoReply | StrategyMode::AckOnly | StrategyMode::Reject | StrategyMode::LuaScript => {
+            Vec::new()
+        }
     }
 }
 
@@ -873,12 +1138,29 @@ mod tests {
         }
     }
 
+    /// 测试用的 Lua 执行环境（无日志；脚本缓存为全测试共享的静态实例，
+    /// 非 Lua 模式用不到它，只为满足 plan_reports 的新签名）
+    fn test_lua_env() -> ScriptEnv<'static> {
+        static CACHE: std::sync::OnceLock<crate::lua_engine::ScriptCache> = std::sync::OnceLock::new();
+        ScriptEnv {
+            cache: CACHE.get_or_init(crate::lua_engine::ScriptCache::new),
+            category: "sz",
+            gateway: "测试网关",
+            platform: "测试平台",
+            peer: "127.0.0.1:1",
+            log: &no_log,
+        }
+    }
+
+    /// 静态日志回调：单元测试里丢弃所有日志
+    fn no_log(_level: &str, _msg: String) {}
+
     #[test]
     fn test_full_single() {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::FullSingle);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 2); // ack + 1 笔成交
         assert_eq!(plans[0].kind, ReportKind::Ack);
         assert_eq!(plans[1].kind, ReportKind::Trade);
@@ -890,7 +1172,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_BOND_REPO, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::FullSingle);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 2);
         assert_eq!(u32::from_be_bytes(plans[0].frame[0..4].try_into().unwrap()), 200_202);
         assert_eq!(u32::from_be_bytes(plans[1].frame[0..4].try_into().unwrap()), 200_215);
@@ -902,7 +1184,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_BOND_REPO, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::PartialSingle);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 2);
         let trade = ExecRptTrade::decode(
             msg_type::EXEC_RPT_BOND_REPO_TRADE,
@@ -919,7 +1201,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_ETF_SUB_RED, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::FullSingle);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, ReportKind::Ack);
         assert_eq!(u32::from_be_bytes(plans[0].frame[0..4].try_into().unwrap()), 201_202);
@@ -931,7 +1213,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::PartialSingle);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 2);
         let trade = ExecRptTrade::decode(
             msg_type::EXEC_RPT_CASH_TRADE,
@@ -948,7 +1230,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_HK_CONNECT, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::AckOnly);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 1);
         assert_eq!(u32::from_be_bytes(plans[0].frame[0..4].try_into().unwrap()), 206_302);
     }
@@ -995,7 +1277,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::Reject);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, ReportKind::Reject);
     }
@@ -1005,7 +1287,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::AckOnly);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, ReportKind::Ack);
     }
@@ -1016,7 +1298,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::NoAutoReply);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats);
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
         assert!(plans.is_empty());
     }
 
@@ -1027,6 +1309,105 @@ mod tests {
         let old: StrategyConfig =
             serde_json::from_str(r#"{"mode": "custom"}"#).expect("旧 custom 模式必须可解析");
         assert_eq!(old.mode, StrategyMode::AckOnly);
+    }
+
+    #[test]
+    fn test_lua_mode_confirm_then_partial_trade() {
+        // Lua 脚本模式：确认 + 部分成交（一半数量），订单保持"部分成交"在途
+        let stats = PlatformStats::default();
+        let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
+        let cfg = mk_cfg(StrategyMode::LuaScript);
+        let mut cfg = cfg;
+        cfg.strategy.lua_script = r#"
+return {
+    { kind = "confirm" },
+    { kind = "trade", qty = ord.OrderQty / 2, price = 9.99 },
+}
+"#
+        .into();
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].kind, ReportKind::Ack);
+        assert_eq!(plans[1].kind, ReportKind::Trade);
+        // 校验订单缓存更新（报文级细节由 e2e 测试覆盖）
+        let upd = plans[1].order_update.as_ref().unwrap();
+        assert_eq!(upd.cum_qty, 500.0);
+        assert_eq!(upd.leaves_qty, 500.0);
+        assert_eq!(upd.status, OrderStatus::Partial);
+    }
+
+    #[test]
+    fn test_lua_mode_full_fill_via_string() {
+        // Lua 脚本模式：字符串快捷方式 "trade" = 确认 + 全部成交
+        let stats = PlatformStats::default();
+        let order = mk_order(msg_type::NEW_ORDER_CASH, 800, 12.5, b'2');
+        let cfg = mk_cfg(StrategyMode::LuaScript);
+        let mut cfg = cfg;
+        cfg.strategy.lua_script = r#"return "trade""#.into();
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].kind, ReportKind::Ack);
+        assert_eq!(plans[1].kind, ReportKind::Trade);
+        let upd = plans[1].order_update.as_ref().unwrap();
+        assert_eq!(upd.cum_qty, 800.0);
+        assert_eq!(upd.leaves_qty, 0.0);
+        assert_eq!(upd.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_lua_mode_reject_with_reason() {
+        // Lua 脚本模式：业务拒绝 + 自定义原因码/文本（缺省方式取策略配置）
+        let stats = PlatformStats::default();
+        let order = mk_order(msg_type::NEW_ORDER_CASH, 1200, 10.0, b'1');
+        let cfg = mk_cfg(StrategyMode::LuaScript);
+        let mut cfg = cfg;
+        cfg.strategy.lua_script = r#"
+return { kind = "reject", via = "business", reason = 20009, text = "数量超限" }
+"#
+        .into();
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].kind, ReportKind::BusinessReject);
+        let upd = plans[0].order_update.as_ref().unwrap();
+        assert_eq!(upd.status, OrderStatus::Rejected);
+    }
+
+    #[test]
+    fn test_lua_mode_runtime_error_yields_no_reports() {
+        // 脚本运行时出错（对 nil 取索引）：本笔委托不自动回报
+        let stats = PlatformStats::default();
+        let order = mk_order(msg_type::NEW_ORDER_CASH, 1000, 10.0, b'1');
+        let cfg = mk_cfg(StrategyMode::LuaScript);
+        let mut cfg = cfg;
+        cfg.strategy.lua_script = r#"local t = nil return t.field"#.into();
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn test_lua_mode_multi_trades_cum_progress() {
+        // Lua 脚本模式：多条成交逐笔推进累计成交量，最后一笔转全部成交
+        let stats = PlatformStats::default();
+        let order = mk_order(msg_type::NEW_ORDER_CASH, 900, 10.0, b'1');
+        let cfg = mk_cfg(StrategyMode::LuaScript);
+        let mut cfg = cfg;
+        cfg.strategy.lua_script = r#"
+return {
+    { kind = "confirm" },
+    { kind = "trade", qty = 300 },
+    { kind = "trade" },  -- 缺省 = 剩余全部
+}
+"#
+        .into();
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, &test_lua_env());
+        assert_eq!(plans.len(), 3);
+        let u1 = plans[1].order_update.as_ref().unwrap();
+        assert_eq!(u1.cum_qty, 300.0);
+        assert_eq!(u1.status, OrderStatus::Partial);
+        let u2 = plans[2].order_update.as_ref().unwrap();
+        assert_eq!(u2.cum_qty, 900.0);
+        assert_eq!(u2.leaves_qty, 0.0);
+        assert_eq!(u2.status, OrderStatus::Filled);
     }
 
     #[test]

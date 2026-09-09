@@ -247,6 +247,11 @@ pub enum StrategyMode {
     AckOnly,
     /// 拒单：回拒绝回报（方式见 RejectVia）
     Reject,
+    /// Lua 脚本回报：收到委托后执行用户编写的 Lua 脚本（StrategyConfig.lua_script），
+    /// 按脚本返回值生成确认/成交/拒单回报（详见 docs/Lua脚本回报编写说明.md）。
+    /// 只接管新委托的回报；撤单仍按 CancelMode 配置走。
+    /// 脚本在保存时由后端做语法校验，运行时沙箱化执行（无 io/os 等库）。
+    LuaScript,
 }
 
 /// 拒单回报方式
@@ -334,6 +339,10 @@ pub struct StrategyConfig {
     pub cancel_front_reject: bool,
     /// 撤单回报延迟（撤单成功与撤单拒单回报均适用）
     pub cancel_delay: DelayConfig,
+    /// Lua 回报脚本源码（仅 mode == LuaScript 时使用；serde camelCase → luaScript）。
+    /// 保存时后端校验语法（engine 的 update_strategy / save_gateway），
+    /// 运行时由 lua_engine 模块沙箱化编译执行
+    pub lua_script: String,
 }
 
 impl Default for StrategyConfig {
@@ -352,6 +361,7 @@ impl Default for StrategyConfig {
             cancel_reject_reason: 1,
             cancel_front_reject: false,
             cancel_delay: DelayConfig::default(),
+            lua_script: String::new(),
         }
     }
 }

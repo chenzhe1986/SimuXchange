@@ -10,3 +10,4 @@ serde_json = { workspace = true }
 rand = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
+mlua = { workspace = true }

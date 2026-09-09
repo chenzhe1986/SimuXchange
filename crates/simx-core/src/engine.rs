@@ -18,7 +18,7 @@
 //! - `broadcast` 通道：日志事件广播（推给前端）
 
 use crate::capture::{ConnRecorder, PacketPage};
-use crate::config::{GatewayCategory, GatewayConfig, PlatformConfig, StrategyConfig};
+use crate::config::{GatewayCategory, GatewayConfig, PlatformConfig, StrategyConfig, StrategyMode};
 use crate::event::{ConnInfo, EngineEvent};
 use crate::oplog::OpLog;
 use crate::orderbook::{OrderBook, OrderEntry};
@@ -141,6 +141,22 @@ impl Engine {
         Some((gw.name.clone(), plat.name.clone()))
     }
 
+    /// 校验 Lua 回报脚本（mode == LuaScript 的平台在保存时调用）：
+    /// 脚本不能为空 + 语法必须编译通过。错误信息带平台名，直接展示给用户。
+    fn validate_lua_script(platform_name: &str, strategy: &StrategyConfig) -> Result<(), String> {
+        if strategy.mode != StrategyMode::LuaScript {
+            return Ok(());
+        }
+        if strategy.lua_script.trim().is_empty() {
+            return Err(format!(
+                "平台 [{}] 已选择 Lua 脚本回报模式，但脚本内容为空",
+                platform_name
+            ));
+        }
+        crate::lua_engine::check_syntax(&strategy.lua_script)
+            .map_err(|e| format!("平台 [{}] 的 Lua 回报脚本语法错误：{}", platform_name, e))
+    }
+
     /// 新建或更新网关配置并落盘。
     /// 规则：运行中禁改；id 为空视为新建（自动生成 id）；同网关内端口不可重复
     pub async fn save_gateway(&self, mut gw: GatewayConfig) -> Result<GatewayConfig, String> {
@@ -160,6 +176,9 @@ impl Engine {
             // “展示收发报文”与“持久化到文件”已合并：勾选展示即自动持久化，
             // 保存时强制两者一致，兼容旧配置里只开其中一个的情况
             p.persist_packets = p.show_packets;
+            // Lua 脚本回报模式：保存时校验脚本（非空 + 语法），错误则整体失败，
+            // 保证落盘的配置里的脚本都是可执行的
+            Self::validate_lua_script(&p.name, &p.strategy)?;
         }
         // 校验同一网关内端口不重复
         let mut ports: Vec<u16> = gw.platforms.iter().map(|p| p.port).collect();
@@ -251,6 +270,9 @@ impl Engine {
                 gateway_name: gw.name.clone(),
                 cfg: cfg.clone(),
                 strategy: strategy.clone(),
+                // Lua 回报脚本编译缓存：平台生命周期内共享，策略热更新后
+                // 下一笔委托自动重新编译
+                lua_cache: Arc::new(crate::lua_engine::ScriptCache::new()),
                 stats: stats.clone(),
                 connections: connections.clone(),
                 recorders: recorders.clone(),
@@ -375,6 +397,17 @@ impl Engine {
         platform_id: &str,
         strategy: StrategyConfig,
     ) -> Result<(), String> {
+        // 0) Lua 脚本模式先校验脚本（非空 + 语法）——校验失败直接整体报错，
+        //    不写运行时共享区也不落盘；平台名查不到时用 id 兜底（提示仍可定位）
+        {
+            let gws = self.inner.gateways.lock().await;
+            let pname = gws
+                .iter()
+                .find(|g| g.id == gateway_id)
+                .and_then(|g| g.platforms.iter().find(|p| p.id == platform_id))
+                .map(|p| p.name.clone());
+            Self::validate_lua_script(pname.as_deref().unwrap_or(platform_id), &strategy)?;
+        }
         // 1) 更新运行中平台的策略（未运行则跳过，只落盘）
         {
             let running = self.inner.running.lock().await;

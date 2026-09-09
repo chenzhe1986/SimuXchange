@@ -33,6 +33,7 @@ SimuXchange/
 | Rust（MSVC 工具链） | `winget install Rustlang.Rustup`（需已装 VS C++ 生成工具） | `cargo --version` |
 | Node.js ≥ 18 | 前端构建 | `node --version` |
 | WebView2 运行时 | Win10/11 一般自带 | — |
+| musl 交叉 C 编译器 | 仅**打包发布版**需要（mlua 的 Lua C 源码要交叉编译到 musl）：安装 [zig](https://ziglang.org/download/)（Windows x86_64 版，解压后把目录加入 PATH），build 脚本自动用 `zig cc` 充当交叉编译器；详见构建调试手册第 2 节 | `zig version` |
 
 > 本机已完成安装并编译通过。新开终端若提示找不到 cargo，重开一个终端即可（安装器已写入 PATH）。
 
@@ -52,13 +53,14 @@ npm run tauri build
 ```
 
 构建时会自动执行 `scripts/build-all.ps1`：**每次打包按源码指纹增量编译** Linux 后端
-（服务端代码有改动自动重编，不会打包进旧产物；链接方式自动探测——无 musl 交叉
-工具链时用 rust-lld 自包含链接），并把该文件打进安装包，安装后位于安装目录的
+（服务端代码有改动自动重编，不会打包进旧产物），并把该文件打进安装包，安装后位于安装目录的
 `Linux\simx-server`（供 Linux 服务器远程部署用，见第 3 节）。
+注意：mlua（Lua 脚本回报）的 vendored Lua C 源码需要 **musl 交叉 C 编译器**
+（装好 zig 即可，本机无则打包中止并提示安装方法，见环境要求表）。
 
 产物：
 - 免安装 exe：`target\release\simuxchange.exe`
-- NSIS 安装包：`target\release\bundle\nsis\SimuXchange_1.0.0_x64-setup.exe`
+- NSIS 安装包：`target\release\bundle\nsis\SimuXchange_1.1.0_x64-setup.exe`
 
 部署时把 `simx.config.json` 与 exe 放同一目录；网关配置保存在同目录 `gateways.json`。
 
@@ -163,6 +165,7 @@ Linux 下在装好 Rust 的机器上同样执行 `cargo build --release -p simx-
 | 不自动回复（挂单手动回复） | 不自动回任何回报，委托登记进订单缓存，由订单界面手动回复确认/成交/拒单/撤单 |
 | 不成交挂单 | 只回确认 |
 | 拒单 | 回 200102(ExecType=8) 或业务拒绝消息(MsgType=4)，原因码/文本可配置 |
+| Lua 脚本回报 | 执行自定义 Lua 脚本，按脚本返回值生成任意组合的确认/成交/拒单（可用委托的任意字段做条件，沙箱化执行、保存时校验语法），详见 [docs/Lua脚本回报编写说明.md](docs/Lua脚本回报编写说明.md) |
 
 延迟配置：最小 = 最大为固定延迟；范围随机；全为 0 时在收单流程内同步回报，否则异步发送。
 
@@ -183,7 +186,7 @@ Linux 下在装好 Rust 的机器上同样执行 `cargo build --release -p simx-
 ## 测试
 
 ```powershell
-cargo test -p simx-core        # 94 个单元测试 + 4 个自动启动 + 23 个端到端集成测试（深交所 12 + 上交所竞价 6 + 上交所新债券 5）
+cargo test -p simx-core        # 111 个单元测试 + 4 个自动启动 + 28 个端到端集成测试（深交所 15 + 上交所竞价 7 + 上交所新债券 6）
 ```
 
-端到端测试覆盖：TCP 连接 → Logon 握手 →（上交所还含分区序号同步）→ 委托 → 回报字段/校验和验证 → 网关停止 Logout。
+端到端测试覆盖：TCP 连接 → Logon 握手 →（上交所还含分区序号同步）→ 委托 → 回报字段/校验和验证 → 网关停止 Logout（含 Lua 脚本回报模式的数量分档脚本全流程）。

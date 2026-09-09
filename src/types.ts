@@ -43,7 +43,8 @@ export type StrategyMode =
     | "partialSplit"
     | "noAutoReply"
     | "ackOnly"
-    | "reject";
+    | "reject"
+    | "luaScript";
 
 /** 拒单方式：执行回报(200102) 或 业务拒绝消息(MsgType=4) */
 export type RejectVia = "executionReport" | "businessReject";
@@ -76,6 +77,9 @@ export interface StrategyConfig {
     cancelFrontReject: boolean;
     /** 撤单回报延迟（撤单成功与撤单拒单回报） */
     cancelDelay: DelayConfig;
+    /** Lua 回报脚本源码（仅 luaScript 模式使用；保存时后端校验语法，
+     *  运行时沙箱化执行，详见 docs/Lua脚本回报编写说明.md） */
+    luaScript: string;
 }
 
 /** 一个模拟交易平台（= 一个 TCP 监听端口）的配置 */
@@ -345,8 +349,27 @@ export const STRATEGY_MODES: { value: StrategyMode; label: string }[] = [
     { value: "partialSplit", label: "部分成交（随机拆多笔）" },
     { value: "ackOnly", label: "只回确认回报" },
     { value: "reject", label: "自动拒单" },
+    { value: "luaScript", label: "Lua 脚本回报" },
     { value: "noAutoReply", label: "关闭自动回报" },
 ];
+
+/** Lua 脚本回报模式的默认脚本模板（新建平台/切换模式时预填，
+ *  也是 docs/Lua脚本回报编写说明.md 首例的"按委托数量分档"逻辑） */
+export const DEFAULT_LUA_SCRIPT = `-- Lua 回报脚本：收到新委托时执行，按 return 值生成回报
+-- ord = 委托字段（ord.OrderQty 数量/股、ord.Price 价格/元、ord.SecurityID 证券代码…）
+-- ctx = 环境信息（ctx.Platform 平台名、ctx.PartitionNo 分区号、ctx.PeerAddr 柜台地址）
+-- 快捷方式：return "confirm" 只回确认 / "trade" 确认+全部成交 / "reject" 拒单
+-- 详见 docs/Lua脚本回报编写说明.md
+if ord.OrderQty > 1000 then
+    return "reject"                       -- 数量超 1000：拒单
+elseif ord.OrderQty > 800 then
+    return "confirm"                      -- 800~1000：只回确认
+elseif ord.OrderQty > 500 then
+    -- 500~800：确认 + 按一半数量部分成交
+    return { { kind = "confirm" }, { kind = "trade", qty = math.floor(ord.OrderQty / 2) } }
+else
+    return "trade"                        -- 500 以内：确认 + 全部成交
+end`;
 
 /** 撤单自动回报模式下拉框选项（value 与后端 CancelMode 的 camelCase 名一致） */
 export const CANCEL_MODES: { value: CancelMode; label: string }[] = [
@@ -400,6 +423,7 @@ export function defaultStrategy(category: GatewayCategory = "sz"): StrategyConfi
         cancelRejectReason: 1,
         cancelFrontReject: false,
         cancelDelay: { minMs: 0, maxMs: 0 },
+        luaScript: DEFAULT_LUA_SCRIPT,
     };
 }
 

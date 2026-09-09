@@ -29,6 +29,7 @@
 
 use crate::config::{CancelMode, PlatformConfig};
 use crate::event::ConnInfo;
+use crate::lua_engine;
 use crate::orderbook::{OrderEntry, OrderStatus, OrderUpdate};
 use crate::stats::PlatformStats;
 use crate::sz::session::{ManualReportKind, SessionCtx};
@@ -534,7 +535,31 @@ async fn handle_new_order(
 
     let plans = {
         let st = ctx.strategy.read().unwrap();
-        strategy::plan_reports(&st, ctx.cfg.partition_for(&order.security_id), &order, &ctx.stats, pbu)
+        // 柜台地址从连接表取（连接建立时登记），给 Lua 脚本的 ctx.PeerAddr 用；
+        // Lua 脚本模式在这里同步执行脚本（无 await，非 Send 值不跨 await）
+        let peer_str = ctx
+            .connections
+            .lock()
+            .unwrap()
+            .get(&conn_id)
+            .map(|c| c.peer.clone())
+            .unwrap_or_default();
+        let lua_env = lua_engine::ScriptEnv {
+            cache: &ctx.lua_cache,
+            category: "shjj",
+            gateway: &ctx.gateway_name,
+            platform: &ctx.cfg.name,
+            peer: &peer_str,
+            log: &|level, msg| ctx.log(level, msg),
+        };
+        strategy::plan_reports(
+            &st,
+            ctx.cfg.partition_for(&order.security_id),
+            &order,
+            &ctx.stats,
+            pbu,
+            &lua_env,
+        )
     };
     if !synced {
         // 同步未完成：委托暂存缓冲，待同步后补发

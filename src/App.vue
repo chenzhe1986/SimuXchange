@@ -147,8 +147,11 @@ function runCtxItem(it: CtxMenuItem) {
 
 /** 全局右键入口（onMounted 里挂到 document 上，页面任何地方右键都先经过这里） */
 function onGlobalContextMenu(e: MouseEvent) {
-    // 输入框内弹自定义编辑菜单，其余区域屏蔽网页默认菜单
     const t = e.target as HTMLElement;
+    // CodeMirror 代码编辑器（Lua 脚本）不是 input/textarea：放行默认右键菜单，
+    // 保住编辑器内的剪切/复制/粘贴能力（自定义输入框菜单对它不适用）
+    if (t.closest(".cm-editor")) return;
+    // 输入框内弹自定义编辑菜单，其余区域屏蔽网页默认菜单
     const input = t.closest("input, textarea") as HTMLInputElement | HTMLTextAreaElement | null;
     if (input) {
         inputCtxMenu(e, input);
@@ -242,6 +245,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
         if (ovViewer.show) ovViewer.show = false;
         if (backendSettings.show) backendSettings.show = false;
         if (confirmBox.show) confirmBox.show = false;
+        if (scriptErrorBox.show) scriptErrorBox.show = false;
         if (updateBox.show) updateBox.show = false;
         showReward.value = false;
         showAbout.value = false;
@@ -374,6 +378,9 @@ const ovViewer = reactive({
 });
 /** 通用确认框：先把“确认后要做的事”存进 action，用户点确定才执行 */
 const confirmBox = reactive({ show: false, text: "", action: null as null | (() => void) });
+/** Lua 脚本错误弹窗：保存平台时脚本校验失败弹出（错误详情可能多行，
+ *  toast 放不下；编辑弹窗保持打开，关掉本弹窗可继续改脚本） */
+const scriptErrorBox = reactive({ show: false, text: "" });
 
 // ---------- 提示 ----------
 /** 屏幕下方的消息气泡（操作成功/失败都用它提示，自动消失） */
@@ -387,6 +394,12 @@ function showToast(text: string, isError = false) {
     toast.show = true;
     clearTimeout(toastTimer); // 连续弹多条时重新计时，避免新消息被旧定时器提前关掉
     toastTimer = window.setTimeout(() => (toast.show = false), isError ? 4200 : 2200);
+}
+
+/** 弹出 Lua 脚本错误详情弹窗（保存平台时校验失败用） */
+function showScriptError(text: string) {
+    scriptErrorBox.text = text;
+    scriptErrorBox.show = true;
 }
 
 // ---------- 数据 ----------
@@ -721,6 +734,19 @@ function openEditPlatform(p: PlatformConfig) {
  *  此时走 update_strategy 热更新命令，其余字段需停止网关后再保存 */
 async function savePlatform(p: PlatformConfig) {
     if (!selectedGw.value) return;
+    // Lua 脚本模式：保存前先校验语法（后端在 update_strategy / save_gateway
+    // 里也会强制校验，这里提前拦一道是为了弹出多行错误详情弹窗，
+    // 编辑弹窗保持打开让用户直接改脚本；不做任何写操作）
+    if (p.strategy.mode === "luaScript") {
+        const v = await backend?.dispatch({
+            cmd: "validate_lua_script",
+            script: p.strategy.luaScript,
+        });
+        if (v && !v.ok) {
+            showScriptError(v.error ?? "Lua 脚本语法错误");
+            return;
+        }
+    }
     const gw: GatewayConfig = JSON.parse(JSON.stringify(selectedGw.value.config));
     if (selectedGw.value.running && !pfEditor.isNew) {
         const r = await backend?.dispatch({
@@ -730,7 +756,9 @@ async function savePlatform(p: PlatformConfig) {
             strategy: p.strategy,
         });
         if (r && !r.ok) {
-            showToast(r.error ?? "策略更新失败", true);
+            // Lua 模式的错误（脚本语法/内容问题）弹详情弹窗，其余走 toast
+            if (p.strategy.mode === "luaScript") showScriptError(r.error ?? "策略更新失败");
+            else showToast(r.error ?? "策略更新失败", true);
             return;
         }
         pfEditor.show = false;
@@ -1086,8 +1114,10 @@ onBeforeUnmount(() => {
             :category="selectedGw?.config.category ?? 'sz'"
             :is-new="pfEditor.isNew"
             :gateway-running="selectedGw?.running ?? false"
+            :backend="backend"
             @save="savePlatform"
             @close="pfEditor.show = false"
+            @notify="(t, e) => showToast(t, e)"
         />
 
         <!-- 收发报文弹窗（点击平台卡片上的“报文”按钮时打开） -->
@@ -1187,6 +1217,29 @@ onBeforeUnmount(() => {
                     <button class="btn primary" style="background: var(--red); border-color: var(--red)" @click="runConfirm">
                         删除
                     </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lua 脚本错误弹窗：保存平台时脚本校验失败弹出，编辑弹窗保持打开 -->
+        <div v-if="scriptErrorBox.show" class="modal-mask" @mousedown.self="scriptErrorBox.show = false">
+            <div class="modal" style="width: 480px">
+                <div class="modal-head"><span>Lua 脚本错误</span></div>
+                <div class="modal-body">
+                    <pre
+                        style="
+                            white-space: pre-wrap;
+                            word-break: break-all;
+                            font-family: var(--mono);
+                            font-size: 12px;
+                            line-height: 1.7;
+                            color: var(--red);
+                            margin: 0;
+                        "
+                    >{{ scriptErrorBox.text }}</pre>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn primary" @click="scriptErrorBox.show = false">返回修改</button>
                 </div>
             </div>
         </div>

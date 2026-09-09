@@ -1,14 +1,24 @@
 <script setup lang="ts">
 // PlatformEditor.vue —— 平台配置的编辑弹窗（新建和编辑共用）。
 // 表单项随策略模式动态显隐：选“拆单”才显示拆单参数、
-// 选“拒单”才显示拒单参数。
+// 选“拒单”才显示拒单参数、选“Lua 脚本回报”才显示脚本编辑器。
 // 网关运行中编辑时：基础信息（名称/类型/地址/端口/CompID/分区号）与
 // 功能开关（展示收发报文/缓存订单）置灰不可改、不显示登录校验密码区，
 // 仅“报单自动回报模式 / 撤单自动回报模式 / 回报延迟”可改（后端热更新实时生效）。
-// 点“保存”时先把数值规范化，再把整份配置 emit 给父组件提交。
+// 点“保存”时先把数值规范化，再把整份配置 emit 给父组件提交；
+// Lua 脚本的语法校验由后端在保存时强制执行，编辑中可用“检查脚本”按钮即时校验。
 import { computed, reactive, watch } from "vue";
 import type { GatewayCategory, PlatformConfig } from "../types";
-import { CANCEL_MODES, defaultPartitionNos, platformTypesOf, STRATEGY_MODES, defaultRejectReason } from "../types";
+import type { Backend } from "../backend";
+import {
+    CANCEL_MODES,
+    DEFAULT_LUA_SCRIPT,
+    defaultPartitionNos,
+    defaultRejectReason,
+    platformTypesOf,
+    STRATEGY_MODES,
+} from "../types";
+import LuaEditor from "./LuaEditor.vue";
 import { rejectTextOf } from "../errors";
 
 const props = defineProps<{
@@ -20,12 +30,15 @@ const props = defineProps<{
     isNew: boolean;
     /** 所属网关是否运行中（运行中基础字段置灰、隐藏密码区，仅策略可热更新） */
     gatewayRunning: boolean;
+    /** 后端通道（"检查脚本"按钮即时校验用；与 OrderViewer 同样的注入方式） */
+    backend: Backend | null;
 }>();
 
-// 两个出口：保存（带着改好的配置）/ 关闭（什么都不做）
+// 三个出口：保存（带着改好的配置）/ 关闭 / notify（检查结果转 toast 上报父组件）
 const emit = defineEmits<{
     (e: "save", p: PlatformConfig): void;
     (e: "close"): void;
+    (e: "notify", text: string, isError?: boolean): void;
 }>();
 
 // 深拷贝一份进行编辑，取消时不影响原数据；
@@ -53,6 +66,7 @@ function normalizePlatform(p: PlatformConfig): PlatformConfig {
             cancelRejectReason: s.cancelRejectReason ?? 1,
             cancelFrontReject: s.cancelFrontReject ?? false,
             cancelDelay: s.cancelDelay ?? { ...d },
+            luaScript: s.luaScript ?? "",
         },
     };
 }
@@ -113,6 +127,11 @@ watch(
     () => form.strategy.mode,
     (m) => {
         if (m === "reject") initRejectDefaults();
+        // 切到 Lua 脚本模式且脚本为空（旧配置没有该字段）时预填示例模板，
+        // 降低上手门槛；用户主动清空后再切走/切回不会覆盖（只在为空时填）
+        if (m === "luaScript" && !form.strategy.luaScript) {
+            form.strategy.luaScript = DEFAULT_LUA_SCRIPT;
+        }
     },
 );
 watch(
@@ -129,8 +148,7 @@ function applyRejectText() {
 }
 
 /** 点“保存”：先把各数值整理成合法值，再交给父组件提交后端 */
-function submit() {
-    if (!form.name.trim()) {
+function submit() {    if (!form.name.trim()) {
         form.name = "未命名平台";
     }
     // 规范化数值，避免空输入：
@@ -146,6 +164,21 @@ function submit() {
     s.cancelDelay.minMs = Math.max(0, s.cancelDelay.minMs || 0);
     s.cancelDelay.maxMs = Math.max(s.cancelDelay.minMs, s.cancelDelay.maxMs || 0);
     emit("save", JSON.parse(JSON.stringify(form)));
+}
+
+/** “检查脚本”：调后端 validate_lua_script 即时校验语法（只编译不执行、不保存），
+ *  结果经 notify 上报父组件转 toast 展示；保存时的强制校验在后端进行 */
+async function checkScript() {
+    const resp = await props.backend?.dispatch({
+        cmd: "validate_lua_script",
+        script: form.strategy.luaScript,
+    });
+    if (!resp) return;
+    if (resp.ok) {
+        emit("notify", "Lua 脚本语法正确");
+    } else {
+        emit("notify", resp.error ?? "脚本语法错误", true);
+    }
 }
 </script>
 
@@ -272,6 +305,23 @@ function submit() {
                         <div class="field full">
                             <label>拒单说明文本</label>
                             <input v-model="form.strategy.rejectText" maxlength="50" />
+                        </div>
+                    </template>
+
+                    <!-- Lua 脚本回报模式：语法高亮编辑器 + 即时检查。
+                         脚本在保存时由后端强制校验语法，运行时沙箱化执行 -->
+                    <template v-if="form.strategy.mode === 'luaScript'">
+                        <div class="field full">
+                            <label>Lua 回报脚本（收到新委托时执行）</label>
+                            <LuaEditor v-model="form.strategy.luaScript" :height="240" />
+                            <span class="hint">
+                                变量 ord 为委托字段、ctx 为环境信息；return "confirm" / "trade" / "reject"
+                                或回报计划表（拒单的方式/原因/文本在脚本里指定），完整说明见 docs/Lua脚本回报编写说明.md
+                            </span>
+                        </div>
+                        <div class="field">
+                            <button class="btn sm" type="button" @click="checkScript">检查脚本</button>
+                            <span class="hint">只校验语法，不保存配置</span>
                         </div>
                     </template>
 

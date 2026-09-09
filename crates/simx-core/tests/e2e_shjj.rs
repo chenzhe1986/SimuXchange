@@ -486,3 +486,97 @@ async fn test_shjj_cancel_modes_and_front_reject() {
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 测试七：Lua 脚本回报模式——数量分档脚本，验证申报响应(32)、
+/// 成交回报(103)与业务拒绝走申报拒绝(204)三条路径。
+#[tokio::test]
+async fn test_shjj_lua_script_flow() {
+    let dir = std::env::temp_dir().join(format!("simx_shjj_lua_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+
+    let script = r#"
+if ord.OrderQty > 400 then
+    return "trade"
+else
+    return { kind = "reject", via = "business", reason = 1025 }
+end
+"#;
+    let gw = engine
+        .save_gateway(test_gateway(
+            18207,
+            StrategyConfig {
+                mode: StrategyMode::LuaScript,
+                lua_script: script.into(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("保存网关失败");
+    engine.start_gateway(&gw.id).await.expect("启动网关失败");
+
+    let mut stream = connect_logon_sync(18207).await;
+
+    // 单 1：500 股 → 确认 + 全部成交
+    stream
+        .write_all(&new_order_frame("B000000001", 500_000, 12_34000, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT, "应为申报响应(32)");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.str(8).unwrap(); // Pbu
+    let _ = r.u32().unwrap(); // SetID
+    let _ = r.u64().unwrap(); // ReportIndex
+    assert_eq!(r.u32().unwrap(), BIZ_ID_CASH_AUCTION); // BizID
+    assert_eq!(r.ch().unwrap(), b'0'); // ExecType=申报成功
+    let _ = r.str(8).unwrap(); // BizPbu
+    assert_eq!(r.str(10).unwrap(), "B000000001"); // ClOrdID
+
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::TRADE, "应为成交回报(103)");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.str(8).unwrap();
+    let _ = r.u32().unwrap();
+    let _ = r.u64().unwrap();
+    let _ = r.u32().unwrap();
+    assert_eq!(r.ch().unwrap(), b'F'); // ExecType=成交
+    let _ = r.str(8).unwrap();
+    assert_eq!(r.str(10).unwrap(), "B000000001");
+    let _ = r.str(12).unwrap();
+    let _ = r.str(13).unwrap();
+    let _ = r.u8().unwrap();
+    let _ = r.u64().unwrap();
+    assert_eq!(r.i64().unwrap(), 12_34000); // LastPx=委托价
+    assert_eq!(r.i64().unwrap(), 500_000); // LastQty=全部
+    let _ = r.i64().unwrap(); // GrossTradeAmt
+    let _ = r.ch().unwrap(); // Side
+    assert_eq!(r.i64().unwrap(), 500_000); // OrderQty
+    assert_eq!(r.i64().unwrap(), 0); // LeavesQty=0
+    assert_eq!(r.ch().unwrap(), b'2'); // OrdStatus=全部成交
+
+    // 单 2：300 股 → 业务拒绝（申报拒绝 204，原因码 1025 由脚本指定）
+    stream
+        .write_all(&new_order_frame("B000000002", 300_000, 12_34000, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::ORDER_REJECT, "数量≤400 应为申报拒绝(204)");
+    let mut r = protocol::BodyReader::new(&body);
+    assert_eq!(r.u32().unwrap(), BIZ_ID_CASH_AUCTION); // BizID
+    let _ = r.str(8).unwrap(); // BizPbu
+    assert_eq!(r.str(10).unwrap(), "B000000002"); // ClOrdID
+    let _ = r.str(12).unwrap(); // SecurityID
+    assert_eq!(r.u32().unwrap(), 1025); // OrdRejReason=脚本指定
+
+    // 统计校验：2 笔委托 = 1 确认 + 1 成交 + 1 业务拒绝
+    let snap = engine.snapshot().await;
+    let p = &snap.gateways[0].platforms[0];
+    assert_eq!(p.stats.orders, 2);
+    assert_eq!(p.stats.acks, 1);
+    assert_eq!(p.stats.trades, 1);
+    assert_eq!(p.stats.business_rejects, 1);
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

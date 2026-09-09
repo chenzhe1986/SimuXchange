@@ -14,6 +14,13 @@ serde_json = "1"
 rand = "0.8"
 chrono = "0.4"
 parking_lot = "0.12"
+# Lua 解释器（"Lua 脚本回报"模式用）：
+# - lua54 + vendored：内置编译 Lua 5.4 C 源码（构建需要 C 编译器：
+#   Windows 用 MSVC 自带 cl.exe；Linux musl 交叉编译需 musl-gcc，
+#   见 scripts/build-all.ps1 与构建调试手册）
+# - send：让 Lua 状态可跨线程移动（Send），从而能放进 SessionCtx 的
+#   parking_lot::Mutex 缓存里被任意连接任务取用
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
 
 [profile.release]
 opt-level = 2

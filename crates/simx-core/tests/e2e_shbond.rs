@@ -412,3 +412,115 @@ async fn test_shbond_sync_resends_history_by_begin() {
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 测试六：Lua 脚本回报模式——数量分档脚本，验证申报响应(32)、
+/// 成交回报(103)与执行报告拒绝(32 ExecType=8)三条路径。
+#[tokio::test]
+async fn test_shbond_lua_script_flow() {
+    let dir = std::env::temp_dir().join(format!("simx_shbond_lua_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let engine = Engine::new(dir.clone());
+
+    let script = r#"
+if ord.OrderQty > 200 then
+    return "trade"
+else
+    return "reject"
+end
+"#;
+    let gw = engine
+        .save_gateway(test_gateway(
+            18306,
+            StrategyConfig {
+                mode: StrategyMode::LuaScript,
+                lua_script: script.into(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("保存网关失败");
+    engine.start_gateway(&gw.id).await.expect("启动网关失败");
+
+    let mut stream = connect_logon_sync(18306).await;
+
+    // 单 1：300 股 → 确认 + 全部成交
+    stream
+        .write_all(&new_order_frame("C000000001", 300_000, 10_00000, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT, "应为申报响应(32)");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.str(8).unwrap();
+    let _ = r.u32().unwrap();
+    let _ = r.u64().unwrap();
+    assert_eq!(r.u32().unwrap(), BIZ_ID_CASH_BOND); // BizID
+    assert_eq!(r.ch().unwrap(), b'0');
+    let _ = r.str(8).unwrap();
+    assert_eq!(r.str(10).unwrap(), "C000000001");
+
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::TRADE, "应为成交回报(103)");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.str(8).unwrap();
+    let _ = r.u32().unwrap();
+    let _ = r.u64().unwrap();
+    let _ = r.u32().unwrap();
+    assert_eq!(r.ch().unwrap(), b'F');
+    let _ = r.str(8).unwrap();
+    assert_eq!(r.str(10).unwrap(), "C000000001");
+    let _ = r.str(12).unwrap();
+    let _ = r.str(13).unwrap();
+    let _ = r.u8().unwrap();
+    let _ = r.u64().unwrap();
+    assert_eq!(r.i64().unwrap(), 10_00000); // LastPx=委托价（10 元 × 100000）
+    assert_eq!(r.i64().unwrap(), 300_000); // LastQty=全部
+    let _ = r.i64().unwrap(); // GrossTradeAmt
+    let _ = r.ch().unwrap();
+    assert_eq!(r.i64().unwrap(), 300_000);
+    assert_eq!(r.i64().unwrap(), 0); // LeavesQty=0
+    assert_eq!(r.ch().unwrap(), b'2'); // 全部成交
+
+    // 单 2：200 股 → 拒单（默认执行报告方式：32，ExecType=8）
+    stream
+        .write_all(&new_order_frame("C000000002", 200_000, 10_00000, b'1'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT, "数量≤200 应为执行报告拒绝(32)");
+    let mut r = protocol::BodyReader::new(&body);
+    let _ = r.str(8).unwrap(); // Pbu
+    let _ = r.u32().unwrap(); // SetID
+    let _ = r.u64().unwrap(); // ReportIndex
+    let _ = r.u32().unwrap(); // BizID
+    assert_eq!(r.ch().unwrap(), b'8'); // ExecType=拒绝
+    let _ = r.str(8).unwrap(); // BizPbu
+    assert_eq!(r.str(10).unwrap(), "C000000002"); // ClOrdID
+    let _ = r.str(12).unwrap(); // SecurityID
+    let _ = r.str(13).unwrap(); // Account
+    let _ = r.u8().unwrap(); // OwnerType
+    let _ = r.ch().unwrap(); // Side
+    let _ = r.i64().unwrap(); // Price
+    let _ = r.i64().unwrap(); // OrderQty
+    assert_eq!(r.i64().unwrap(), 0); // LeavesQty=0（拒单清零）
+    let _ = r.i64().unwrap(); // CxlQty
+    let _ = r.ch().unwrap(); // OrdType
+    let _ = r.ch().unwrap(); // TimeInForce
+    assert_eq!(r.ch().unwrap(), b'8'); // OrdStatus=拒绝
+    let _ = r.str(2).unwrap(); // CreditTag
+    let _ = r.str(10).unwrap(); // OrigClOrdID
+    let _ = r.str(8).unwrap(); // ClearingFirm
+    let _ = r.str(8).unwrap(); // BranchID
+    assert_eq!(r.u32().unwrap(), 1); // OrdRejReason=默认原因码
+
+    // 统计校验：2 笔委托 = 1 确认 + 1 成交 + 1 拒单
+    let snap = engine.snapshot().await;
+    let p = &snap.gateways[0].platforms[0];
+    assert_eq!(p.stats.orders, 2);
+    assert_eq!(p.stats.acks, 1);
+    assert_eq!(p.stats.trades, 1);
+    assert_eq!(p.stats.order_rejects, 1);
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

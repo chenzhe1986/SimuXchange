@@ -10,7 +10,7 @@
 //! - 业务拒绝方式对应申报拒绝 OrderReject（MsgType=204）
 //! - 价格放大 10 万倍、数量放大 1000 倍（深交所是 1 万 / 100）
 //!
-//! 七种策略与对应剧本：
+//! 八种策略与对应剧本：
 //! - FullSingle  全部成交（单笔）：1 确认 + 1 成交
 //! - FullSplit   全部成交（拆单）：1 确认 + N 成交（数量随机拆、价格阶梯）
 //! - PartialSingle 部分成交（单笔）：1 确认 + 1 成交（数量小于委托量）
@@ -18,8 +18,10 @@
 //! - NoAutoReply 不自动回复：订单登记缓存，等界面手动回复
 //! - AckOnly     只确认不成交：1 确认（挂单状态）
 //! - Reject      拒单：1 条拒绝（执行报告 32 ExecType=8 或申报拒绝 204）
+//! - LuaScript   Lua 脚本：执行用户脚本，按返回值逐条生成回报（见 plan_reports_lua）
 
 use crate::config::{RejectVia, StrategyConfig, StrategyMode};
+use crate::lua_engine::{ScriptEnv, ScriptKind};
 use crate::orderbook::{OrderStatus, OrderUpdate};
 use super::protocol::{
     self as protocol, exec_type, ord_status, ExecRpt, NewOrder, OrderReject, TradeRpt,
@@ -85,12 +87,15 @@ fn amount_raw(px: i64, qty: i64) -> i64 {
 ///
 /// pbu 为回报交易单元（取柜台 Logon 的 SenderCompID 前 8 字符），
 /// 上交所回报里 Pbu/SetID/ReportIndex 三件套用于分区回报定位。
+/// env 为 Lua 脚本模式的执行环境（脚本缓存/网关平台信息/日志回调），
+/// 非 Lua 模式下不使用，统一携带以保持三套协议签名一致。
 pub fn plan_reports(
     st: &StrategyConfig,
     partition_no: i32,
     order: &NewOrder,
     stats: &PlatformStats,
     pbu: &str,
+    env: &ScriptEnv,
 ) -> Vec<PlannedReport> {
     let ord_cnfm_id = stats.next_order_id();
     let mut plans = Vec::new();
@@ -101,21 +106,17 @@ pub fn plan_reports(
         return Vec::new();
     }
 
+    // ---- Lua 脚本模式：回报剧本完全由用户脚本决定 ----
+    if st.mode == StrategyMode::LuaScript {
+        return plan_reports_lua(st, partition_no, order, stats, pbu, env);
+    }
 
     // ---- 拒单策略：只回一条拒绝，没有确认也没有成交 ----
     if st.mode == StrategyMode::Reject {
         match st.reject_via {
             // 方式一：用执行报告(32)拒单，ExecType/OrdStatus 均为 '8'
             RejectVia::ExecutionReport => {
-                let mut rpt = base_ack(partition_no, order, pbu, &ord_cnfm_id);
-                rpt.exec_type = exec_type::REJECT;
-                rpt.ord_status = ord_status::REJECTED;
-                rpt.ord_rej_reason = st.reject_reason as u32;
-                rpt.leaves_qty = 0;
-                // 拒单不是撤单：CxlQty（撤单数量）必须为 0，
-                // TimeInForce 也不回填委托值（拒单回报不涉及成交时效）
-                rpt.cxl_qty = 0;
-                rpt.time_in_force = 0;
+                let rpt = build_reject_rpt(partition_no, order, pbu, &ord_cnfm_id, st.reject_reason as u32);
                 plans.push(PlannedReport {
                     delay_ms: st.ack_delay.sample(),
                     kind: ReportKind::Reject,
@@ -135,16 +136,7 @@ pub fn plan_reports(
             }
             // 方式二：用独立的申报拒绝消息(MsgType=204)
             RejectVia::BusinessReject => {
-                let rej = OrderReject {
-                    biz_id: order.biz_id,
-                    biz_pbu: order.biz_pbu.clone(),
-                    cl_ord_id: order.cl_ord_id.clone(),
-                    security_id: order.security_id.clone(),
-                    ord_rej_reason: st.reject_reason as u32,
-                    trade_date: protocol::now_date(),
-                    transact_time: protocol::now_ntime(),
-                    user_info: order.user_info.clone(),
-                };
+                let rej = build_order_reject_msg(order, st.reject_reason as u32);
                 plans.push(PlannedReport {
                     delay_ms: st.ack_delay.sample(),
                     kind: ReportKind::BusinessReject,
@@ -299,6 +291,250 @@ fn base_ack(
     }
 }
 
+/// Lua 脚本模式（StrategyMode::LuaScript）的回报计划生成（与 shjj 同构，
+/// 债券平台仅两个业务且都有成交回报，无 allow_trade 降级；业务拒绝
+/// OrderReject(204) 无文本字段）。脚本执行出错时本笔委托不自动回报
+/// （空计划），错误写日志面板。
+pub fn plan_reports_lua(
+    st: &StrategyConfig,
+    partition_no: i32,
+    order: &NewOrder,
+    stats: &PlatformStats,
+    pbu: &str,
+    env: &ScriptEnv,
+) -> Vec<PlannedReport> {
+    let items = match env.run(&st.lua_script, partition_no, |lua| build_ord_table(lua, order)) {
+        Ok(items) => items,
+        Err(e) => {
+            (env.log)(
+                "error",
+                format!(
+                    "Lua 回报脚本执行失败，本笔委托 ClOrdID={} 不自动回报：{}",
+                    order.cl_ord_id, e
+                ),
+            );
+            return Vec::new();
+        }
+    };
+
+    let ord_cnfm_id = stats.next_order_id();
+    let cl_ord_id = order.cl_ord_id.clone();
+    let total_raw = order.order_qty;
+    let mut cum_raw: i64 = 0;
+    let mut plans = Vec::new();
+
+    for item in items {
+        match item.kind {
+            // ---- 申报响应（确认回报）：ExecType='0' ----
+            ScriptKind::Confirm => {
+                let ack = base_ack(partition_no, order, pbu, &ord_cnfm_id);
+                plans.push(PlannedReport {
+                    delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                    kind: ReportKind::Ack,
+                    frame: ack.encode(),
+                    desc: format!(
+                        "申报响应(32) ClOrdID={} OrdCnfmID={}（Lua）",
+                        cl_ord_id,
+                        ord_cnfm_id.trim_start_matches('0')
+                    ),
+                    cl_ord_id: cl_ord_id.clone(),
+                    order_update: Some(OrderUpdate {
+                        order_id: ord_cnfm_id.clone(),
+                        cum_qty: 0.0,
+                        leaves_qty: total_raw as f64 / QTY_UNIT as f64,
+                        status: OrderStatus::New,
+                    }),
+                });
+            }
+            // ---- 成交回报：qty 缺省 = 剩余全部，price 缺省 = 委托价 ----
+            ScriptKind::Trade => {
+                let remaining = ((total_raw - cum_raw) / QTY_UNIT).max(0);
+                let shares = item.qty.map(|q| q as i64).unwrap_or(remaining);
+                let fill_qty = shares.saturating_mul(QTY_UNIT).max(0);
+                cum_raw += fill_qty;
+                let leaves = (total_raw - cum_raw).max(0);
+                let status = if leaves == 0 {
+                    ord_status::FILLED
+                } else {
+                    ord_status::PARTIALLY_FILLED
+                };
+                let fill_px = item.price.map(px_raw).unwrap_or(order.price);
+                let trade = TradeRpt {
+                    pbu: pbu.to_string(),
+                    set_id: partition_no as u32,
+                    report_index: 0, // 发送时由 writer 任务补写（保证与线上顺序一致）
+                    biz_id: order.biz_id,
+                    exec_type: exec_type::TRADE,
+                    biz_pbu: order.biz_pbu.clone(),
+                    cl_ord_id: order.cl_ord_id.clone(),
+                    security_id: order.security_id.clone(),
+                    account: order.account.clone(),
+                    owner_type: order.owner_type,
+                    order_entry_time: order.transact_time,
+                    last_px: fill_px,
+                    last_qty: fill_qty,
+                    gross_trade_amt: amount_raw(fill_px, fill_qty),
+                    side: order.side,
+                    order_qty: order.order_qty,
+                    leaves_qty: leaves,
+                    ord_status: status,
+                    credit_tag: order.credit_tag.clone(),
+                    clearing_firm: order.clearing_firm.clone(),
+                    branch_id: order.branch_id.clone(),
+                    trd_cnfm_id: stats.next_exec_id(),
+                    ord_cnfm_id: ord_cnfm_id.clone(),
+                    trade_date: protocol::now_date(),
+                    transact_time: protocol::now_ntime(),
+                    user_info: order.user_info.clone(),
+                };
+                plans.push(PlannedReport {
+                    delay_ms: item.delay_ms.unwrap_or_else(|| st.trade_delay.sample()),
+                    kind: ReportKind::Trade,
+                    frame: trade.encode(),
+                    desc: format!(
+                        "成交回报(103) ClOrdID={} 价格={:.5} 数量={} 剩余={}（Lua）",
+                        cl_ord_id,
+                        fill_px as f64 / PX_UNIT,
+                        fill_qty / QTY_UNIT,
+                        leaves / QTY_UNIT
+                    ),
+                    cl_ord_id: cl_ord_id.clone(),
+                    order_update: Some(OrderUpdate {
+                        order_id: ord_cnfm_id.clone(),
+                        cum_qty: cum_raw as f64 / QTY_UNIT as f64,
+                        leaves_qty: leaves as f64 / QTY_UNIT as f64,
+                        status: if leaves == 0 {
+                            OrderStatus::Filled
+                        } else {
+                            OrderStatus::Partial
+                        },
+                    }),
+                });
+            }
+            // ---- 拒单回报：via/reason 缺省取策略配置（沪市业务拒绝无文本字段） ----
+            ScriptKind::Reject => {
+                let via = item
+                    .via_business
+                    .map(|b| {
+                        if b {
+                            RejectVia::BusinessReject
+                        } else {
+                            RejectVia::ExecutionReport
+                        }
+                    })
+                    .unwrap_or(st.reject_via);
+                match via {
+                    RejectVia::ExecutionReport => {
+                        let reason = item.reason.unwrap_or(st.reject_reason as u32);
+                        let rpt = build_reject_rpt(partition_no, order, pbu, &ord_cnfm_id, reason);
+                        plans.push(PlannedReport {
+                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            kind: ReportKind::Reject,
+                            frame: rpt.encode(),
+                            desc: format!(
+                                "拒单回报(32) ClOrdID={} 原因代码={}（Lua）",
+                                cl_ord_id, reason
+                            ),
+                            cl_ord_id: cl_ord_id.clone(),
+                            order_update: Some(OrderUpdate {
+                                order_id: ord_cnfm_id.clone(),
+                                cum_qty: 0.0,
+                                leaves_qty: 0.0,
+                                status: OrderStatus::Rejected,
+                            }),
+                        });
+                    }
+                    RejectVia::BusinessReject => {
+                        let reason = item.reason.unwrap_or(st.reject_reason as u32);
+                        let rej = build_order_reject_msg(order, reason);
+                        plans.push(PlannedReport {
+                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            kind: ReportKind::BusinessReject,
+                            frame: rej.encode(),
+                            desc: format!(
+                                "申报拒绝(204) ClOrdID={} 原因代码={}（Lua）",
+                                cl_ord_id, reason
+                            ),
+                            cl_ord_id: cl_ord_id.clone(),
+                            order_update: Some(OrderUpdate {
+                                order_id: String::new(), // 申报拒绝未分配订单确认编号
+                                cum_qty: 0.0,
+                                leaves_qty: 0.0,
+                                status: OrderStatus::Rejected,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    plans
+}
+
+/// 把上交所新债券订单装进 Lua 的 `ord` 表（与竞价平台同构，无扩展字段）。
+/// 字段名与报文解析（ParsedField）显示的交易所规范名一致；价格/数量从
+/// 协议放大整数换算成自然单位（元/股），Side/OrdType 等单字节字段转字符串。
+fn build_ord_table(lua: &mlua::Lua, order: &NewOrder) -> mlua::Result<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("BizID", order.biz_id)?; // 业务标识（数字，1=债券现券竞价 2=质押式回购）
+    t.set("PBU", order.biz_pbu.as_str())?;
+    t.set("ClOrdID", order.cl_ord_id.as_str())?;
+    t.set("SecurityID", order.security_id.as_str())?;
+    t.set("Account", order.account.as_str())?;
+    t.set("OwnerType", order.owner_type)?;
+    t.set("Side", byte_as_str(order.side))?; // "1"买 "2"卖
+    t.set("OrderQty", order.order_qty as f64 / QTY_UNIT as f64)?; // 股
+    t.set("Price", order.price as f64 / PX_UNIT)?; // 元
+    t.set("OrdType", byte_as_str(order.ord_type))?; // 债券平台仅支持 2=限价
+    t.set("TimeInForce", order.time_in_force)?;
+    t.set("TransactTime", order.transact_time)?;
+    t.set("CreditTag", order.credit_tag.as_str())?;
+    t.set("ClearingFirm", order.clearing_firm.as_str())?;
+    t.set("BranchID", order.branch_id.as_str())?;
+    t.set("UserInfo", order.user_info.as_str())?;
+    Ok(t)
+}
+
+/// u8 字节（ASCII）转字符串，如 b'1' → "1"
+fn byte_as_str(b: u8) -> String {
+    (b as char).to_string()
+}
+
+/// 构造执行报告形式的拒单报文（32，ExecType/OrdStatus='8'）：
+/// 固定拒单模式与 Lua 脚本拒单共用
+fn build_reject_rpt(
+    partition_no: i32,
+    order: &NewOrder,
+    pbu: &str,
+    ord_cnfm_id: &str,
+    reason: u32,
+) -> ExecRpt {
+    let mut rpt = base_ack(partition_no, order, pbu, ord_cnfm_id);
+    rpt.exec_type = exec_type::REJECT;
+    rpt.ord_status = ord_status::REJECTED;
+    rpt.ord_rej_reason = reason;
+    rpt.leaves_qty = 0;
+    // 拒单不是撤单：CxlQty（撤单数量）必须为 0，
+    // TimeInForce 也不回填委托值（拒单回报不涉及成交时效）
+    rpt.cxl_qty = 0;
+    rpt.time_in_force = 0;
+    rpt
+}
+
+/// 构造申报拒绝消息（MsgType=204，无文本字段）；固定拒单模式与 Lua 脚本拒单共用
+fn build_order_reject_msg(order: &NewOrder, reason: u32) -> OrderReject {
+    OrderReject {
+        biz_id: order.biz_id,
+        biz_pbu: order.biz_pbu.clone(),
+        cl_ord_id: order.cl_ord_id.clone(),
+        security_id: order.security_id.clone(),
+        ord_rej_reason: reason,
+        trade_date: protocol::now_date(),
+        transact_time: protocol::now_ntime(),
+        user_info: order.user_info.clone(),
+    }
+}
+
 /// 生成成交明细列表：每项为 (数量 raw, 价格 raw)，均为协议放大整数。
 /// 这里只决定“成交几笔、每笔多少股、什么价”，不管报文细节。
 fn gen_fills(st: &StrategyConfig, order: &NewOrder) -> Vec<(i64, i64)> {
@@ -325,8 +561,11 @@ fn gen_fills(st: &StrategyConfig, order: &NewOrder) -> Vec<(i64, i64)> {
             with_ladder_prices(st, order, &qtys)
         }
         // 只确认/拒单：没有成交
-        // NoAutoReply 在 plan_reports 已早退（不生成任何计划），这里不可达
-        StrategyMode::NoAutoReply | StrategyMode::AckOnly | StrategyMode::Reject => Vec::new(),
+        // NoAutoReply 在 plan_reports 已早退（不生成任何计划），这里不可达；
+        // LuaScript 同样在 plan_reports 早退走脚本分支，不进 gen_fills
+        StrategyMode::NoAutoReply | StrategyMode::AckOnly | StrategyMode::Reject | StrategyMode::LuaScript => {
+            Vec::new()
+        }
     }
 }
 
@@ -450,12 +689,29 @@ mod tests {
         }
     }
 
+    /// 测试用的 Lua 执行环境（无日志；脚本缓存为全测试共享的静态实例，
+    /// 非 Lua 模式用不到它，只为满足 plan_reports 的新签名）
+    fn test_lua_env() -> ScriptEnv<'static> {
+        static CACHE: std::sync::OnceLock<crate::lua_engine::ScriptCache> = std::sync::OnceLock::new();
+        ScriptEnv {
+            cache: CACHE.get_or_init(crate::lua_engine::ScriptCache::new),
+            category: "shbond",
+            gateway: "测试网关",
+            platform: "测试平台",
+            peer: "127.0.0.1:1",
+            log: &no_log,
+        }
+    }
+
+    /// 静态日志回调：单元测试里丢弃所有日志
+    fn no_log(_level: &str, _msg: String) {}
+
     #[test]
     fn test_full_single() {
         let stats = PlatformStats::default();
         let order = mk_order(1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::FullSingle);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1");
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1", &test_lua_env());
         assert_eq!(plans.len(), 2); // ack + 1 笔成交
         assert_eq!(plans[0].kind, ReportKind::Ack);
         assert_eq!(plans[1].kind, ReportKind::Trade);
@@ -503,7 +759,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::Reject);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1");
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1", &test_lua_env());
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, ReportKind::Reject);
     }
@@ -513,7 +769,7 @@ mod tests {
         let stats = PlatformStats::default();
         let order = mk_order(1000, 10.0, b'1');
         let cfg = mk_cfg(StrategyMode::AckOnly);
-        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1");
+        let plans = plan_reports(&cfg.strategy, cfg.partition_no, &order, &stats, "PBU1", &test_lua_env());
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, ReportKind::Ack);
     }

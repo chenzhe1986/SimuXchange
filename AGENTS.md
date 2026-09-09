@@ -2,6 +2,10 @@
 
 > 本文件面向参与本项目的 AI 编码助手与开发者，说明项目背景、架构约定、
 > 代码规范和常用命令。**任何修改都应遵守本文约定。**
+>
+> **维护原则**：本文件只保留**每次协作都需要的通用约定**（架构、业务规则、
+> 代码规范、命令），宁精勿多——环境踩坑、一次性排查过程等低频细节一律记入
+> `docs/构建调试手册.md`，不写入本文件（占用上下文、降低专注度）。
 
 ---
 
@@ -33,6 +37,7 @@ SimuXchange/
 │  │   ├─ src/shjj/     # 上海竞价网关：protocol.rs / session.rs / strategy.rs
 │  │   ├─ src/shbond/   # 上海新债券网关：protocol.rs / session.rs / strategy.rs
 │  │   │               # （上交所两套会话共用 sz/session.rs 的 SessionCtx）
+│  │   ├─ src/lua_engine.rs  # "Lua 脚本回报"模式执行器（沙箱编译运行用户脚本）
 │  │   ├─ src/capture.rs  # 连接收发报文捕获（16 进制 + 按字段名解析 + 可选持久化到文件）
 │  │   ├─ src/orderbook.rs  # 订单缓存（界面订单列表、撤单按状态判断）
 │  │   ├─ src/oplog.rs    # 前端操作日志（带前端 IP，按日期存 log/ 目录）
@@ -44,13 +49,13 @@ SimuXchange/
 ├─ src-tauri/           # Tauri 2 桌面壳（包名 simuxchange，内嵌 simx-core）
 ├─ src/                 # 前端 Vue 3 + TypeScript
 │  ├─ App.vue           # 主页面（全部界面状态与交互）
-│  ├─ components/       # PlatformCard / PlatformEditor / LogPanel / PacketViewer（收发报文弹窗）
+│  ├─ components/       # PlatformCard / PlatformEditor / LogPanel / PacketViewer（收发报文弹窗）/ OrderViewer（订单弹窗）/ LuaEditor（Lua 脚本编辑器，CodeMirror 6）
 │  ├─ types.ts          # 前后端共享数据结构（与 Rust 结构体手工对应）
 │  ├─ backend.ts        # 后端抽象层：LocalBackend(Tauri invoke) / RemoteBackend(WebSocket)
 │  ├─ changelog.ts      # APP_VERSION / CHANGELOG（“ⓘ 关于”弹窗的版本号与更新说明）
 │  └─ updater.ts        # 更新检查：version.json 清单协议、版本比较（checkForUpdate）
 ├─ docs/                # 构建调试手册、产品使用手册、协议 PDF
-├─ scripts/             # build-all.ps1（tauri build 前准备 Linux 产物+前端）、smoke 测试等
+├─ scripts/             # build-all.ps1（tauri build 前准备 Linux 产物+前端）、musl-cc/（zig cc 参数翻译 shim）等
 ├─ .cargo/config.toml   # 项目级镜像配置（aliyun sparse，覆盖全局 tuna）
 ├─ simx.config.json     # 运行时配置：backend = local / remote + 可选 updateUrl
 └─ Cargo.toml           # Cargo workspace 根
@@ -59,16 +64,13 @@ SimuXchange/
 数据流：前端每秒轮询 `get_snapshot` 整体替换快照（轮询快照模式，最多 1 秒延迟）；
 网关配置持久化在数据目录 `gateways.json`。
 
-**报文捕获**：平台配置 `showPackets`（展示收发报文）为**单一开关（默认 true）**，
-`persistPackets`（持久化到文件）**已与展示合并**：保存网关时 `persistPackets = showPackets`
-自动归一化（前端默认勾选、字段保留仅为向后兼容旧配置）；勾选后每条报文同时做三件事——
-界面弹窗展示、按交易所字段名解析（`ParsedField`，由各协议 protocol.rs 的
-`describe_fields(mt, body)` 生成，展示时与原始报文分行、字体区分）、持久化到文件
-（`<data_dir>/packets/<YYYYMMDD>/<网关名>_<平台名>/pkg_<HHMMSS>_ip-<IP点转下划线>_port-<端口>.log`，
-逐行 flush；原始报文行下方跟解析字段缩进续行，内容与界面一致）。
-连接断开时记录器**不删除**，仅 `mark_dead()` 标记离线——平台级报文弹窗要能按连接分组回看历史报文。
-前端报文弹窗每 0.7s 以 `after_seq` 游标增量拉取（连接级 `get_conn_packets` / 平台级 `get_platform_packets`，
-后者附 `conns` 连接摘要供分组标题展示）；持久化开启时回看从连接建立起全部报文。
+**报文捕获**：平台配置 `showPackets`（展示收发报文，单一开关，默认 true；持久化已与
+展示合并，保存时 `persistPackets = showPackets` 自动归一化）。勾选后每条报文同时做
+三件事：界面弹窗展示、按交易所字段名解析（`ParsedField`，由各协议 protocol.rs 的
+`describe_fields` 生成）、持久化到 `<data_dir>/packets/<日期>/<网关名>_<平台名>/` 下的
+日志文件（逐行 flush，内容与界面一致）。连接断开时记录器**不删除**、仅 `mark_dead()`
+标记离线（平台级报文弹窗按连接分组回看历史）；前端每 0.7s 以 `after_seq` 游标增量拉取
+（连接级 `get_conn_packets` / 平台级 `get_platform_packets`）。
 
 ## 3. 关键业务逻辑
 
@@ -95,10 +97,21 @@ SimuXchange/
 - **上交所新债券协议编码**：报文结构与竞价平台完全一致（报文头、校验和、字段放大、会话流程、消息类型均同竞价），
   仅业务参数不同：PlatformID=2（竞价=0）、BizID=1 债券现券竞价 / 2 债券质押式回购（竞价=100010）、
   协议版本最低 1.90（竞价用 "0.50"）、OrdType 仅支持 2=限价。
-- **报单自动回报模式**（三套协议一致，七种）：全部成交 / 部分成交 / 全部成交（随机拆多笔）/
+- **报单自动回报模式**（三套协议一致，八种）：全部成交 / 部分成交 / 全部成交（随机拆多笔）/
   部分成交（随机拆多笔）/ 只回确认回报 / 自动拒单（执行报告拒绝或业务拒绝二选一；
-  旧配置的 custom 自定义成交已废弃，加载时降级为只回确认）/ 关闭自动回报
-  （订单进缓存，界面订单弹窗手动回确认/成交/拒单/撤单）。
+  旧配置的 custom 自定义成交已废弃，加载时降级为只回确认）/ Lua 脚本回报（见下条）/
+  关闭自动回报（订单进缓存，界面订单弹窗手动回确认/成交/拒单/撤单）。
+- **Lua 脚本回报**（`StrategyMode::LuaScript`，配置字段 `lua_script`）：收到新委托时
+  `lua_engine.rs` 沙箱中**同步**执行脚本（仅 table/string/math 库，指令数 + 内存上限
+  防死循环；整段执行无 await，符合"非 Send 值不跨 await"约定）。输入全局变量 `ord`
+  （委托字段，键名=交易所规范名，价格元/数量股）与 `ctx`（网关/平台/分区/柜台地址），
+  返回回报计划（`"confirm"`/`"trade"`/`"reject"` 快捷方式，或 `{kind, qty, price, via,
+  reason, text, delayMs}` 表数组），由三套 strategy.rs 的 `plan_reports_lua` 复用既有
+  报文构造器落地。只接管新委托（撤单仍走 CancelMode）；运行时出错 → 本笔不回报 + 日志；
+  无成交回报业务的 trade 项忽略并告警。保存时 `update_strategy` / `save_gateway`
+  强制语法校验（`lua_engine::check_syntax`），api 命令 `validate_lua_script` 供前端
+  即时校验；编译缓存挂 `SessionCtx.lua_cache`（mlua 须开 `send` feature 才能放进
+  SessionCtx）。编写文档：docs/Lua脚本回报编写说明.md。
 - **撤单自动回报模式**：默认（原单在途→撤单成功，否则撤单拒单）/ 全部撤单成功（一律成功，
   无订单缓存也成功）/ 全部撤单拒单（一律拒单，原因码 cancel_reject_reason 可配置）；
   勾选 cancel_front_reject（前台拒单）时撤单拒单
@@ -111,7 +124,8 @@ SimuXchange/
   运行时共享区，与持久化配置（gateways.json）分离；每次生成回报计划时在块作用域内加读锁
   读取最新值（`RwLockReadGuard` 不是 Send，**不能跨 await 存活**）；`engine.update_strategy`
   同时写运行时共享区与持久化配置（api 命令 `update_strategy`），前端在网关运行中保存平台时走此命令。
-  `plan_reports` 签名为 `(st: &StrategyConfig, partition_no: i32, order, stats, [pbu])`——策略与分区号分离。
+  `plan_reports` 签名为 `(st: &StrategyConfig, partition_no: i32, order, stats, env, [pbu])`——策略与分区号分离，
+  `env: &lua_engine::ScriptEnv` 是 Lua 脚本模式的执行环境（缓存/网关平台信息/日志回调，非 Lua 模式不用但统一携带）。
 - **自动启动**：simx-server / 桌面端均支持 `--auto-start` 参数，引擎创建后调用
   `engine.auto_start_previous()` 只恢复**上次运行中**的网关（启停状态并入
   `data_dir/gateways.json` 的 `was_running` 字段：start_gateway 置 true、
@@ -164,7 +178,7 @@ Rust 结构体（serde 序列化为 **camelCase**）与 `src/types.ts` 的 inter
 
 - 前端遵循既有模式：状态集中在 `App.vue`，子组件只通过 props 接收、emit 上报；
   所有后端调用走 `backend.ts` 抽象层，**不得**在组件里直接 `invoke`；
-- 修改协议/策略逻辑后必须跑 `cargo test -p simx-core`（含 23 个 e2e 测试：深交所 12 + 上交所竞价 6 + 上交所新债券 5）；
+- 修改协议/策略逻辑后必须跑 `cargo test -p simx-core`（含 28 个 e2e 测试：深交所 15 + 上交所竞价 7 + 上交所新债券 6）；
 - 右键菜单、弹窗等 UI 交互遵循现有实现风格（贴边修正、运行态置灰、Esc 关闭）；
 - 端口约定：Vite 开发端口 **14200**（`vite.config.ts` 与 `tauri.conf.json` 的
   devUrl 两处必须一致）；e2e 测试占用 18101~18111（深交所）、18201~18206（上交所竞价）与 18301~18305（上交所新债券）；平台默认端口从 10001 起。
@@ -173,6 +187,8 @@ Rust 结构体（serde 序列化为 **camelCase**）与 `src/types.ts` 的 inter
 
 > 本机 shell 为 PowerShell：**不支持 `&&`，用 `;` 分隔命令**。
 > 找不到 cargo 时先执行 `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`。
+> cargo 的 ExitCode 非 0 **不代表失败**——以输出末尾 `Finished` / `test result: ok` 为准
+> （PowerShell 把进度输出当 stderr；详见构建手册坑⑥）。
 
 | 目的 | 命令 |
 | --- | --- |
@@ -186,19 +202,15 @@ Rust 结构体（serde 序列化为 **camelCase**）与 `src/types.ts` 的 inter
 | 打包桌面发布版 | `npm run tauri build` |
 | 构建独立后端 | `cargo build --release -p simx-server` |
 
-## 6. 环境注意事项（踩过的坑）
+## 6. 环境与踩坑记录（不在本文件维护）
 
-1. **不要用 1381–1480 段端口**（Windows Hyper-V/WSL 保留段，报 EACCES）；
-2. `src-tauri/Cargo.toml` 必须保留 `default = ["custom-protocol"]`，
-   否则发布版 exe 加载 devUrl 白屏（"localhost 拒绝连接"）；
-3. cargo 显示 ExitCode 非 0 不代表失败——**以输出末尾 `Finished` /
-   `test result: ok` 判断成功**（PowerShell 把进度输出当 stderr）；
-4. cargo 报「拒绝访问 (os error 5)」多为杀毒拦截 build-script，重跑即可；
-5. 避免 `cargo check --workspace`（易触发上一条），按包分开检查；
-6. cargo 拉依赖 404 时用项目级 `.cargo/config.toml` 切 aliyun sparse 镜像（见构建手册坑⑨）；
-7. 新建含中文的 .ps1 必须存 **UTF-8 with BOM**，否则 PowerShell 5.1 乱码报解析错误（坑⑩）。
+环境准备与踩坑排查统一记录在 [docs/构建调试手册.md](docs/构建调试手册.md)：
+环境准备（含 zig 交叉编译器安装）见第 2 节，踩坑记录见第 8 节坑①~⑪
+（端口占用、custom-protocol、ExitCode 误判、os error 5、依赖镜像、ps1 编码、
+zig 交叉编译、目录搬迁缓存等）。
 
-详细说明见 [docs/构建调试手册.md](docs/构建调试手册.md) 第 8 节。
+**新踩到的坑一律记入手册第 8 节，不写入本文件**——本文件只保留每次协作
+都需要的通用约定（见文件头"维护原则"）。
 
 ## 7. 文档同步义务（每次改动必查）
 
@@ -217,7 +229,7 @@ Rust 结构体（serde 序列化为 **camelCase**）与 `src/types.ts` 的 inter
 
 - [ ] `cargo check -p simx-core -p simx-server` 通过（Finished）
 - [ ] 涉及 Tauri 时：`cargo check --manifest-path src-tauri/Cargo.toml` 通过
-- [ ] 涉及协议/策略/会话时：`cargo test -p simx-core` 全绿（94 单元 + 4 自动启动 + 23 e2e）
+- [ ] 涉及协议/策略/会话时：`cargo test -p simx-core` 全绿（111 单元 + 4 自动启动 + 28 e2e）
 - [ ] 涉及前端时：`npx vite build` 通过 + `tsc --noEmit` 无错误
 - [ ] 前后端类型已同步（types.ts ↔ Rust 结构体）
 - [ ] 新增逻辑已按 4.1 规范补注释
