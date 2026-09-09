@@ -18,7 +18,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import type { Backend } from "./backend";
 import { createBackend } from "./backend";
-import type { AppCfg, BackendEntry, GatewayCategory, GatewayConfig, GatewaySnapshot, LogEvent, PlatformConfig, Snapshot } from "./types";
+import type { AppCfg, BackendEntry, DirConfig, GatewayCategory, GatewayConfig, GatewaySnapshot, LogEvent, PlatformConfig, Snapshot } from "./types";
 import { defaultPlatform, emptyStats, GATEWAY_CATEGORIES, gatewayCategoryLabel } from "./types";
 import { APP_VERSION, CHANGELOG } from "./changelog";
 import { checkForUpdate, type UpdateInfo } from "./updater";
@@ -97,6 +97,54 @@ function applyTheme(id: string) {
 
 // 脚本加载时立即应用一次（不等页面渲染完），避免启动瞬间先闪一下默认黑色
 document.documentElement.dataset.theme = theme.value;
+
+// ---------- 侧栏宽度拖动 ----------
+// 侧栏与主区之间有一条可拖动的分界线（.splitter）：按住左右拖动即调整
+// 侧栏宽度。实现是“原生三件套”——mousedown 记录起点、document 级
+// mousemove 实时改宽度、mouseup 收尾保存。监听器挂 document 而不是
+// splitter 本身，因为鼠标快速拖动时会“甩出”元素范围，只有 document
+// 级监听才能保证全程收到事件。宽度存 localStorage，下次启动自动恢复。
+
+/** localStorage 的存储键名与宽度限幅（太窄放不下内容，太宽挤压主区） */
+const SIDEBAR_WIDTH_KEY = "simx-sidebar-width";
+const SIDEBAR_MIN = 160;
+const SIDEBAR_MAX = 480;
+
+/** 侧栏当前宽度；上次保存的值在合法区间内则恢复，否则用默认 230px */
+const sidebarWidth = ref(
+    (() => {
+        const v = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+        return v >= SIDEBAR_MIN && v <= SIDEBAR_MAX ? v : 230;
+    })(),
+);
+
+/** 拖动中的临时状态：起始鼠标 X 坐标与起始侧栏宽度（差值算新宽度用） */
+let resizeStartX = 0;
+let resizeStartW = 0;
+
+/** 分界线按下：记录起点，把 mousemove/mouseup 挂到 document 上开始拖动 */
+function startResizeSidebar(e: MouseEvent) {
+    resizeStartX = e.clientX;
+    resizeStartW = sidebarWidth.value;
+    // 拖动期间禁止选中文字：鼠标划过页面文本会触发原生选中，视觉上乱
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onSidebarResize);
+    document.addEventListener("mouseup", stopResizeSidebar);
+}
+
+/** 拖动中：按“起始宽度 + 鼠标水平位移”算新宽度并限幅 */
+function onSidebarResize(e: MouseEvent) {
+    const w = resizeStartW + e.clientX - resizeStartX;
+    sidebarWidth.value = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, w));
+}
+
+/** 拖动结束：摘掉监听、恢复文字选中，宽度写 localStorage 供下次启动恢复 */
+function stopResizeSidebar() {
+    document.body.style.userSelect = "";
+    document.removeEventListener("mousemove", onSidebarResize);
+    document.removeEventListener("mouseup", stopResizeSidebar);
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth.value));
+}
 
 // ---------- 自定义右键菜单 ----------
 // 桌面软件里网页默认的右键菜单（“刷新/查看源代码”等）会露馅，
@@ -240,6 +288,9 @@ function onGlobalKeydown(e: KeyboardEvent) {
         closeCtxMenu();
         showThemePicker.value = false;
         if (gwEditor.show) gwEditor.show = false;
+        if (dirEditor.show) dirEditor.show = false;
+        if (delDirBox.show) delDirBox.show = false;
+        if (moveGwBox.show) moveGwBox.show = false;
         if (pfEditor.show) pfEditor.show = false;
         if (pvViewer.show) pvViewer.show = false;
         if (ovViewer.show) ovViewer.show = false;
@@ -341,8 +392,8 @@ async function downloadUpdate() {
 // 连接/统计数据，整体替换 snapshot，Vue 自动把变化反映到页面上。
 // 好处是逻辑极简、永远不会漏更新；代价是最多有 1 秒延迟，对本工具足够。
 
-/** 全量快照：界面上所有网关/平台数据的唯一来源 */
-const snapshot = ref<Snapshot>({ gateways: [] });
+/** 全量快照：界面上所有网关/目录数据的唯一来源 */
+const snapshot = ref<Snapshot>({ dirs: [], gateways: [] });
 /** 侧栏当前选中的网关 id */
 const selectedGwId = ref("");
 /** 日志面板的内容（后端推送的事件累积在这里） */
@@ -440,6 +491,253 @@ const globalStats = computed(() => {
 /** 在网关快照里找某个平台的运行状态（传给 PlatformCard 显示） */
 function platformSnapshotOf(gw: GatewaySnapshot, platformId: string) {
     return gw.platforms.find((p) => p.platformId === platformId);
+}
+
+// ---------- 网关目录 ----------
+// 目录（文件夹）定义在后端 gateways.json 里、随快照每秒下发；而“哪些目录
+// 被折叠”属于个人界面偏好，存前端 localStorage（键 simx-dir-collapsed，
+// 内容是 { 目录id: true } 表），没有记录的目录一律视为展开——这样新用户
+// 或清了缓存的用户看到的是全展开的完整目录树，与后端目录数据保持一致。
+
+/** localStorage 的存储键名 */
+const DIR_COLLAPSE_KEY = "simx-dir-collapsed";
+
+/** 折叠的目录表：key 为目录 id，value 为 true 表示折叠；没出现的目录默认展开。
+ *  独立于 snapshot 存放（快照每秒整树替换，折叠状态不能跟着被冲掉） */
+const collapsedDirs = ref<Record<string, boolean>>(
+    (() => {
+        try {
+            return JSON.parse(localStorage.getItem(DIR_COLLAPSE_KEY) ?? "{}") as Record<string, boolean>;
+        } catch {
+            return {}; // 缓存损坏按全展开处理
+        }
+    })(),
+);
+
+/** 展开/折叠目录并立即写回 localStorage（下次启动恢复本次的折叠状态） */
+function toggleDir(id: string) {
+    collapsedDirs.value[id] = !collapsedDirs.value[id];
+    localStorage.setItem(DIR_COLLAPSE_KEY, JSON.stringify(collapsedDirs.value));
+}
+
+/**
+ * 侧栏扁平渲染行：目录行（带层级深度与网关数）或网关行。
+ * 树结构在前端“拍平”成一行一个元素的数组，模板里单层 v-for 即可渲染，
+ * 避免目录/网关两套嵌套模板重复编写；折叠只影响拍平结果（折叠的目录
+ * 不输出内部行），渲染逻辑本身不用关心层级。
+ */
+type SidebarRow =
+    | { kind: "dir"; dir: DirConfig; depth: number; count: number }
+    | { kind: "gw"; gw: GatewaySnapshot };
+
+/** 把快照里的目录+网关组装成侧栏行列表（顺序：根级网关 → 各目录[子目录 → 网关]） */
+const sidebarRows = computed<SidebarRow[]>(() => {
+    const inDir = (dirId: string) => snapshot.value.gateways.filter((g) => g.config.dirId === dirId);
+    const knownDirIds = new Set(snapshot.value.dirs.map((d) => d.id));
+    const rows: SidebarRow[] = [];
+    // 根层级网关：dirId 为空，或指向的目录已被删除（防御性兜底，正常流程不会出现）
+    for (const gw of snapshot.value.gateways) {
+        if (!gw.config.dirId || !knownDirIds.has(gw.config.dirId)) rows.push({ kind: "gw", gw });
+    }
+    // 目录区块：子目录排在网关前面（与文件管理器“文件夹优先”的习惯一致）
+    for (const d of snapshot.value.dirs) {
+        if (d.parentId) continue; // 子目录在父目录展开时渲染
+        const subs = snapshot.value.dirs.filter((s) => s.parentId === d.id);
+        // 目录行上的网关数 = 目录直属 + 子目录直属（给用户一个“里面有多少”的预期）
+        const count = inDir(d.id).length + subs.reduce((n, s) => n + inDir(s.id).length, 0);
+        rows.push({ kind: "dir", dir: d, depth: 0, count });
+        if (collapsedDirs.value[d.id]) continue; // 折叠的目录不输出内部行
+        for (const s of subs) {
+            rows.push({ kind: "dir", dir: s, depth: 1, count: inDir(s.id).length });
+            if (collapsedDirs.value[s.id]) continue;
+            for (const gw of inDir(s.id)) rows.push({ kind: "gw", gw });
+        }
+        for (const gw of inDir(d.id)) rows.push({ kind: "gw", gw });
+    }
+    return rows;
+});
+
+/** 目录命名弹窗：新建（含建子目录）与重命名共用，靠 isNew 区分 */
+const dirEditor = reactive({ show: false, isNew: true, id: "", name: "", parentId: "" });
+
+/** 删除目录确认弹窗：带“同时删除目录下的网关”勾选项 */
+const delDirBox = reactive({
+    show: false,
+    id: "",
+    name: "",
+    /** 目录（含子目录）下是否有网关（决定提示文案与勾选项是否有效） */
+    hasGateways: false,
+    /** 勾选项：勾选 = 网关一并删除；不勾选 = 网关移回根层级 */
+    withGateways: false,
+});
+
+/** 移动网关弹窗：列出根层级与全部目录，点选目标即移动 */
+const moveGwBox = reactive({ show: false, gatewayId: "", gatewayName: "" });
+
+/** 拖拽中的网关 id（网关行 dragstart 记录，目录行 drop 时消费） */
+const dragGwId = ref("");
+/** 当前拖拽悬停的目录 id（目录行加高亮背景，指示可放置） */
+const dropTargetDir = ref("");
+
+/** 打开“新建目录”弹窗（parentId 非空 = 在某根级目录下建子目录） */
+function openNewDir(parentId = "") {
+    dirEditor.isNew = true;
+    dirEditor.id = "";
+    dirEditor.name = "";
+    dirEditor.parentId = parentId;
+    dirEditor.show = true;
+}
+
+/** 打开“重命名目录”弹窗，预填当前名字 */
+function openRenameDir(d: DirConfig) {
+    dirEditor.isNew = false;
+    dirEditor.id = d.id;
+    dirEditor.name = d.name;
+    dirEditor.parentId = d.parentId;
+    dirEditor.show = true;
+}
+
+/** 保存目录名称（新建和重命名共用；重命名时后端保持原层级不变） */
+async function saveDirName() {
+    const name = dirEditor.name.trim();
+    if (!name) {
+        showToast("请输入目录名称", true);
+        return;
+    }
+    const saved = (await call({
+        cmd: "save_dir",
+        dir: { id: dirEditor.id, name, parentId: dirEditor.parentId },
+    })) as DirConfig | null;
+    if (saved) {
+        dirEditor.show = false;
+        await refresh();
+        showToast(dirEditor.isNew ? "目录已创建" : "目录已保存");
+    }
+}
+
+/** 删除目录前弹确认框（带勾选项；真正的删除动作由 runDeleteDir 执行） */
+function askDeleteDir(d: DirConfig) {
+    const subs = snapshot.value.dirs.filter((s) => s.parentId === d.id);
+    const gwCount =
+        snapshot.value.gateways.filter((g) => g.config.dirId === d.id).length +
+        subs.reduce((n, s) => n + snapshot.value.gateways.filter((g) => g.config.dirId === s.id).length, 0);
+    delDirBox.id = d.id;
+    delDirBox.name = d.name;
+    delDirBox.hasGateways = gwCount > 0;
+    delDirBox.withGateways = false; // 每次弹窗重置勾选，避免上次的勾选残留
+    delDirBox.show = true;
+}
+
+/** 确认删除目录：勾选 = 连网关一起删（运行中网关由后端拦截并提示）；不勾选 = 网关移回根层级 */
+async function runDeleteDir() {
+    const res = await call({ cmd: "delete_dir", id: delDirBox.id, deleteGateways: delDirBox.withGateways });
+    if (res !== null) {
+        delDirBox.show = false;
+        await refresh();
+        // 选中网关若已随目录删除则清掉选中，避免主区停留在已不存在的网关上
+        if (!snapshot.value.gateways.some((g) => g.config.id === selectedGwId.value)) {
+            selectedGwId.value = "";
+        }
+        showToast(delDirBox.withGateways ? "目录及其下网关已删除" : "目录已删除，网关已移至根层级");
+    }
+}
+
+/** 打开“移动网关到目录”弹窗（网关右键菜单触发） */
+function openMoveGateway(gw: GatewaySnapshot) {
+    moveGwBox.gatewayId = gw.config.id;
+    moveGwBox.gatewayName = gw.config.name;
+    moveGwBox.show = true;
+}
+
+/** 移动网关到指定目录（dirId 空 = 移回根层级；运行中网关也允许移动） */
+async function moveGatewayTo(dirId: string) {
+    const cur = snapshot.value.gateways.find((g) => g.config.id === moveGwBox.gatewayId)?.config.dirId ?? "";
+    if (cur === dirId) {
+        moveGwBox.show = false; // 目标就是当前位置，无需移动，直接关弹窗
+        return;
+    }
+    const res = await call({ cmd: "move_gateway", id: moveGwBox.gatewayId, dirId });
+    if (res !== null) {
+        moveGwBox.show = false;
+        await refresh();
+        showToast("网关已移动");
+    }
+}
+
+/** 查“移动网关”弹窗里那个网关当前所属的目录 id（空 = 根层级，弹窗里标“当前”用） */
+function gwCurrentDirId(): string {
+    return snapshot.value.gateways.find((g) => g.config.id === moveGwBox.gatewayId)?.config.dirId ?? "";
+}
+
+/** 网关行开始拖拽：记录网关 id；setData 是 Firefox 的要求（不设则不允许拖动） */
+function onGwDragStart(e: DragEvent, gw: GatewaySnapshot) {
+    dragGwId.value = gw.config.id;
+    if (e.dataTransfer) {
+        e.dataTransfer.setData("text/plain", gw.config.id);
+        e.dataTransfer.effectAllowed = "move";
+    }
+}
+
+/** 网关拖拽结束（无论放到目录上、还是中途取消都会触发）：清理拖拽状态，
+ *  避免残留的网关 id 影响下一次拖放 */
+function onGwDragEnd() {
+    dragGwId.value = "";
+    dropTargetDir.value = "";
+}
+
+/** 拖拽悬停目录行：允许放置（preventDefault 才会触发后续 drop）并加高亮 */
+function onDirDragOver(e: DragEvent, dirId: string) {
+    if (!dragGwId.value) return; // 不是从网关行拖来的（比如拖网页文字）不响应
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    dropTargetDir.value = dirId;
+}
+
+/** 拖拽离开目录行：移除高亮 */
+function onDirDragLeave(dirId: string) {
+    if (dropTargetDir.value === dirId) dropTargetDir.value = "";
+}
+
+/** 从拖拽事件里取网关 id：优先 dataTransfer（drop 时必有值），兜底内部状态 */
+function dragGwIdOf(e: DragEvent): string {
+    return e.dataTransfer?.getData("text/plain") || dragGwId.value || "";
+}
+
+/** 放置到目录行：把拖拽的网关移入该目录 */
+async function onDirDrop(e: DragEvent, dirId: string) {
+    e.preventDefault();
+    const id = dragGwIdOf(e);
+    dragGwId.value = "";
+    dropTargetDir.value = "";
+    if (!id) return;
+    const res = await call({ cmd: "move_gateway", id, dirId });
+    if (res !== null) {
+        await refresh();
+        showToast("网关已移动");
+    }
+}
+
+/** 拖拽悬停网关列表空白区：允许放置（移回根层级用） */
+function onListDragOver(e: DragEvent) {
+    if (!dragGwId.value) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+}
+
+/** 放置到网关列表空白处：把网关移回根层级（点在网关行/目录行上时由
+ *  各自的 drop 处理，冒泡到这里的 target 不是列表本身，直接忽略） */
+async function onListDrop(e: DragEvent) {
+    if (e.target !== e.currentTarget) return;
+    e.preventDefault();
+    const id = dragGwIdOf(e);
+    dragGwId.value = "";
+    dropTargetDir.value = "";
+    if (!id) return;
+    const res = await call({ cmd: "move_gateway", id, dirId: "" });
+    if (res !== null) {
+        await refresh();
+        showToast("网关已移至根层级");
+    }
 }
 
 // ---------- 后端调用 ----------
@@ -650,8 +948,9 @@ async function saveGatewayName() {
     const name = gwEditor.name.trim() || "未命名网关";
     let gw: GatewayConfig;
     if (gwEditor.isNew) {
-        // id 留空，后端会自动分配一个新 id；分类新建时选定后不可改
-        gw = { id: "", name, category: gwEditor.category, platforms: [] };
+        // id 留空，后端会自动分配一个新 id；分类新建时选定后不可改；
+        // 新网关默认在根层级（dirId 空），之后可拖拽或右键移入目录
+        gw = { id: "", name, category: gwEditor.category, platforms: [], dirId: "" };
     } else {
         const cur = snapshot.value.gateways.find((g) => g.config.id === gwEditor.id);
         if (!cur) return;
@@ -842,8 +1141,20 @@ function gwCtxMenu(e: MouseEvent, gw: GatewaySnapshot) {
         { label: "＋ 添加平台", disabled: gw.running, action: openNewPlatform },
         { label: "重命名网关", action: openRenameGateway },
         { label: "重置统计", action: resetStats },
+        // 移动归属不触碰运行时，运行中网关也可移动；一个目录都没有时无从移起
+        { label: "移动到目录…", disabled: !snapshot.value.dirs.length, action: () => openMoveGateway(gw) },
         { label: "", divider: true },
         { label: "删除网关", danger: true, disabled: gw.running, action: askDeleteGateway },
+    ]);
+}
+
+/** 目录行的右键菜单（新建子目录仅根级目录可操作——子目录内不能再建） */
+function dirCtxMenu(e: MouseEvent, d: DirConfig) {
+    openCtxMenu(e, [
+        ...(d.parentId ? [] : [{ label: "＋ 新建子目录", action: () => openNewDir(d.id) }]),
+        { label: "重命名目录", action: () => openRenameDir(d) },
+        { label: "", divider: true },
+        { label: "删除目录", danger: true, action: () => askDeleteDir(d) },
     ]);
 }
 
@@ -868,7 +1179,10 @@ function platformCtxMenu(e: MouseEvent, p: PlatformConfig) {
 
 /** 空白区域（侧栏空处/主区背景）的右键菜单 */
 function blankCtxMenu(e: MouseEvent) {
-    const items: CtxMenuItem[] = [{ label: "＋ 新建网关", action: openNewGateway }];
+    const items: CtxMenuItem[] = [
+        { label: "＋ 新建网关", action: openNewGateway },
+        { label: "＋ 新建目录", action: () => openNewDir() },
+    ];
     if (selectedGw.value) {
         items.push({ label: "＋ 添加平台", disabled: selectedGw.value.running, action: openNewPlatform });
     }
@@ -941,6 +1255,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
     clearInterval(pollTimer);
     backend?.dispose(); // 断掉后端连接，停掉远程模式的重连定时器
+    stopResizeSidebar(); // 拖侧栏宽度的 document 级监听若还挂着，一并摘掉
     document.removeEventListener("contextmenu", onGlobalContextMenu);
     document.removeEventListener("keydown", onGlobalKeydown);
 });
@@ -991,35 +1306,60 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="layout">
-            <!-- 侧栏：网关列表 -->
-            <aside class="sidebar" @contextmenu="blankCtxMenu">
+            <!-- 侧栏：网关列表（宽度由侧栏拖动分界线调整，存 localStorage） -->
+            <aside class="sidebar" :style="{ width: sidebarWidth + 'px' }" @contextmenu="blankCtxMenu">
                 <div class="side-head">
                     <span>交易网关</span>
                     <button class="btn sm primary" @click="openNewGateway">＋ 新建</button>
                 </div>
-                <div class="gw-list">
-                    <div
-                        v-for="gw in snapshot.gateways"
-                        :key="gw.config.id"
-                        class="gw-item"
-                        :class="{ active: gw.config.id === selectedGwId }"
-                        @click="selectedGwId = gw.config.id"
-                        @contextmenu="gwCtxMenu($event, gw)"
-                    >
-                        <span class="dot" :class="gw.running ? 'on pulse' : 'off'"></span>
-                        <div class="gw-item-main">
-                            <div class="gw-item-name">{{ gw.config.name }}</div>
-                            <div class="gw-item-sub">{{ gatewayCategoryLabel(gw.config.category ?? "sz") }} · {{ gw.config.platforms.length }} 个平台</div>
+                <div class="gw-list" @dragover="onListDragOver" @drop="onListDrop">
+                    <!-- 扁平行列表：目录行（点击折叠/展开、可拖入网关）与网关行交替输出 -->
+                    <template v-for="row in sidebarRows" :key="row.kind === 'dir' ? 'd' + row.dir.id : 'g' + row.gw.config.id">
+                        <!-- 目录行 -->
+                        <div
+                            v-if="row.kind === 'dir'"
+                            class="dir-row"
+                            :class="{ sub: row.depth > 0, 'drop-hover': dropTargetDir === row.dir.id }"
+                            :style="{ paddingLeft: 5 + row.depth * 16 + 'px' }"
+                            @click="toggleDir(row.dir.id)"
+                            @contextmenu="dirCtxMenu($event, row.dir)"
+                            @dragover="onDirDragOver($event, row.dir.id)"
+                            @dragleave="onDirDragLeave(row.dir.id)"
+                            @drop="onDirDrop($event, row.dir.id)"
+                        >
+                            <span class="dir-arrow" :class="{ open: !collapsedDirs[row.dir.id] }">▶</span>
+                            <span class="dir-name">{{ row.dir.name }}</span>
+                            <span class="dir-count">{{ row.count }}</span>
                         </div>
-                        <span class="badge" :class="gw.running ? 'green' : 'gray'">
-                            {{ gw.running ? "运行" : "停止" }}
-                        </span>
-                    </div>
-                    <div v-if="!snapshot.gateways.length" class="gw-empty">
+                        <!-- 网关行（可拖拽到目录行完成归类） -->
+                        <div
+                            v-else
+                            class="gw-item"
+                            :class="{ active: row.gw.config.id === selectedGwId }"
+                            draggable="true"
+                            @dragstart="onGwDragStart($event, row.gw)"
+                            @dragend="onGwDragEnd"
+                            @click="selectedGwId = row.gw.config.id"
+                            @contextmenu="gwCtxMenu($event, row.gw)"
+                        >
+                            <span class="dot" :class="row.gw.running ? 'on pulse' : 'off'"></span>
+                            <div class="gw-item-main">
+                                <div class="gw-item-name">{{ row.gw.config.name }}</div>
+                                <div class="gw-item-sub">{{ gatewayCategoryLabel(row.gw.config.category ?? "sz") }} · {{ row.gw.config.platforms.length }} 个平台</div>
+                            </div>
+                            <span class="badge" :class="row.gw.running ? 'green' : 'gray'">
+                                {{ row.gw.running ? "运行" : "停止" }}
+                            </span>
+                        </div>
+                    </template>
+                    <div v-if="!sidebarRows.length" class="gw-empty">
                         暂无网关<br />点击「新建」创建第一个交易网关
                     </div>
                 </div>
             </aside>
+
+            <!-- 可拖动分界线：按住左右拖动调整侧栏宽度 -->
+            <div class="splitter" title="拖动调整侧栏宽度" @mousedown="startResizeSidebar"></div>
 
             <!-- 主区 -->
             <main class="main" @contextmenu="blankCtxMenu">
@@ -1104,6 +1444,93 @@ onBeforeUnmount(() => {
                 <div class="modal-foot">
                     <button class="btn" @click="gwEditor.show = false">取消</button>
                     <button class="btn primary" @click="saveGatewayName">保存</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 目录命名弹窗（新建/重命名共用） -->
+        <div v-if="dirEditor.show" class="modal-mask" @mousedown.self="dirEditor.show = false">
+            <div class="modal" style="width: 380px">
+                <div class="modal-head">
+                    <span>{{ dirEditor.isNew ? "新建目录" : "重命名目录" }}</span>
+                    <button class="modal-close" @click="dirEditor.show = false">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div class="field">
+                        <label>目录名称</label>
+                        <input v-model="dirEditor.name" @keyup.enter="saveDirName" autofocus />
+                    </div>
+                    <p v-if="dirEditor.isNew && dirEditor.parentId" class="hint">
+                        将创建为子目录（目录最多两级，子目录内不能再建目录）。
+                    </p>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn" @click="dirEditor.show = false">取消</button>
+                    <button class="btn primary" @click="saveDirName">保存</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 删除目录确认弹窗：可选是否连同目录下的网关一起删除 -->
+        <div v-if="delDirBox.show" class="modal-mask" @mousedown.self="delDirBox.show = false">
+            <div class="modal" style="width: 400px">
+                <div class="modal-head"><span>删除目录</span></div>
+                <div class="modal-body">
+                    <p style="color: var(--text-dim); line-height: 1.7">
+                        确定删除目录「{{ delDirBox.name }}」及其子目录？
+                    </p>
+                    <label class="dir-chk">
+                        <input type="checkbox" v-model="delDirBox.withGateways" />
+                        同时删除目录下的网关
+                    </label>
+                    <p class="hint">
+                        {{
+                            delDirBox.withGateways
+                                ? "目录（含子目录）下的全部网关将一并删除；有网关在运行时删除会失败并提示。"
+                                : delDirBox.hasGateways
+                                  ? "目录下的网关不会被删除，将自动移至根层级。"
+                                  : "该目录下没有网关。"
+                        }}
+                    </p>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn" @click="delDirBox.show = false">取消</button>
+                    <button class="btn primary" style="background: var(--red); border-color: var(--red)" @click="runDeleteDir">
+                        删除
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 移动网关到目录弹窗：点选目标位置即移动 -->
+        <div v-if="moveGwBox.show" class="modal-mask" @mousedown.self="moveGwBox.show = false">
+            <div class="modal" style="width: 360px">
+                <div class="modal-head">
+                    <span>移动「{{ moveGwBox.gatewayName }}」到目录</span>
+                    <button class="modal-close" @click="moveGwBox.show = false">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div class="move-list">
+                        <div class="move-item" :class="{ current: gwCurrentDirId() === '' }" @click="moveGatewayTo('')">
+                            根层级<span v-if="gwCurrentDirId() === ''" class="move-cur">当前</span>
+                        </div>
+                        <div
+                            v-for="d in snapshot.dirs"
+                            :key="d.id"
+                            class="move-item"
+                            :class="{ sub: !!d.parentId, current: gwCurrentDirId() === d.id }"
+                            :style="{ paddingLeft: d.parentId ? '26px' : '10px' }"
+                            @click="moveGatewayTo(d.id)"
+                        >
+                            {{ d.name }}<span v-if="gwCurrentDirId() === d.id" class="move-cur">当前</span>
+                        </div>
+                        <div v-if="!snapshot.dirs.length" class="gw-empty" style="padding: 16px 6px">
+                            还没有目录<br />可在侧栏空白处右键「新建目录」
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn" @click="moveGwBox.show = false">取消</button>
                 </div>
             </div>
         </div>
@@ -1673,12 +2100,30 @@ onBeforeUnmount(() => {
 }
 
 .sidebar {
-    width: 230px;
+    /* 宽度由 :style 动态绑定（拖动分界线调整，存 localStorage），不写死 */
     flex-shrink: 0;
-    border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     background: var(--bg-soft);
+    border-right: 1px solid var(--border);
+}
+
+/* 侧栏与主区之间的可拖动分界线：平时几乎隐形（与原边框线等宽视觉），
+   悬停/拖动时高亮成主题色细条，提示“这里可以拖” */
+.splitter {
+    width: 5px;
+    flex-shrink: 0;
+    margin: 0 -2px;
+    z-index: 5;
+    cursor: col-resize;
+    background: transparent;
+    transition: background 0.15s;
+}
+
+.splitter:hover,
+.splitter:active {
+    background: var(--accent);
+    opacity: 0.55;
 }
 
 .side-head {
@@ -1709,6 +2154,67 @@ onBeforeUnmount(() => {
     cursor: pointer;
     border: 1px solid transparent;
     transition: background 0.12s;
+}
+
+/* 目录行：可点击折叠/展开，也可作为网关拖拽的放置目标 */
+.dir-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 10px 6px 5px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-dim);
+    transition: background 0.12s;
+    user-select: none;
+}
+
+.dir-row:hover {
+    background: var(--panel);
+}
+
+/* 子目录行整体缩进（行内 paddingLeft 也按层级递增，双保险） */
+.dir-row.sub {
+    font-weight: 500;
+}
+
+/* 网关拖到目录行悬停时的高亮：提示“松手就放进这个目录” */
+.dir-row.drop-hover {
+    background: var(--panel-2);
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* 折叠箭头：折叠时朝右、展开时旋转 90° 朝下 */
+.dir-arrow {
+    font-size: 9px;
+    color: var(--text-faint);
+    transition: transform 0.15s;
+    flex-shrink: 0;
+}
+
+.dir-arrow.open {
+    transform: rotate(90deg);
+}
+
+.dir-name {
+    flex: 1;
+    min-width: 0;
+    /* 目录名超长时省略号截断（与网关名允许换行不同：目录行更矮，换行会跳动） */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dir-count {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--text-faint);
+    background: var(--panel);
+    border-radius: 8px;
+    padding: 1px 7px;
+    flex-shrink: 0;
 }
 
 .gw-item:hover {
@@ -1896,5 +2402,63 @@ onBeforeUnmount(() => {
 .toast-leave-to {
     opacity: 0;
     transform: translateX(-50%) translateY(8px);
+}
+
+/* 删除目录确认弹窗里的勾选项（“同时删除目录下的网关”） */
+.dir-chk {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 8px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.dir-chk input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+/* 移动网关弹窗里的目标位置列表 */
+.move-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.move-item {
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.12s;
+    user-select: none;
+}
+
+.move-item:hover {
+    background: var(--panel);
+}
+
+.move-item.current {
+    color: var(--text-faint);
+    cursor: default;
+}
+
+.move-item.current:hover {
+    background: transparent;
+}
+
+.move-cur {
+    margin-left: auto;
+    font-size: 10.5px;
+    color: var(--accent);
 }
 </style>

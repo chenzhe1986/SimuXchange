@@ -117,6 +117,18 @@ export interface PlatformConfig {
  *  shbond = 上海新债券网关（上交所新债券平台 Binary 1.90 协议） */
 export type GatewayCategory = "sz" | "shjj" | "shbond";
 
+/** 网关目录（侧栏里的文件夹，与后端 config.rs 的 DirConfig 对应）：
+ *  目录最多嵌套两层——根级目录（parentId 为空）内可再建子目录，
+ *  子目录内不能再建目录。目录定义存后端 gateways.json，随快照下发 */
+export interface DirConfig {
+    /** 唯一标识（后端自动生成，新建时传空串） */
+    id: string;
+    /** 目录名称 */
+    name: string;
+    /** 父目录 id：空 = 根级目录；非空 = 挂在某个根级目录下的子目录 */
+    parentId: string;
+}
+
 /** 一个网关 = 若干个平台的集合，整体启停 */
 export interface GatewayConfig {
     id: string;
@@ -126,6 +138,8 @@ export interface GatewayConfig {
     platforms: PlatformConfig[];
     /** 上次退出时是否在运行（后端 --auto-start 恢复依据，随配置存 gateways.json） */
     wasRunning: boolean;
+    /** 所属目录 id（空 = 根层级，不归入任何目录） */
+    dirId: string;
 }
 
 /** 平台统计计数（后端 stats.rs 的快照） */
@@ -169,6 +183,8 @@ export interface GatewaySnapshot {
 
 /** 全量快照（前端每秒拉一次，拿到后整体替换界面状态） */
 export interface Snapshot {
+    /** 全部网关目录（侧栏按目录分组展示用） */
+    dirs: DirConfig[];
     gateways: GatewaySnapshot[];
 }
 

@@ -11,7 +11,7 @@
 //! - 请求：{ "cmd": "get_snapshot" } / { "cmd": "save_gateway", "gateway": {...} } ...
 //! - 响应：{ "ok": true, "data": ... } 或 { "ok": false, "error": "..." }
 
-use crate::config::{GatewayConfig, StrategyConfig};
+use crate::config::{DirConfig, GatewayConfig, StrategyConfig};
 use crate::engine::Engine;
 use crate::sz::session::ManualReportKind;
 use serde::Deserialize;
@@ -31,6 +31,18 @@ pub enum Command {
     SaveGateway { gateway: GatewayConfig },
     /// 删除网关
     DeleteGateway { id: String },
+    /// 新建/重命名网关目录（id 为空 = 新建，后端自动生成 id）
+    SaveDir { dir: DirConfig },
+    /// 删除网关目录（连同其子目录）；delete_gateways = 是否把目录下的
+    /// 网关一并删除，false 时网关保留并移回根层级
+    #[serde(rename_all = "camelCase")]
+    DeleteDir {
+        id: String,
+        delete_gateways: bool,
+    },
+    /// 移动网关到目录（dir_id 空 = 移回根层级；只改归属，运行中也允许）
+    #[serde(rename_all = "camelCase")]
+    MoveGateway { id: String, dir_id: String },
     /// 启动网关
     StartGateway { id: String },
     /// 停止网关
@@ -134,6 +146,52 @@ pub async fn dispatch(engine: &Engine, payload: Value, client_ip: &str) -> Value
             let name = engine.gateway_name(&id).await.unwrap_or_else(|| id.clone());
             engine.log_op(client_ip, &format!("删除网关 {}", name));
             match engine.delete_gateway(&id).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
+        Command::SaveDir { dir } => {
+            let op = if dir.id.is_empty() { "新建目录" } else { "重命名目录" };
+            engine.log_op(client_ip, &format!("{} {}", op, dir.name));
+            match engine.save_dir(dir).await {
+                Ok(d) => ok(serde_json::to_value(d).unwrap_or(Value::Null)),
+                Err(e) => err(e),
+            }
+        }
+        Command::DeleteDir {
+            id,
+            delete_gateways,
+        } => {
+            let name = engine.dir_name(&id).await.unwrap_or_else(|| id.clone());
+            engine.log_op(
+                client_ip,
+                &format!(
+                    "删除目录 {}（{}）",
+                    name,
+                    if delete_gateways {
+                        "连同目录下网关一起删除"
+                    } else {
+                        "目录下网关移回根层级"
+                    }
+                ),
+            );
+            match engine.delete_dir(&id, delete_gateways).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
+        Command::MoveGateway { id, dir_id } => {
+            let gw = engine.gateway_name(&id).await.unwrap_or_else(|| id.clone());
+            let target = if dir_id.is_empty() {
+                "根层级".to_string()
+            } else {
+                engine
+                    .dir_name(&dir_id)
+                    .await
+                    .unwrap_or_else(|| dir_id.clone())
+            };
+            engine.log_op(client_ip, &format!("移动网关 {} 到 {}", gw, target));
+            match engine.move_gateway(&id, &dir_id).await {
                 Ok(()) => ok(Value::Null),
                 Err(e) => err(e),
             }

@@ -18,7 +18,9 @@
 //! - `broadcast` 通道：日志事件广播（推给前端）
 
 use crate::capture::{ConnRecorder, PacketPage};
-use crate::config::{GatewayCategory, GatewayConfig, PlatformConfig, StrategyConfig, StrategyMode};
+use crate::config::{
+    DirConfig, GatewayCategory, GatewayConfig, PlatformConfig, StrategyConfig, StrategyMode,
+};
 use crate::event::{ConnInfo, EngineEvent};
 use crate::oplog::OpLog;
 use crate::orderbook::{OrderBook, OrderEntry};
@@ -27,7 +29,7 @@ use crate::shbond::session as session_shbond;
 use crate::shjj::session as session_shjj;
 use crate::sz::session::{self as session_sz, ManualReportKind, SessionCtx};
 use crate::stats::{PlatformStats, StatsSnapshot};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,6 +73,9 @@ struct Inner {
     data_dir: PathBuf,
     /// 全部网关配置（含未运行的）
     gateways: Mutex<Vec<GatewayConfig>>,
+    /// 全部网关目录（与网关配置同存 gateways.json，平铺存储、
+    /// 靠 DirConfig.parent_id 表达父子层级）
+    dirs: Mutex<Vec<DirConfig>>,
     /// 正在运行的网关，key 为网关 id
     running: Mutex<HashMap<String, RunningGateway>>,
     /// 前端操作日志（带前端 IP，按日期存 log/ 目录）
@@ -90,11 +95,12 @@ impl Engine {
     /// 创建引擎并从 data_dir/gateways.json 加载历史配置（没有则为空）
     pub fn new(data_dir: PathBuf) -> Self {
         let (events, _) = broadcast::channel(4096);
-        let gateways = load_gateways(&data_dir);
+        let store = load_store(&data_dir);
         Self {
             inner: Arc::new(Inner {
                 data_dir: data_dir.clone(),
-                gateways: Mutex::new(gateways),
+                gateways: Mutex::new(store.gateways),
+                dirs: Mutex::new(store.dirs),
                 running: Mutex::new(HashMap::new()),
                 oplog: OpLog::new(data_dir),
                 events,
@@ -126,6 +132,12 @@ impl Engine {
     pub async fn gateway_name(&self, id: &str) -> Option<String> {
         let gws = self.inner.gateways.lock().await;
         gws.iter().find(|g| g.id == id).map(|g| g.name.clone())
+    }
+
+    /// 按 id 查目录名称（操作日志用）。查不到返回 None，调用方用 id 兜底。
+    pub async fn dir_name(&self, id: &str) -> Option<String> {
+        let dirs = self.inner.dirs.lock().await;
+        dirs.iter().find(|d| d.id == id).map(|d| d.name.clone())
     }
 
     /// 按网关 id + 平台 id 查 (网关名, 平台名)（操作日志用）。
@@ -188,6 +200,9 @@ impl Engine {
             return Err("同一网关下平台监听端口不能重复".into());
         }
 
+        // 目录列表仅落盘用：先克隆（锁即取即还），避免持有网关表锁的同时
+        // 再去等目录锁（全工程统一“先目录锁后网关锁”的加锁次序防死锁）
+        let dirs = self.inner.dirs.lock().await.clone();
         let mut gws = self.inner.gateways.lock().await;
         if let Some(slot) = gws.iter_mut().find(|g| g.id == gw.id) {
             // 保存配置不改变“上次运行状态”（was_running 保留旧值，
@@ -197,7 +212,7 @@ impl Engine {
         } else {
             gws.push(gw.clone());
         }
-        persist_gateways(&self.inner.data_dir, &gws)?;
+        self.persist_store(&dirs, &gws)?;
         Ok(gw)
     }
 
@@ -206,9 +221,123 @@ impl Engine {
         if self.inner.running.lock().await.contains_key(id) {
             return Err("网关正在运行，请先停止后再删除".into());
         }
+        // 目录列表仅落盘用：先克隆（锁即取即还），理由同 save_gateway
+        let dirs = self.inner.dirs.lock().await.clone();
         let mut gws = self.inner.gateways.lock().await;
         gws.retain(|g| g.id != id);
-        persist_gateways(&self.inner.data_dir, &gws)?;
+        self.persist_store(&dirs, &gws)?;
+        Ok(())
+    }
+
+    /// 把目录与网关配置全量写回 gateways.json（每次改动都全量重写，简单可靠）。
+    /// 调用方负责在持锁期间把两份最新数据切片传进来；本函数内部不再取任何
+    /// 锁，因此不存在加锁次序问题。
+    fn persist_store(&self, dirs: &[DirConfig], gateways: &[GatewayConfig]) -> Result<(), String> {
+        let store = GatewayStore {
+            dirs: dirs.to_vec(),
+            gateways: gateways.to_vec(),
+        };
+        let path = gateways_path(&self.inner.data_dir);
+        let s = serde_json::to_string_pretty(&store).map_err(|e| e.to_string())?;
+        std::fs::write(&path, s).map_err(|e| format!("保存配置失败 {}: {}", path.display(), e))
+    }
+
+    /// 新建或重命名网关目录并落盘（id 为空 = 新建，自动生成 id）。
+    /// 层级规则：目录最多两级——子目录的父目录必须存在且本身是根级目录；
+    /// 重命名只改名字，目录不允许在层级间移动（parent_id 保持旧值）。
+    pub async fn save_dir(&self, mut dir: DirConfig) -> Result<DirConfig, String> {
+        if dir.name.trim().is_empty() {
+            return Err("目录名称不能为空".into());
+        }
+        if dir.id.is_empty() {
+            dir.id = gen_id();
+        }
+        let mut dirs = self.inner.dirs.lock().await;
+        if !dir.parent_id.is_empty() {
+            // 子目录的父目录必须存在，且父目录本身必须是根级目录（两层层级上限）
+            let parent = dirs
+                .iter()
+                .find(|d| d.id == dir.parent_id)
+                .ok_or_else(|| "父目录不存在，可能已被删除".to_string())?;
+            if !parent.parent_id.is_empty() {
+                return Err("目录最多两级，子目录内不能再新建目录".into());
+            }
+        }
+        // 同一父级下目录名不能重复（重命名时与自身比较需排除）
+        if dirs
+            .iter()
+            .any(|d| d.id != dir.id && d.parent_id == dir.parent_id && d.name == dir.name)
+        {
+            return Err(format!("同级下已存在同名目录「{}」", dir.name));
+        }
+        match dirs.iter_mut().find(|d| d.id == dir.id) {
+            Some(slot) => {
+                dir.parent_id = slot.parent_id.clone();
+                *slot = dir.clone();
+            }
+            None => dirs.push(dir.clone()),
+        }
+        // 落盘需要网关表快照：此时持有目录锁再取网关锁，次序符合约定
+        let gws = self.inner.gateways.lock().await.clone();
+        self.persist_store(&dirs, &gws)?;
+        Ok(dir)
+    }
+
+    /// 删除网关目录（连同其子目录一起删除）并落盘。
+    /// delete_gateways = true 时目录（含子目录）下的全部网关一并删除，
+    /// 但只要有一个网关在运行就整体失败；false 时网关保留、移回根层级。
+    pub async fn delete_dir(&self, id: &str, delete_gateways: bool) -> Result<(), String> {
+        let mut dirs = self.inner.dirs.lock().await;
+        if !dirs.iter().any(|d| d.id == id) {
+            return Err("目录不存在，可能已被删除".into());
+        }
+        // 目录最多两级，收集一层子目录 id 即可覆盖整个待删范围
+        let sub_ids: Vec<String> = dirs
+            .iter()
+            .filter(|d| d.parent_id == id)
+            .map(|d| d.id.clone())
+            .collect();
+        let in_scope = |dir_id: &str| dir_id == id || sub_ids.iter().any(|s| s == dir_id);
+        let mut gws = self.inner.gateways.lock().await;
+        if delete_gateways {
+            // 运行表与网关表都已在手：先整体检查再动手，
+            // 避免删到一半才发现有运行中网关留下半删状态
+            let running = self.inner.running.lock().await;
+            for g in gws.iter().filter(|g| in_scope(&g.dir_id)) {
+                if running.contains_key(&g.id) {
+                    return Err(format!("网关「{}」正在运行，不允许删除", g.name));
+                }
+            }
+            gws.retain(|g| !in_scope(&g.dir_id));
+        } else {
+            // 不删网关：目录（含子目录）下的网关移回根层级（dir_id 清空）
+            for g in gws.iter_mut().filter(|g| in_scope(&g.dir_id)) {
+                g.dir_id = String::new();
+            }
+        }
+        dirs.retain(|d| !in_scope(&d.id));
+        self.persist_store(&dirs, &gws)?;
+        Ok(())
+    }
+
+    /// 把网关移动到目录（dir_id 传空串 = 移回根层级）并落盘。
+    /// 只修改归属字段、不触碰运行时数据，因此运行中的网关也允许移动。
+    pub async fn move_gateway(&self, id: &str, dir_id: &str) -> Result<(), String> {
+        // 先校验目标目录并克隆目录快照（锁即取即还），再动网关表
+        let dirs = {
+            let d = self.inner.dirs.lock().await;
+            if !dir_id.is_empty() && !d.iter().any(|x| x.id == dir_id) {
+                return Err("目标目录不存在，可能已被删除".into());
+            }
+            d.clone()
+        };
+        let mut gws = self.inner.gateways.lock().await;
+        let gw = gws
+            .iter_mut()
+            .find(|g| g.id == id)
+            .ok_or_else(|| "网关不存在，可能已被删除".to_string())?;
+        gw.dir_id = dir_id.to_string();
+        self.persist_store(&dirs, &gws)?;
         Ok(())
     }
 
@@ -421,6 +550,8 @@ impl Engine {
             }
         }
         // 2) 同步到持久化配置，保证重启后仍生效
+        // 目录列表仅落盘用：先克隆（锁即取即还），理由同 save_gateway
+        let dirs = self.inner.dirs.lock().await.clone();
         let mut gws = self.inner.gateways.lock().await;
         let name = {
             let gw = gws
@@ -435,7 +566,7 @@ impl Engine {
             p.strategy = strategy;
             p.name.clone()
         };
-        persist_gateways(&self.inner.data_dir, &gws)?;
+        self.persist_store(&dirs, &gws)?;
         self.emit(
             "info",
             gateway_id,
@@ -470,12 +601,14 @@ impl Engine {
     /// 状态随配置一起存进 gateways.json（与配置同文件、同一次落盘）。
     /// 状态写入失败只打一条日志（辅助记录，不阻塞网关启停主流程）。
     async fn set_gateway_state(&self, id: &str, running: bool) {
+        // 目录列表仅落盘用：先克隆（锁即取即还），理由同 save_gateway
+        let dirs = self.inner.dirs.lock().await.clone();
         let mut gws = self.inner.gateways.lock().await;
         let Some(gw) = gws.iter_mut().find(|g| g.id == id) else {
             return;
         };
         gw.was_running = running;
-        if let Err(e) = persist_gateways(&self.inner.data_dir, &gws) {
+        if let Err(e) = self.persist_store(&dirs, &gws) {
             self.emit("warn", id, e);
         }
     }
@@ -657,6 +790,7 @@ impl Engine {
     /// 全量快照（配置 + 运行状态 + 统计 + 连接）。
     /// 前端每秒轮询一次，拿到后整体替换界面状态，简单可靠。
     pub async fn snapshot(&self) -> Snapshot {
+        let dirs = self.inner.dirs.lock().await.clone();
         let gws = self.inner.gateways.lock().await.clone();
         let running = self.inner.running.lock().await;
         let gateways = gws
@@ -697,7 +831,7 @@ impl Engine {
                 }
             })
             .collect();
-        Snapshot { gateways }
+        Snapshot { dirs, gateways }
     }
 }
 
@@ -705,6 +839,8 @@ impl Engine {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    /// 全部网关目录（界面侧栏按目录分组展示用）
+    pub dirs: Vec<DirConfig>,
     pub gateways: Vec<GatewaySnapshot>,
 }
 
@@ -731,26 +867,49 @@ pub struct PlatformSnapshot {
     pub connections: Vec<ConnInfo>,
 }
 
+/// gateways.json 的文件结构（新版）：目录定义与网关配置放同一个文件。
+/// 目录与网关都是平铺数组，层级关系靠 parent_id / dir_id 两个 id 字段表达。
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GatewayStore {
+    /// 全部网关目录（含子目录）
+    pub dirs: Vec<DirConfig>,
+    /// 全部网关配置（dir_id 指向所属目录，空 = 根层级）
+    pub gateways: Vec<GatewayConfig>,
+}
+
+/// gateways.json 兼容加载的中间枚举：untagged 让 serde 按声明顺序逐个
+/// 尝试反序列化——先试新版对象结构，失败再试旧版纯网关数组。旧版本
+/// 生成的配置文件升级到新版程序时无需任何手工迁移。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoreFile {
+    New(GatewayStore),
+    /// 旧版格式：文件内容就是一个网关配置数组，没有目录概念
+    Old(Vec<GatewayConfig>),
+}
+
 /// 配置文件完整路径：<data_dir>/gateways.json
-/// （网关配置与上次运行状态 was_running 都在这个文件里）
+/// （网关配置、目录分组与上次运行状态 was_running 都在这个文件里）
 fn gateways_path(dir: &PathBuf) -> PathBuf {
     dir.join("gateways.json")
 }
 
-/// 启动时加载历史配置；文件不存在或格式错误时返回空列表（不报错）
-fn load_gateways(dir: &PathBuf) -> Vec<GatewayConfig> {
+/// 启动时加载历史配置；文件不存在或格式错误时返回空（不报错）。
+/// 新格式为对象 { dirs, gateways }，旧格式为纯网关数组（自动兼容，无目录）。
+fn load_store(dir: &PathBuf) -> GatewayStore {
     let path = gateways_path(dir);
     match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => Vec::new(),
+        Ok(s) => match serde_json::from_str::<StoreFile>(&s) {
+            Ok(StoreFile::New(store)) => store,
+            Ok(StoreFile::Old(gateways)) => GatewayStore {
+                dirs: Vec::new(),
+                gateways,
+            },
+            Err(_) => GatewayStore::default(),
+        },
+        Err(_) => GatewayStore::default(),
     }
-}
-
-/// 把全部网关配置写回 gateways.json（每次保存/删除都全量重写，简单可靠）
-fn persist_gateways(dir: &PathBuf, gws: &[GatewayConfig]) -> Result<(), String> {
-    let path = gateways_path(dir);
-    let s = serde_json::to_string_pretty(gws).map_err(|e| e.to_string())?;
-    std::fs::write(&path, s).map_err(|e| format!("保存配置失败 {}: {}", path.display(), e))
 }
 
 /// 简易唯一 ID：时间戳 + 随机数（单机场景足够，无需 UUID 那么重）

@@ -13,7 +13,7 @@
 //! 直接 drop，其所有监听任务随之取消、端口释放，等价于进程退出。
 
 use simx_core::config::{GatewayConfig, PlatformConfig, StrategyConfig};
-use simx_core::engine::Engine;
+use simx_core::engine::{Engine, GatewayStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -48,18 +48,29 @@ fn test_gateway(name: &str, port: u16) -> GatewayConfig {
     }
 }
 
-/// 读取 gateways.json 中指定网关的 was_running 字段（文件不存在视为 false）
+/// 读取 gateways.json 中指定网关的 was_running 字段（文件不存在视为 false）。
+/// 新版格式为对象 { dirs, gateways }，旧版为纯网关数组，两种都兼容解析。
 fn was_running(dir: &PathBuf, id: &str) -> bool {
     let path = dir.join("gateways.json");
-    match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str::<Vec<GatewayConfig>>(&s)
-            .unwrap_or_default()
-            .iter()
-            .find(|g| g.id == id)
-            .map(|g| g.was_running)
-            .unwrap_or(false),
-        Err(_) => false,
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    // 引擎侧同名机制（StoreFile 是私有的），测试里复刻一份兼容解析
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum File {
+        New(GatewayStore),
+        Old(Vec<GatewayConfig>),
     }
+    let gws = match serde_json::from_str::<File>(&s) {
+        Ok(File::New(store)) => store.gateways,
+        Ok(File::Old(gws)) => gws,
+        Err(_) => Vec::new(),
+    };
+    gws.iter()
+        .find(|g| g.id == id)
+        .map(|g| g.was_running)
+        .unwrap_or(false)
 }
 
 /// 快照中网关是否在运行

@@ -93,6 +93,30 @@ pub fn gateway_category_name(c: GatewayCategory) -> &'static str {
     }
 }
 
+/// 网关目录（界面侧栏里的文件夹）：把网关分组展示，与网关配置同存
+/// gateways.json。目录最多嵌套两层——根级目录（parent_id 为空）内可以
+/// 再建子目录（parent_id 指向某个根级目录 id），子目录内不能再建目录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DirConfig {
+    /// 唯一标识（后端自动生成，前端新建时传空串）
+    pub id: String,
+    /// 目录名称
+    pub name: String,
+    /// 父目录 id：空 = 根级目录；非空 = 挂在某个根级目录下的子目录
+    pub parent_id: String,
+}
+
+impl Default for DirConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: "新建目录".into(),
+            parent_id: String::new(),
+        }
+    }
+}
+
 /// 交易网关配置。一个网关 = 一组平台的集合，启动/停止以网关为单位。
 /// 上次运行状态（was_running）也存这里，与配置同文件（gateways.json），
 /// 数据目录不再需要单独的 gateway_state.json。
@@ -108,6 +132,10 @@ pub struct GatewayConfig {
     pub platforms: Vec<PlatformConfig>,
     /// 上次退出时是否在运行（--auto-start 恢复依据：启动成功置 true，停止置 false）
     pub was_running: bool,
+    /// 所属目录 id（空 = 根层级，不归入任何目录）。目录定义存在
+    /// gateways.json 的 dirs 数组里，网关只保存归属 id；
+    /// 旧配置文件没有该字段时按默认空串处理（向后兼容）
+    pub dir_id: String,
 }
 
 impl Default for GatewayConfig {
@@ -118,6 +146,7 @@ impl Default for GatewayConfig {
             category: GatewayCategory::Sz,
             platforms: Vec::new(),
             was_running: false,
+            dir_id: String::new(),
         }
     }
 }
