@@ -10,6 +10,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # multipart feature：管理页面上传安装包（axum 默认 body 上限 2MB，需配合 DefaultBodyLimit 调大）
 axum = { version = "0.7", features = ["multipart"] }
+# sha256：绿色版目录模式下逐文件计算校验值，客户端下载后核对完整性
+sha2 = "0.10"
 
 [dev-dependencies]
 matchit = "0.7"

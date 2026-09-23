@@ -16,6 +16,12 @@ import type { Backend } from "../backend";
 import type { GatewayCategory, OrderEntry } from "../types";
 import { isInflight, orderStatusOf, defaultRejectReason } from "../types";
 import { rejectTextOf } from "../errors";
+import { useResizableModal } from "../resizableModal";
+
+/** 窗口默认/最小尺寸：默认宽度保证四条回报块与订单全部列都能并排放下；
+ *  最小宽度保证四条回报切成 2×2 后每行两块仍有足够空间、订单列不被裁 */
+const win = useResizableModal({ defaultW: 1220, defaultH: 660, minW: 1000, minH: 480 });
+const { maximized, style, startResize, toggleMaximize } = win;
 
 const props = defineProps<{
     /** 后端通道（轮询拉订单用） */
@@ -161,10 +167,19 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
 <template>
     <!-- @mousedown.self：只有点在遮罩（弹窗外的暗区）才关闭 -->
     <div class="modal-mask" @mousedown.self="emit('close')">
-        <div class="modal ov-modal">
+        <div class="modal ov-modal" :class="{ maximized }" :style="style">
             <div class="modal-head">
                 <span>订单 · {{ platformName }}</span>
-                <button class="modal-close" @click="emit('close')">✕</button>
+                <span class="head-btns">
+                    <button
+                        class="modal-close btn-max"
+                        :title="maximized ? '还原窗口大小' : '最大化窗口'"
+                        @click="toggleMaximize"
+                    >
+                        {{ maximized ? "❐" : "⛶" }}
+                    </button>
+                    <button class="modal-close" @click="emit('close')">✕</button>
+                </span>
             </div>
             <div class="modal-body">
                 <!-- 平台信息 + 在途过滤勾选 -->
@@ -177,9 +192,24 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
                     </label>
                 </div>
 
-                <!-- 订单表格 -->
+                <!-- 订单表格：列宽用 <colgroup> 按百分比固定，窗口变宽时所有列
+                     等比例伸缩、整表永远占满宽度，右侧不会留大片空白 -->
                 <div class="ov-table-wrap">
                     <table class="ov-table">
+                        <colgroup>
+                            <col style="width: 8.5%" />
+                            <col style="width: 6.2%" />
+                            <col style="width: 9.8%" />
+                            <col style="width: 10.3%" />
+                            <col style="width: 6.1%" />
+                            <col style="width: 4.4%" />
+                            <col style="width: 9.4%" />
+                            <col style="width: 8.8%" />
+                            <col style="width: 8.8%" />
+                            <col style="width: 8.8%" />
+                            <col style="width: 6.5%" />
+                            <col style="width: 12.4%" />
+                        </colgroup>
                         <thead>
                             <tr>
                                 <th>时间</th>
@@ -212,14 +242,14 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
                                         <!-- 订单来自哪条连接（历史连接发来的订单也保留展示） -->
                                         <span class="ov-conn num">#{{ o.connId }}</span>
                                     </td>
-                                    <td class="num">{{ o.clOrdId }}</td>
-                                    <td class="num oid">{{ o.orderId || "—" }}</td>
-                                    <td class="num">{{ o.securityId }}</td>
+                                    <td class="num" :title="o.clOrdId">{{ o.clOrdId }}</td>
+                                    <td class="num oid" :title="o.orderId || ''">{{ o.orderId || "—" }}</td>
+                                    <td class="num" :title="o.securityId">{{ o.securityId }}</td>
                                     <td :class="o.side === '买' ? 'side-buy' : 'side-sell'">{{ o.side }}</td>
-                                    <td class="num">{{ fmtPrice(o.price) }}</td>
-                                    <td class="num">{{ fmtQty(o.qty) }}</td>
-                                    <td class="num">{{ fmtQty(o.cumQty) }}</td>
-                                    <td class="num">{{ fmtQty(o.leavesQty) }}</td>
+                                    <td class="num" :title="fmtPrice(o.price)">{{ fmtPrice(o.price) }}</td>
+                                    <td class="num" :title="fmtQty(o.qty)">{{ fmtQty(o.qty) }}</td>
+                                    <td class="num" :title="fmtQty(o.cumQty)">{{ fmtQty(o.cumQty) }}</td>
+                                    <td class="num" :title="fmtQty(o.leavesQty)">{{ fmtQty(o.leavesQty) }}</td>
                                     <td>
                                         <span class="badge" :class="orderStatusOf(o.status).cls">
                                             {{ orderStatusOf(o.status).label }}
@@ -298,14 +328,34 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
                     </table>
                 </div>
             </div>
+            <!-- 右下角拖拽把手：调整弹窗大小（最小/最大尺寸由 useResizableModal 钳制） -->
+            <div class="resize-handle" title="拖动调整大小" @pointerdown="startResize"></div>
         </div>
     </div>
 </template>
 
 <style scoped>
+/* 弹窗尺寸由 useResizableModal 的 style 内联控制（默认 1220×660，可拖拽/最大化）；
+   这里只负责把 .modal 变成拖拽把手的定位基准、并去掉全局 .modal 的尺寸限制 */
 .ov-modal {
-    width: 900px;
-    max-width: 94vw;
+    position: relative;
+    max-width: none;
+    max-height: none;
+}
+
+/* 弹窗主体改为纵向伸缩：表格区 flex:1 填满剩余高度，内部自己滚动 */
+.ov-modal .modal-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
+/* 最大化/还原按钮：与关闭按钮并列，图标略小一号 */
+.btn-max {
+    font-size: 13px;
+    padding: 2px 4px;
+    line-height: 1;
 }
 
 .ov-meta {
@@ -329,14 +379,19 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
 }
 
 .ov-table-wrap {
-    max-height: 60vh;
+    flex: 1 1 auto;
+    min-height: 120px;
     overflow-y: auto;
+    overflow-x: hidden; /* 列宽等比例伸缩，不允许横向滚动 */
     border: 1px solid var(--border-soft);
     border-radius: var(--radius-sm);
 }
 
 .ov-table {
     width: 100%;
+    /* 固定布局 + <colgroup> 百分比列宽：所有列随窗口宽度同比例缩放，
+       整表恒占满宽度（右侧不留空白），内容放不下时单元格省略号截断 */
+    table-layout: fixed;
     border-collapse: collapse;
     font-size: 12px;
 }
@@ -358,6 +413,8 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
     padding: 6px 10px;
     border-bottom: 1px solid var(--border-soft);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .ov-table tbody tr:last-child td {
@@ -370,7 +427,7 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
 
 /* 数字列右对齐（价格/数量），订单号等编号左对齐即可 */
 .ov-table .num {
-    font-family: Consolas, "Courier New", monospace;
+    font-family: var(--mono);
 }
 
 .ov-table td.num {
@@ -411,9 +468,9 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
     min-width: 26px;
     padding: 0 6px;
     border-radius: 8px;
-    background: rgba(99, 102, 241, 0.15);
-    color: var(--accent, #818cf8);
-    font-size: 10.5px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
     font-weight: 600;
     text-align: center;
 }
@@ -429,7 +486,7 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
 
 .reply-btn {
     padding: 1px 10px;
-    font-size: 11px;
+    font-size: 12px;
 }
 
 .reply-none {
@@ -439,6 +496,12 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
 .ov-reply-row td {
     background: var(--bg-soft);
     padding: 12px 14px;
+}
+
+/* 手动回复面板：作为回报块的容器查询基准（宽度 = 弹窗内容宽度），
+   面板内 .ov-reply-body 的 @container 查询依据它的宽度切换 4 列/2 列 */
+.ov-reply {
+    container-type: inline-size;
 }
 
 .ov-reply-title {
@@ -452,19 +515,27 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
 
 .ov-reply-hint {
     color: var(--text-faint);
-    font-size: 10.5px;
+    font-size: 11px;
 }
 
+/* 四条回报块：默认一排放四块（各占 1/4 宽度）；
+   以 .ov-reply 为容器查询基准——弹窗收窄到容器 ≤960px 时切两行两列
+   （每块至少能容下输入框+按钮），保证窗口最小时也能两两并排 */
 .ov-reply-body {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
-    flex-wrap: wrap;
 }
 
-/* 三种回报各占一块，输入框与按钮纵向排列 */
+@container (max-width: 960px) {
+    .ov-reply-body {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+/* 四块各占一格：去掉旧的 flex 伸缩写法，宽度交给 grid 列 */
 .ov-reply-block {
-    flex: 1;
-    min-width: 200px;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -475,7 +546,7 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
 }
 
 .ov-reply-label {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
     color: var(--text);
 }
@@ -491,18 +562,18 @@ async function sendReply(kind: "ack" | "trade" | "reject" | "cancel") {
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-dim);
 }
 
 .ov-reply-fields input {
     width: 96px;
     padding: 3px 6px;
-    font-size: 11.5px;
+    font-size: 12px;
 }
 
 .ov-reply-note {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-faint);
     line-height: 1.5;
 }

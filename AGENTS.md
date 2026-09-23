@@ -45,7 +45,7 @@ SimuXchange/
 │  │   ├─ src/api.rs      # 统一控制接口（供 Tauri 与 server 复用）
 │  │   └─ tests/e2e_sz.rs / e2e_shjj.rs / e2e_shbond.rs  # 端到端测试（真 TCP，深交所 18101~ / 上交所竞价 18201~ / 上交所新债券 18301~）
 │  ├─ simx-server/      # 独立后端：axum WebSocket 控制接口（远程部署）
-│  └─ simx-update-server/  # 升级服务器：axum HTTP，网页上传安装包+自动生成 version.json（crates/ 下）
+│  └─ simx-update-server/  # 升级服务器：自动扫描发布目录 + 生成清单 + 文件下载
 ├─ src-tauri/           # Tauri 2 桌面壳（包名 simuxchange，内嵌 simx-core）
 ├─ src/                 # 前端 Vue 3 + TypeScript
 │  ├─ App.vue           # 主页面（全部界面状态与交互）
@@ -110,7 +110,10 @@ SimuXchange/
   返回回报计划（`"confirm"`/`"trade"`/`"reject"` 快捷方式，或 `{kind, qty, price, via,
   reason, text, delayMs}` 表数组），由三套 strategy.rs 的 `plan_reports_lua` 复用既有
   报文构造器落地。只接管新委托（撤单仍走 CancelMode）；运行时出错 → 本笔不回报 + 日志；
-  无成交回报业务的 trade 项忽略并告警。保存时 `update_strategy` / `save_gateway`
+  无成交回报业务的 trade 项忽略并告警。**延迟规则**：回报延迟只由脚本各项
+  `delayMs`（毫秒，未写 = 0 同步）控制，界面"回报延迟"的确认/成交配置**不参与**
+  Lua 模式（前端 Lua 模式隐藏这两个输入框、保存时自动归零）；撤单延迟不受影响
+  （撤单仍走 CancelMode 与撤单延迟配置）。保存时 `update_strategy` / `save_gateway`
   强制语法校验（`lua_engine::check_syntax`），api 命令 `validate_lua_script` 供前端
   即时校验；编译缓存挂 `SessionCtx.lua_cache`（mlua 须开 `send` feature 才能放进
   SessionCtx）。编写文档：docs/Lua脚本回报编写说明.md。
@@ -136,23 +139,30 @@ SimuXchange/
   `data_dir/gateways.json` 的 `was_running` 字段：start_gateway 置 true、
   stop_gateway 置 false、删除随配置消失；旧版无该字段视为 false）。
   不带参数则不自动启动任何网关。
-- **自动检查升级**：桌面端在「后端连接设置」里配置 `updateUrl`（AppConfig.update_url，
-  simx.config.json 的 camelCase 字段），启动 3 秒后 `checkForUpdate`（src/updater.ts）
-  拉取 `<updateUrl>/version.json`（`{version, notes, winInstaller, linuxServer}`，
-  数字点分比较 `compareVersions`），有新版弹窗，点「下载并安装」调 Tauri command
-  `download_update`（src-tauri/main.rs，ureq 下载到 Downloads + 启动安装程序）；
-  检查失败静默忽略。simx-server 侧 `--update-url` 参数启动时 `check_update`
-  （crates/simx-server/src/main.rs，ureq 无 TLS、仅 http，`version_cmp` 同规则）
-  只打印提示不自动替换。升级服务器 `simx-update-server`（crates/simx-update-server/src/main.rs）
-  提供 `/version.json`（实时扫描目录生成，无安装包时 404）、`/files/:name` 下载、
-  `POST /api/upload`（multipart：file 安装包 + linux 可选 + notes 说明）、`DELETE /api/file/:name`；
-  版本号从安装包文件名解析（`SimuXchange_x.y.z_x64-setup.exe`，至少三段数字点分，
-  取版本号最大者进清单），更新说明按版本存 `notes.json`；路由参数用 axum 0.7 的
-  **`:name` 语法**（`{name}` 是 axum 0.8 的写法，勿混用）。安装包内嵌 Linux 后端：
-  tauri.conf.json `bundle.resources`
-  用 **Map 形式** `{"../target/x86_64-unknown-linux-musl/release/simx-server": "Linux/simx-server"}`
-  （Tauri 2 不支持 v1 的 source/target 对象数组），安装后位于安装目录 `Linux/`；
-  beforeBuildCommand 执行 scripts/build-all.ps1（确保产物存在 + vite build）。
+- **自动检查升级**（目录发布，无安装包模式）：桌面端在「后端连接设置」里配置
+  `updateUrl`（AppConfig.update_url，simx.config.json 的 camelCase 字段），启动
+  3 秒后检查 `<updateUrl>/version.json`（数字点分比较 `compareVersions`）。桌面端
+  （Tauri）的检查/下载/应用更新逻辑在 **src-tauri/src/updater.rs**（ureq 拉清单
+  避开 WebView CORS；`src/updater.ts` 只服务浏览器调试）：① `check_update_server`
+  拉清单比版本；② `download_update_files` 把清单 `files` 全部下载到
+  `%LOCALAPPDATA%\SimuXchange\updates\<版本>`，逐文件校验 size/sha256，
+  **主 exe（simuxchange.exe）恒最后下载**，完成写 pending.json；③ 点顶栏红色
+  「↻ 重启以更新」（`apply_update` command，restart=true）或关闭窗口
+  （`on_window_event` 的 CloseRequested，restart=false）时，以 `--apply-update`
+  参数启动下载目录里的**新版 exe 充当更新器**：等主进程（父 PID，Windows
+  WaitForSingleObject）退出 → 把下载目录文件覆盖到 exe 所在目录（同样主 exe
+  最后）→ 按需重启 → 删 pending.json。只覆盖清单内文件，用户数据（gateways.json
+  等）不在清单就不被碰。有 pending.json 时启动界面显示红色按钮
+  （`get_pending_update`）。检查失败静默忽略。
+
+  升级服务器 `simx-update-server`（crates/simx-update-server/src/main.rs）：发布
+  目录里放**发布文件 + 版本号文件**（`release.txt` 纯文本一行版本号，或
+  `release.json` 的 `version` 字段）；`GET /version.json` 实时扫描目录（含子目录）
+  生成 `files` 清单（name/size/sha256；版本号文件、version.json/notes.json 与
+  隐藏文件不进清单），`GET /files/*rest` 提供下载（axum 0.7 通配路由，支持子目录，
+  `..` 拒绝，系统文件拒绝下载），`GET /api/files` + `DELETE /api/file/:name` 供
+  管理页清理。无版本号文件或发布文件为空时返回 404（客户端静默）。发布新版本
+  流程与静态目录方式见 README「自动检查升级」/《产品使用手册》5.5 节。
 - **延迟规则**：min=max=0 同步回报；否则异步，区间内随机抽样。
 - **报文捕获**：见第 2 节“报文捕获”段（三套会话共用 `SessionCtx::start_capture(conn_id, peer)`；
   连接断开时记录器保留仅 `mark_dead()` 标记离线，**不删除**（平台级报文弹窗按连接分组回看）；

@@ -1,51 +1,57 @@
 // simx-update-server：SimuXchange 升级服务器（单文件程序，Windows/Linux 均可运行）
 //
 // 设计动机（为什么需要它）：
-//   桌面端与后端只要求一个 HTTP 静态目录（version.json + 安装包）就能完成升级检查。
-//   但"手写 version.json、手动拷贝安装包"容易出错，本程序把这些动作全部自动化：
-//     1. 网页上传安装包（含 Linux 后端）与更新说明，无需登录服务器；
-//     2. 自动扫描文件目录生成 version.json（版本号从安装包文件名解析，
-//        如 SimuXchange_1.1.0_x64-setup.exe → 1.1.0），永远与磁盘实际文件一致；
-//     3. 同时提供静态文件下载，一个程序完成"目录 + 清单"两件事，
-//        客户端直接填 http://<IP>:8080 即可。
+//   桌面端只需要一个 HTTP 可见的目录（version.json + 发布文件）就能完成升级
+//   检查与下载。本程序把这个目录自动化：
+//     1. 会自动扫描目录生成 version.json（文件清单 + 每个文件的 size/sha256）；
+//     2. 目录里的每个文件（含子目录）都提供下载；
+//     3. 一个程序完成"目录 + 清单"两件事，客户端直接填 http://<IP>:8080 即可。
 //
-// 数据流（面向不熟 Rust 的维护者）：
-//   目录内文件（安装包/simx-server/notes.json/version.json）是唯一事实来源，
-//   所有 HTTP 接口只是"读目录 / 写目录"，无任何数据库：
-//     - GET  /version.json  → 实时扫描目录生成（无文件时返回 404，客户端静默跳过）
-//     - POST /api/upload    → 保存文件 + 记录更新说明，随后重写磁盘 version.json
-//     - DELETE /api/file/x  → 删除文件，随后重写磁盘 version.json
-//   notes.json 是"版本号 → 更新说明数组"的映射，由上传接口维护，
-//   手工放入的安装包没有说明也能自动出现在清单里（notes 为空数组）。
+// 发布流程（服务器上怎样放文件）：
+//   1. 把整个发布目录（simuxchange.exe 与其它文件/子目录）拷进 --dir 目录；
+//   2. 放一个仅含版本号的文件：release.json（{"version": "1.3.0"}）
+//      或用纯文本 release.txt（内容就是一行 "1.3.0"）—— 二选一即可，
+//      服务器通过它知道当前发布版本（客户端拿它和自己比版本号）。
+//   不需要手写任何文件清单：服务器每次 GET /version.json 都会实时编出
+//   全量文件清单（含子目录、大小、sha256），客户端据此把整个目录下载下来。
+//
+// 设计要点：
+//   - 目录内文件是唯一事实来源，无数据库；服务器文档性质文件
+//     （version.json / release.json / release.txt / notes.json）自动排除在
+//     下载清单之外，不会混进用户的程序目录。
+//   - 客户端下载时"主 exe 最后"由客户端负责（清单顺序无要求）。
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{Path, State},
     http::{header, StatusCode},
-    routing::{delete, get, post},
+    routing::{delete, get},
     Json, Router,
 };
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
 
-/// 全局共享状态：文件目录（安装包、simx-server、notes.json、version.json 都放这里）
+/// 全局共享状态：发布文件目录
 #[derive(Clone)]
 struct AppState {
     dir: Arc<PathBuf>,
 }
 
-/// 安装包文件名前缀/后缀，用于从文件名识别安装包并解析版本号
-const PKG_PREFIX: &str = "SimuXchange_";
-const PKG_SUFFIX: &str = "_x64-setup.exe";
-/// Linux 后端在目录中的固定文件名
-const LINUX_BIN: &str = "simx-server";
+/// 服务器上的版本文件（二选一，内容就是版本号）：
+///   release.json -> {"version": "1.3.0"}
+///   release.txt  -> 行为字符串 "1.3.0"
+const RELEASE_JSON: &str = "release.json";
+const RELEASE_TXT: &str = "release.txt";
+/// 不进发布清单的文件（服务器自己管的文件，客户端不得下载）
+const SKIP_FILES: [&str; 4] = [RELEASE_JSON, RELEASE_TXT, "notes.json", "version.json"];
 
 #[tokio::main]
 async fn main() {
-    // 命令行参数解析（--listen 监听地址、--dir 文件目录），不引入 clap 保持依赖精简
+    // 命令行参数解析（--listen 监听地址、--dir 发布目录），不引入 clap 保持依赖精简
     let mut listen = "0.0.0.0:8080".to_string();
     let mut dir = PathBuf::from("update");
     let mut args = std::env::args().skip(1);
@@ -62,8 +68,9 @@ async fn main() {
                 }
             }
             "--help" | "-h" => {
-                println!("用法: simx-update-server [--listen IP:端口] [--dir 文件目录]");
+                println!("用法: simx-update-server [--listen IP:端口] [--dir 发布目录]");
                 println!("默认: --listen 0.0.0.0:8080  --dir ./update");
+                println!("发布：把程序目录拷进 --dir，再放 release.txt（一行版本号）或 release.json（{{\"version\":\"1.3.0\"}}）");
                 return;
             }
             _ => {}
@@ -71,25 +78,22 @@ async fn main() {
     }
 
     // 目录不存在则自动创建（与 simx-server 自动建数据目录的行为一致）
-    std::fs::create_dir_all(&dir).expect("创建文件目录失败");
+    std::fs::create_dir_all(&dir).expect("创建发布目录失败");
     let state = AppState {
         dir: Arc::new(dir),
     };
 
     let app = Router::new()
-        .route("/", get(index_html))                                    // 管理页面
-        .route("/version.json", get(version_json))                      // 升级清单（客户端检查用）
-        .route("/files/:name", get(download_file))                      // 安装包下载
-        .route("/api/files", get(list_files))                           // 管理页文件列表
-        .route("/api/upload", post(upload))                             // 网页上传发布
-        .route("/api/file/:name", delete(delete_file))                  // 删除文件
+        .route("/", get(index))                  // 管理页面
+        .route("/version.json", get(version_json)) // 升级清单（客户端检查/下载用）
+        .route("/files/*rest", get(download_file)) // 发布文件下载（含子目录）
+        .route("/api/files", get(list_files))      // 管理页文件列表
+        .route("/api/file/:name", delete(delete_file)) // 删除文件（管理页用）
         // 未匹配的路由记录日志（404 时便于排查客户端配置错误）
         .fallback(|uri: axum::http::Uri| async move {
             eprintln!("[simx-update-server] 未匹配路由: {}", uri.path());
             (StatusCode::NOT_FOUND, "not found")
         })
-        // axum 默认请求体上限 2MB，安装包远大于此，调大到 1GB（仅本服务，无对外暴露风险）
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&listen)
@@ -101,122 +105,158 @@ async fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// 升级清单（version.json）生成
+// 核心逻辑：版本读取 + 清单生成
 // ---------------------------------------------------------------------------
 
-/// 版本号比较：返回 a 与 b 的大小关系（1 大 / -1 小 / 0 相等）。
-/// 按数字点分段逐段比较（1.10.0 > 1.9.0），与客户端 updater.ts 的版本比较一致。
-fn version_cmp(a: &str, b: &str) -> i32 {
-    let (mut x, mut y) = (a.split('.'), b.split('.'));
-    loop {
-        match (x.next(), y.next()) {
-            (None, None) => return 0,
-            (None, _) => return -1,
-            (_, None) => return 1,
-            (Some(pa), Some(pb)) => {
-                let (na, nb) = (pa.parse::<u64>().unwrap_or(0), pb.parse::<u64>().unwrap_or(0));
-                if na != nb {
-                    return if na > nb { 1 } else { -1 };
+/// 从发布目录读版本号：release.txt（纯文本）或 release.json 的 version 字段。
+/// 两个文件都没有 → None（此时 version.json 返回 404，客户端静默跳过）。
+fn read_release_version(dir: &FsPath) -> Option<String> {
+    // 纯文本优先（最简：内容就是一行版本号）
+    if let Ok(s) = std::fs::read_to_string(dir.join(RELEASE_TXT)) {
+        let v = s.trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    // JSON 兼容（{"version": "1.3.0"}）
+    if let Ok(s) = std::fs::read_to_string(dir.join(RELEASE_JSON)) {
+        if let Ok(v) = serde_json::from_str::<Map<String, Value>>(&s) {
+            if let Some(ver) = v.get("version").and_then(|x| x.as_str()) {
+                let ver = ver.trim();
+                if !ver.is_empty() {
+                    return Some(ver.to_string());
                 }
             }
         }
     }
+    None
 }
 
-/// 从安装包文件名解析版本号：SimuXchange_1.1.0_x64-setup.exe → "1.1.0"。
-/// 解析失败（不是安装包、格式不对）返回 None，该文件不会被写进清单。
-fn parse_version_from_filename(name: &str) -> Option<String> {
-    let rest = name.strip_prefix(PKG_PREFIX)?.strip_suffix(PKG_SUFFIX)?;
-    let ver = rest.split('_').next()?;
-    // 校验是"数字.数字.数字"格式（至少三段，与项目版本号规范一致），防止乱起名的文件进入清单
-    let parts: Vec<&str> = ver.split('.').collect();
-    let valid = parts.len() >= 3
-        && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
-    if valid {
-        Some(ver.to_string())
-    } else {
-        None
+/// 递归收集目录下所有"发布文件"（相对路径 + 大小 + sha256）。
+/// rel 是相对目录根的路径（空表示根），Windows 分隔符统一转成 '/'，
+/// 客户端下载时用相同相对路径落盘，保证目录结构原样还原。
+fn collect_release_files(dir: &FsPath, rel: &FsPath, out: &mut Vec<Value>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        // 服务器自己的管理工作区/描述文件不进发布清单（用户说了"json 等文件不用下载"）
+        if rel.as_os_str().is_empty() && SKIP_FILES.contains(&name_str.as_str()) {
+            continue;
+        }
+        // 隐藏文件（.git 等）也跳过
+        if name_str.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_release_files(&path, &rel.join(&name), out);
+            continue;
+        }
+        // 相对路径统一用 "/" 分隔（HTTP 路径与客户端落盘都按这个习惯）
+        let rel_name = rel.join(&name).to_string_lossy().replace('\\', "/");
+        let meta = entry.metadata().ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let sha256 = file_sha256(&path).unwrap_or_default();
+        out.push(json!({
+            "name": rel_name,
+            "size": size,
+            "sha256": sha256,
+        }));
     }
 }
 
-/// 文件名安全清洗：只保留最后一段（去掉路径部分），防止路径穿越。
-/// 上传方给的任何名字都必须经过这里才能拼进目录路径。
-fn safe_name(name: &str) -> Option<String> {
-    let base = FsPath::new(name).file_name()?.to_str()?.to_string();
-    if base.is_empty() {
-        None
-    } else {
-        Some(base)
-    }
+/// 计算文件 sha256 十六进制小写串；读失败（少见）返回空串，
+/// 客户端遇到空哈希会跳过哈希校验（大小校验仍生效）。
+fn file_sha256(path: &FsPath) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    let digest = Sha256::digest(&data);
+    Some(hex(&digest))
 }
 
-/// 扫描文件目录生成升级清单（version.json 的内容）。
-/// 规则：
-///   - 遍历目录下所有安装包，解析版本号，取**版本号最大**的作为当前版本；
-///   - 目录里的 simx-server 文件作为 Linux 后端文件名（可缺省）；
-///   - 更新说明从 notes.json 按版本号取（上传时填写的）。
-/// 返回 None 表示目录里没有任何安装包（此时 version.json 返回 404，客户端静默）。
+/// sha256 摘要 → 十六进制小写字符串
+fn hex(digest: &[u8]) -> String {
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// 生成升级清单（version.json 的内容）：
+///   { "version": "1.3.0", "files": [ {name,size,sha256}, ... ] }
+/// 没有 release 版本文件或目录里没有发布文件 → None（version.json 返回 404）
 fn build_manifest(dir: &FsPath) -> Option<Value> {
-    // 1. 扫描安装包：文件名 → 版本号，挑出版本号最大的
-    let mut best: Option<(String, String)> = None; // (version, 文件名)
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(ver) = parse_version_from_filename(&name) {
-                let newer = match &best {
-                    Some((cur, _)) => version_cmp(&ver, cur) > 0,
-                    None => true,
-                };
-                if newer {
-                    best = Some((ver, name));
-                }
-            }
-        }
+    let version = read_release_version(dir)?;
+    let mut files: Vec<Value> = Vec::new();
+    collect_release_files(dir, &PathBuf::new(), &mut files);
+    if files.is_empty() {
+        return None;
     }
-    let (version, win_installer) = best?;
-
-    // 2. Linux 后端：目录里是否存在 simx-server 文件（子目录不算）
-    let linux_server = dir.join(LINUX_BIN);
-    let linux_name = if linux_server.is_file() { Some(LINUX_BIN.to_string()) } else { None };
-
-    // 3. 更新说明：notes.json → { "1.1.0": ["...", "..."] }
-    let notes_map: Map<String, Value> = read_json(&dir.join("notes.json"));
-    let notes = notes_map
-        .get(&version)
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
     Some(json!({
         "version": version,
-        "notes": notes,
-        "winInstaller": win_installer,
-        "linuxServer": linux_name,
+        "files": files,
     }))
 }
 
-/// 读 JSON 文件，失败（不存在/格式坏）时返回空 Map，不 panic
-fn read_json(path: &FsPath) -> Map<String, Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+// ---------------------------------------------------------------------------
+// HTTP 接口
+// ---------------------------------------------------------------------------
+
+/// 管理页面（内嵌 HTML，纯静态 JS 调接口，不依赖任何前端构建）
+async fn index() -> &'static str {
+    INDEX_HTML
 }
 
-/// 重写磁盘上的 version.json（上传/删除后调用），
-/// 保证目录里始终有一份与文件一致的最新清单，方便检查/外部静态服务复用
-fn rewrite_version_json(dir: &FsPath) {
-    if let Some(manifest) = build_manifest(dir) {
-        let _ = std::fs::write(dir.join("version.json"), serde_json::to_string_pretty(&manifest).unwrap_or_default());
-    } else {
-        // 目录空了就把旧清单清掉，避免残留旧版本号误导
-        let _ = std::fs::remove_file(dir.join("version.json"));
+/// GET /version.json：扫描发布目录生成升级清单（客户端检查/下载入口）
+async fn version_json(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
+    build_manifest(&state.dir).map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+/// GET /files/{path...}：下载发布文件（支持多级子目录）
+/// path 逐段清洗（拒绝 .. 等穿越），并再以 canonicalize 校验落在发布目录内。
+async fn download_file(
+    State(state): State<AppState>,
+    Path(rest): Path<String>,
+) -> Result<(StatusCode, [(header::HeaderName, String); 2], Bytes), StatusCode> {
+    let rel = safe_rel_path(&rest).ok_or(StatusCode::BAD_REQUEST)?;
+    // 服务器自己的版本/清单文件一律不提供下载（用户明确"json 等文件不用下载"）；
+    // 多级路径（子目录里同名文件）不受影响
+    if rel.components().count() == 1 {
+        if let Some(name) = rel.file_name().and_then(|n| n.to_str()) {
+            if SKIP_FILES.contains(&name) {
+                return Err(StatusCode::NOT_FOUND);
+            }
+        }
     }
+    let path = state.dir.join(&rel);
+    // 防路径穿过的最后一层兜底：解析后的路径必须仍在发布目录内
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let base = state.dir.canonicalize().unwrap_or_else(|_| (*state.dir).clone());
+    if !canonical.starts_with(&base) || !canonical.is_file() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let file_name = rel
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download");
+    let data = tokio::fs::read(&path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", file_name),
+            ),
+        ],
+        data.into(),
+    ))
 }
 
-/// 目录内所有文件列表（名字/大小/修改时间），供管理页面展示
-fn list_dir_files(dir: &FsPath) -> Vec<Value> {
-    let mut files: Vec<Value> = std::fs::read_dir(dir)
+/// GET /api/files：目录内文件列表（管理页面展示用）
+async fn list_files(State(state): State<AppState>) -> Json<Vec<Value>> {
+    let mut files: Vec<Value> = std::fs::read_dir(&*state.dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -240,137 +280,21 @@ fn list_dir_files(dir: &FsPath) -> Vec<Value> {
         })
         .collect();
     files.sort_by(|a, b| b["modified"].as_u64().cmp(&a["modified"].as_u64()));
-    files
+    Json(files)
 }
 
-// ---------------------------------------------------------------------------
-// HTTP 接口
-// ---------------------------------------------------------------------------
-
-/// 管理页面（内嵌 HTML，纯静态 JS 调接口，不依赖任何前端构建）
-async fn index_html() -> &'static str {
-    INDEX_HTML
-}
-
-/// GET /version.json：实时扫描目录生成升级清单（客户端升级检查入口）
-async fn version_json(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
-    build_manifest(&state.dir).map(Json).ok_or(StatusCode::NOT_FOUND)
-}
-
-/// GET /files/{name}：下载安装包等文件（文件不存在返回 404）
-async fn download_file(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<(StatusCode, [(header::HeaderName, String); 2], Bytes), StatusCode> {
-    let file_name = safe_name(&name).ok_or(StatusCode::BAD_REQUEST)?;
-    let path = state.dir.join(&file_name);
-    let data = tokio::fs::read(&path).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", file_name),
-            ),
-        ],
-        data.into(),
-    ))
-}
-
-/// GET /api/files：文件列表（管理页面展示用）
-async fn list_files(State(state): State<AppState>) -> Json<Vec<Value>> {
-    Json(list_dir_files(&state.dir))
-}
-
-/// POST /api/upload：网页上传发布。
-/// multipart 字段：
-///   - file  安装包（必需，可同时是 .exe 或任何格式，版本号从文件名解析）
-///   - linux Linux 后端二进制（可选，固定保存为 simx-server）
-///   - notes 更新说明（可选，多行文本，每行一条）
-/// 完成后重写磁盘 version.json。
-async fn upload(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    // 先收集所有字段再落盘：任何一个字段读失败都不产生半成品文件
-    let mut win_file: Option<(String, Bytes)> = None;
-    let mut linux_file: Option<Bytes> = None;
-    let mut notes: Vec<String> = Vec::new();
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("读取上传失败: {e}")))?
-    {
-        match field.name() {
-            Some("file") => {
-                let name = field.file_name().unwrap_or("").to_string();
-                let data = field
-                    .bytes()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("读取安装包失败: {e}")))?;
-                win_file = Some((name, data));
-            }
-            Some("linux") => {
-                let data = field
-                    .bytes()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("读取 Linux 后端失败: {e}")))?;
-                linux_file = Some(data);
-            }
-            Some("notes") => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("读取更新说明失败: {e}")))?;
-                notes = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-            }
-            _ => {} // 其他字段忽略
-        }
-    }
-
-    let win = win_file.ok_or((StatusCode::BAD_REQUEST, "缺少安装包文件（字段名 file）".to_string()))?;
-    let file_name = safe_name(&win.0).ok_or((StatusCode::BAD_REQUEST, "安装包文件名非法".to_string()))?;
-
-    // 解析版本号（决定 notes 挂到哪个版本下）；解析不出版本号的文件也能上传（仅提供下载），但不进清单
-    let version = parse_version_from_filename(&file_name);
-
-    // 落盘：先写安装包，再写 Linux 后端（若有）
-    tokio::fs::write(state.dir.join(&file_name), &win.1)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("保存文件失败: {e}")))?;
-    if let Some(data) = linux_file {
-        tokio::fs::write(state.dir.join(LINUX_BIN), &data)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("保存 Linux 后端失败: {e}")))?;
-    }
-
-    // 记录更新说明：notes.json["版本"] = [说明...]
-    if let (Some(ver), false) = (version.as_ref(), notes.is_empty()) {
-        let mut map = read_json(&state.dir.join("notes.json"));
-        map.insert(ver.clone(), Value::Array(notes.into_iter().map(Value::String).collect()));
-        let _ = std::fs::write(state.dir.join("notes.json"), serde_json::to_string_pretty(&map).unwrap_or_default());
-    }
-
-    rewrite_version_json(&state.dir);
-
-    let manifest = build_manifest(&state.dir).unwrap_or(json!({}));
-    Ok(Json(json!({
-        "ok": true,
-        "file": file_name,
-        "manifest": manifest,
-    })))
-}
-
-/// DELETE /api/file/{name}：删除目录内文件（只允许删本目录的普通文件），删除后重写清单。
-/// notes.json 与 version.json 是系统文件，不允许通过此接口删除，防止误删配置。
+/// DELETE /api/file/{name}：删除目录里文件（误上传时整理用）
 async fn delete_file(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let file_name = safe_name(&name).ok_or((StatusCode::BAD_REQUEST, "文件名非法".to_string()))?;
-    if file_name == "notes.json" || file_name == "version.json" {
+    // 只取文件名字尾段，防止路径穿越
+    let file_name = FsPath::new(&name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or((StatusCode::BAD_REQUEST, "文件名非法".to_string()))?
+        .to_string();
+    if SKIP_FILES.contains(&file_name.as_str()) {
         return Err((StatusCode::FORBIDDEN, "系统文件不允许删除".to_string()));
     }
     let path = state.dir.join(&file_name);
@@ -380,12 +304,28 @@ async fn delete_file(
     tokio::fs::remove_file(&path)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败: {e}")))?;
-    rewrite_version_json(&state.dir);
     Ok(Json(json!({ "ok": true })))
 }
 
+/// 相对路径安全清洗：按 / 拆段，逐段验证（拒绝 .. 与空串），返回相对路径
+fn safe_rel_path(raw: &str) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for seg in raw.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => return None, // 路径穿越：拒绝
+            s => out.push(s),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 // ---------------------------------------------------------------------------
-// 管理页面（内嵌 HTML；页面地址即服务器地址，客户端填同一地址即可）
+// 管理页面（内嵌 HTML；管理地址也就是客户端填的地址）
 // ---------------------------------------------------------------------------
 
 const INDEX_HTML: &str = r#"<!DOCTYPE html>
@@ -405,21 +345,12 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   .kv { display: flex; margin: 6px 0; font-size: 14px; }
   .kv .k { width: 110px; color: #666; flex-shrink: 0; }
   .kv .v { word-break: break-all; }
-  .notes li { margin: 2px 0; font-size: 14px; }
   .empty { color: #aaa; font-size: 13px; }
-  input[type=file], textarea { width: 100%; margin: 6px 0 10px; }
-  textarea { height: 90px; resize: vertical; font-family: inherit; font-size: 13px; padding: 6px; }
-  button { background: #2b7de9; color: #fff; border: none; border-radius: 5px; padding: 8px 22px; font-size: 14px; cursor: pointer; }
-  button:hover { background: #1f6fd3; }
-  button:disabled { background: #9db8dd; cursor: not-allowed; }
-  .del { background: none; color: #d9534f; border: 1px solid #d9534f; padding: 3px 10px; font-size: 12px; border-radius: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #eef0f2; }
   th { color: #666; font-weight: normal; }
-  .msg { margin: 10px 0; font-size: 13px; }
-  .msg.ok { color: #2a9d4e; }
-  .msg.err { color: #d9534f; }
-  .field-label { font-size: 13px; color: #555; }
+  .del { background: none; color: #d9534f; border: 1px solid #d9534f; padding: 3px 10px; font-size: 12px; border-radius: 4px; cursor: pointer; }
+  pre { background: #f6f8fa; border: 1px solid #e3e5e8; border-radius: 6px; padding: 10px 12px; font-size: 12px; overflow-x: auto; }
 </style>
 </head>
 <body>
@@ -434,16 +365,12 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
   <div class="card">
     <h2>发布新版本</h2>
-    <div id="msg" class="msg"></div>
-    <form id="uploadForm">
-      <div class="field-label">安装包（文件名须含版本号，如 SimuXchange_1.1.0_x64-setup.exe）</div>
-      <input type="file" name="file" required>
-      <div class="field-label">更新说明（每行一条，可留空）</div>
-      <textarea name="notes" placeholder="新增…&#10;修复…"></textarea>
-      <div class="field-label">Linux 后端 simx-server（可选，随版本更新时一起上传）</div>
-      <input type="file" name="linux">
-      <button id="uploadBtn" type="submit">上传发布</button>
-    </form>
+    <div class="hint" style="margin:0 0 10px">
+      把整个程序目录拷进本服务器 --dir 目录，再放一个版本文件即可（二选一）：
+      <pre>release.txt  内容仅一行，如：1.3.0&#10;release.json 内容：{"version": "1.3.0"}</pre>
+      服务器自动扫描目录生成文件清单（含子目录与校验值），客户端整目录下载更新；
+      版本号小于客户端当前版本时客户端才会更新（数字点分比较）。
+    </div>
   </div>
 
   <div class="card">
@@ -468,21 +395,14 @@ function fmtTime(s) {
 }
 
 async function refresh() {
-  // 升级清单
   const man = await fetch("/version.json").then(r => r.ok ? r.json() : null).catch(() => null);
   if (man) {
-    const notes = (man.notes || []).length
-      ? "<ul class='notes'>" + man.notes.map(n => "<li>" + n + "</li>").join("") + "</ul>"
-      : "<div class='empty'>（无更新说明）</div>";
     $("manifest").innerHTML =
-      "<div class='kv'><span class='k'>版本号</span><span class='v'><b>" + man.version + "</b></span></div>" +
-      "<div class='kv'><span class='k'>安装包</span><span class='v'>" + man.winInstaller + "</span></div>" +
-      "<div class='kv'><span class='k'>Linux 后端</span><span class='v'>" + (man.linuxServer || "未上传") + "</span></div>" +
-      "<div class='kv'><span class='k'>更新说明</span><span class='v'></span></div>" + notes;
+      "<div class='kv'><span class='k'>当前版本</span><span class='v'><b>" + man.version + "</b></span></div>" +
+      "<div class='kv'><span class='k'>发布文件数</span><span class='v'>" + (man.files || []).length + "</span></div>";
   } else {
-    $("manifest").innerHTML = "<div class='empty'>目录中还没有安装包，上传后自动生成清单</div>";
+    $("manifest").innerHTML = "<div class='empty'>发布目录中还没有内容（缺 release 版本文件或文件为空），上传后自动生成清单</div>";
   }
-  // 文件列表
   const files = await fetch("/api/files").then(r => r.json()).catch(() => []);
   const rows = files.length ? files.map(f =>
     "<tr><td>" + f.name + "</td><td>" + fmtSize(f.size) + "</td><td>" + fmtTime(f.modified) +
@@ -493,40 +413,9 @@ async function refresh() {
 
 async function delFile(name) {
   if (!confirm("确认删除 " + decodeURIComponent(name) + " ？")) return;
-  const resp = await fetch("/api/file/" + name, { method: "DELETE" });
-  show(resp.ok ? "已删除 " + decodeURIComponent(name) : await resp.text(), resp.ok);
+  await fetch("/api/file/" + name, { method: "DELETE" });
   refresh();
 }
-
-function show(text, ok) {
-  const m = $("msg");
-  m.textContent = text;
-  m.className = "msg " + (ok ? "ok" : "err");
-}
-
-$("uploadForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const btn = $("uploadBtn");
-  btn.disabled = true;
-  btn.textContent = "上传中…";
-  const fd = new FormData($("uploadForm"));
-  try {
-    const resp = await fetch("/api/upload", { method: "POST", body: fd });
-    const data = await resp.json().catch(() => null);
-    if (resp.ok && data && data.ok) {
-      show("发布成功：" + data.file + "（版本 " + (data.manifest.version || "未识别") + "）", true);
-      $("uploadForm").reset();
-      refresh();
-    } else {
-      show((data && data.error) || "上传失败", false);
-    }
-  } catch (err) {
-    show("上传失败：" + err, false);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "上传发布";
-  }
-});
 
 refresh();
 </script>
@@ -542,95 +431,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_version_normal() {
-        assert_eq!(
-            parse_version_from_filename("SimuXchange_1.1.0_x64-setup.exe"),
-            Some("1.1.0".to_string())
-        );
-        assert_eq!(
-            parse_version_from_filename("SimuXchange_1.10.0_x64-setup.exe"),
-            Some("1.10.0".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_version_bad_name() {
-        // 不是安装包 / 版本号格式不对 → None
-        assert_eq!(parse_version_from_filename("readme.txt"), None);
-        assert_eq!(parse_version_from_filename("SimuXchange_x64-setup.exe"), None);
-        assert_eq!(parse_version_from_filename("SimuXchange_abc_x64-setup.exe"), None);
-        assert_eq!(parse_version_from_filename("SimuXchange_1.1_x64-setup.exe"), None); // 至少两段点分
-        assert_eq!(parse_version_from_filename("MyApp_1.1.0_x64-setup.exe"), None);
-    }
-
-    #[test]
-    fn version_compare() {
-        assert!(version_cmp("1.10.0", "1.9.0") > 0);
-        assert!(version_cmp("1.1.0", "1.1.0") == 0);
-        assert!(version_cmp("1.1.0", "1.1.1") < 0);
-        assert!(version_cmp("1.1.0", "1.2.0") < 0);
-        assert!(version_cmp("2.0.0", "1.99.99") > 0);
-    }
-
-    #[test]
-    fn safe_name_strips_paths() {
-        assert_eq!(safe_name("SimuXchange_1.1.0_x64-setup.exe").as_deref(), Some("SimuXchange_1.1.0_x64-setup.exe"));
-        // 路径穿越尝试只保留最后一段
-        assert_eq!(safe_name("..\\..\\evil.exe").as_deref(), Some("evil.exe"));
-        assert_eq!(safe_name("C:/x/y/a.exe").as_deref(), Some("a.exe"));
-        assert_eq!(safe_name(""), None);
-    }
-
-    /// 扫描目录生成清单：用临时目录模拟一次发布
-    #[test]
-    fn build_manifest_picks_newest_and_merges_notes() {
-        let dir = std::env::temp_dir().join(format!("update-test-{}", std::process::id()));
+    fn release_version_from_txt_and_json() {
+        let dir = std::env::temp_dir().join(format!("relver-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("SimuXchange_1.0.0_x64-setup.exe"), "old").unwrap();
-        std::fs::write(dir.join("SimuXchange_1.2.0_x64-setup.exe"), "new").unwrap();
-        std::fs::write(dir.join("simx-server"), "linux-bin").unwrap();
-        std::fs::write(
-            dir.join("notes.json"),
-            r#"{"1.0.0":["旧版说明"],"1.2.0":["新版说明A","新版说明B"]}"#,
-        )
-        .unwrap();
+
+        // release.txt 纯文本
+        std::fs::write(dir.join(RELEASE_TXT), " 1.10.0 \n").unwrap();
+        assert_eq!(read_release_version(&dir).as_deref(), Some("1.10.0"));
+
+        // release.json 的 version 字段
+        std::fs::remove_file(dir.join(RELEASE_TXT)).unwrap();
+        std::fs::write(dir.join(RELEASE_JSON), r#"{"version": "1.3.0"}"#).unwrap();
+        assert_eq!(read_release_version(&dir).as_deref(), Some("1.3.0"));
+
+        // 都没有 → None
+        std::fs::remove_file(dir.join(RELEASE_JSON)).unwrap();
+        assert!(read_release_version(&dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_manifest_scan_dir_with_hash() {
+        let dir = std::env::temp_dir().join(format!("rel-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        std::fs::write(dir.join(RELEASE_TXT), "1.3.0").unwrap();
+        std::fs::write(dir.join("simuxchange.exe"), b"hello").unwrap();
+        std::fs::write(dir.join("resources").join("data.bin"), b"world!").unwrap();
+        std::fs::write(dir.join("version.json"), "{}").unwrap(); // 系统文件不进清单
 
         let manifest = build_manifest(&dir).unwrap();
-        assert_eq!(manifest["version"], "1.2.0");
-        assert_eq!(manifest["winInstaller"], "SimuXchange_1.2.0_x64-setup.exe");
-        assert_eq!(manifest["linuxServer"], "simx-server");
-        assert_eq!(manifest["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(manifest["version"], "1.3.0");
+        let files = manifest["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2, "系统/描述文件不应进清单: {files:?}");
+        let exe = files
+            .iter()
+            .find(|f| f["name"] == "simuxchange.exe")
+            .unwrap();
+        assert_eq!(exe["size"], 5);
+        // "hello" 的已知 sha256，校验哈希算法正确
+        assert_eq!(
+            exe["sha256"],
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 空目录 / 无安装包时返回 None（version.json 应 404）
     #[test]
-    fn build_manifest_empty_dir() {
-        let dir = std::env::temp_dir().join(format!("update-test-empty-{}", std::process::id()));
+    fn build_manifest_missing_release() {
+        // 目录有文件但没有 release 版本文件 → 视为还没有发布（404）
+        let dir = std::env::temp_dir().join(format!("rel-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("readme.txt"), "hi").unwrap();
+        std::fs::write(dir.join("x.txt"), "hi").unwrap();
         assert!(build_manifest(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 验证当前 axum 0.7（matchit 0.7）的路由参数语法：`:name` 匹配单段路径。
-    /// 注意：`{name}` 是 axum 0.8 才支持的语法，升级 axum 0.8 时需同步改回
     #[test]
-    fn route_syntax_supported() {
-        let mut router = matchit::Router::new();
-        router.insert("/files/:name", 1).unwrap();
-        let matched = router.at("/files/notes.json");
-        assert!(matched.is_ok(), ":name 语法匹配失败: {:?}", matched.err());
-        assert_eq!(matched.unwrap().params.get("name"), Some("notes.json"));
+    fn safe_rel_path_ok() {
+        let p = safe_rel_path("resources/a.bin").unwrap();
+        let parts: Vec<String> = p.iter().map(|c| c.to_string_lossy().to_string()).collect();
+        assert_eq!(parts, vec!["resources", "a.bin"]);
+        assert_eq!(safe_rel_path("../evil").map(|p| p.iter().count()), None);
+        assert_eq!(safe_rel_path("").is_none(), true);
+        assert!(safe_rel_path("a/./b").is_some());
+    }
 
-        // 静态段与参数段共存（/api/files 与 /api/file/:name）
-        let mut router2 = matchit::Router::new();
-        router2.insert("/api/files", 1).unwrap();
-        router2.insert("/api/file/:name", 2).unwrap();
-        assert!(router2.at("/api/file/xxx.exe").is_ok());
-        assert!(router2.at("/api/files").is_ok());
+    /// 验证 axum 0.7（matchit 0.7）通配路由语法：`*rest` 匹配多段路径。
+    /// 注意 `{name}` 是 axum 0.8 才支持的语法，升级 axum 0.8 时需同步改回。
+    #[test]
+    fn wildcard_route_syntax_supported() {
+        let mut wild = matchit::Router::new();
+        wild.insert("/files/*rest", 2).unwrap();
+        let m = wild.at("/files/resources/data.bin");
+        assert!(m.is_ok(), "*rest 语法匹配失败: {:?}", m.err());
+        assert_eq!(m.unwrap().params.get("rest"), Some("resources/data.bin"));
     }
 }

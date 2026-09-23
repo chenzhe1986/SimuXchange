@@ -136,6 +136,16 @@ pub struct GatewayConfig {
     /// gateways.json 的 dirs 数组里，网关只保存归属 id；
     /// 旧配置文件没有该字段时按默认空串处理（向后兼容）
     pub dir_id: String,
+    /// 创建时间（yyyy-MM-dd HH:mm:ss）。旧配置没有该字段时由引擎
+    /// 启动回填当前时间并落盘一次，让时间固定下来
+    pub created_at: String,
+    /// 修改时间（yyyy-MM-dd HH:mm:ss）：配置内容（含标签/备注/目录归属）
+    /// 每次修改时刷新；启停网关只记运行状态不视为修改
+    pub updated_at: String,
+    /// 标签：逗号分隔的短词组（如 "生产,联调"），界面侧栏按标签过滤展示
+    pub tags: String,
+    /// 备注：自由文本，说明该网关的用途/环境等
+    pub notes: String,
 }
 
 impl Default for GatewayConfig {
@@ -147,12 +157,18 @@ impl Default for GatewayConfig {
             platforms: Vec::new(),
             was_running: false,
             dir_id: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            tags: String::new(),
+            notes: String::new(),
         }
     }
 }
 
 /// 平台配置（每个平台一个独立监听端口，柜台连到这个端口后登录、报单）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 派生 PartialEq 供引擎比较“平台内容是否变化”（判断修改时间是否刷新，
+/// 比较时需剔除两个时间字段，见 engine.rs save_gateway）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PlatformConfig {
     /// 唯一标识（后端自动生成）
@@ -188,6 +204,11 @@ pub struct PlatformConfig {
     pub cache_orders: bool,
     /// 模拟回报策略
     pub strategy: StrategyConfig,
+    /// 创建时间（yyyy-MM-dd HH:mm:ss）；旧配置缺省时引擎启动回填，
+    /// 见 GatewayConfig.created_at 的说明
+    pub created_at: String,
+    /// 修改时间（yyyy-MM-dd HH:mm:ss）：平台配置内容变化（含策略热更新）时刷新
+    pub updated_at: String,
 }
 
 impl Default for PlatformConfig {
@@ -207,6 +228,8 @@ impl Default for PlatformConfig {
             persist_packets: true,
             cache_orders: true,
             strategy: StrategyConfig::default(),
+            created_at: String::new(),
+            updated_at: String::new(),
         }
     }
 }
@@ -310,7 +333,7 @@ pub enum CancelMode {
 /// - min==max==0：同步回报（在处理委托的流程内立即发送）
 /// - min==max>0：固定延迟
 /// - min<max：每次在 [min, max] 区间内随机取一个延迟
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DelayConfig {
     pub min_ms: u64,
@@ -340,7 +363,8 @@ impl DelayConfig {
 }
 
 /// 模拟回报策略配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 派生 PartialEq 供引擎比较“平台配置内容是否有变化”（判断修改时间是否刷新）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StrategyConfig {
     pub mode: StrategyMode,

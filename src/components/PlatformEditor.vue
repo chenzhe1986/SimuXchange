@@ -1,24 +1,38 @@
 <script setup lang="ts">
 // PlatformEditor.vue —— 平台配置的编辑弹窗（新建和编辑共用）。
-// 表单项随策略模式动态显隐：选“拆单”才显示拆单参数、
-// 选“拒单”才显示拒单参数、选“Lua 脚本回报”才显示脚本编辑器。
+// 报单自动回报模式为两级选择：一级 5 大类（固定回报 / Lua 脚本配置 /
+// 回放行情撮合（待开发，暂按关闭自动回报保存）/ 关闭自动回报，选”固定回报”
+// 时右侧出现具体的 6 种子模式下拉。分类只是界面层归类，strategy.mode 仍
+// 写后端既有的枚举值，gateways.json 格式不变。
+// Lua 脚本配置模式下只有一个输入框（原 Lua 编辑器与 AI 输入框的合并）：
+// 默认放一段需求示例（DEFAULT_LUA_PROMPT），点「AI 生成脚本」把它变成
+// 真正的 Lua 脚本填回同一处；保存时后端强制校验语法。
+// 回报延迟拆到两个模式区块下：确认/成交回报延迟放在"报单自动回报模式"
+// 区块的最后（拆单模式时在拆单笔数/价格档位之下；自动拒单也在最底部只显示
+// "确认回报延迟"——拒单回报同样按该配置生成延迟）。仅"固定回报"大类显示，
+// 无成交的只回确认不显示"成交回报延迟"；Lua 模式延迟只能由脚本 delayMs
+// 控制，界面不参与（保存时自动把确认/成交延迟归零）；
+// "撤单回报延迟"放在"撤单自动回报模式"区块下、任何模式都显示——脚本不接管
+// 撤单，撤单延迟走界面撤单模式配置。
 // 网关运行中编辑时：基础信息（名称/类型/地址/端口/CompID/分区号）与
 // 功能开关（展示收发报文/缓存订单）置灰不可改、不显示登录校验密码区，
-// 仅“报单自动回报模式 / 撤单自动回报模式 / 回报延迟”可改（后端热更新实时生效）。
-// 点“保存”时先把数值规范化，再把整份配置 emit 给父组件提交；
-// Lua 脚本的语法校验由后端在保存时强制执行，编辑中可用“检查脚本”按钮即时校验。
+// 仅”报单自动回报策略 / 撤单自动回报策略 / 回报延迟”可改（后端热更新实时生效）。
+// 点”保存”时先把数值规范化，再把整份配置 emit 给父组件提交。
 import { computed, reactive, ref, watch } from "vue";
-import type { GatewayCategory, PlatformConfig } from "../types";
+import type { GatewayCategory, PlatformConfig, StrategyCategory, StrategyMode } from "../types";
 import type { Backend } from "../backend";
 import {
     CANCEL_MODES,
-    DEFAULT_LUA_SCRIPT,
+    DEFAULT_LUA_PROMPT,
     defaultPartitionNos,
     defaultRejectReason,
+    FIXED_STRATEGY_MODES,
     platformTypesOf,
-    STRATEGY_MODES,
+    STRATEGY_CATEGORIES,
+    strategyCategoryOf,
 } from "../types";
 import LuaEditor from "./LuaEditor.vue";
+import FieldHint from "./FieldHint.vue";
 import LuaDocViewer from "./LuaDocViewer.vue";
 import { generateLuaScript } from "../llm";
 import { rejectTextOf } from "../errors";
@@ -81,6 +95,9 @@ watch(
     (p) => {
         Object.assign(form, normalizePlatform(p));
         initRejectDefaults();
+        // 换平台后重置"上次固定模式"，避免沿用上一个平台的选择
+        lastFixedMode.value =
+            strategyCategoryOf(form.strategy.mode) === "fixed" ? form.strategy.mode : "fullSingle";
     },
 );
 
@@ -96,12 +113,30 @@ function initRejectDefaults() {
 
 initRejectDefaults();
 
-// 只有两种拆单模式需要“拆单笔数”和“价格档位”这两组参数
+// ---- 报单自动回报的"一级分类"（4 大类）与 strategy.mode 的双向映射 ----
+// 一级下拉只是界面归类，真正落到配置里的还是后端既有的 8 个枚举值：
+// 固定回报 → 上次选的固定子模式；Lua 脚本配置 → luaScript；
+// 关闭自动回报 → noAutoReply；回放行情撮合（待开发）暂与关闭自动回报
+// 同行为（也写 noAutoReply），避免把后端不认识的枚举值写进配置。
+// 记住最近一次选的固定子模式，一级分类从"固定回报"切走再切回时沿用；
+// 初始值取当前配置的模式（若是固定模式），避免编辑已有平台时切去 Lua
+// 再切回来，把用户原本选的子模式悄悄改成全部成交
+const lastFixedMode = ref<StrategyMode>(
+    strategyCategoryOf(form.strategy.mode) === "fixed" ? form.strategy.mode : "fullSingle",
+);
+const strategyCategory = computed<StrategyCategory>({
+    get: () => strategyCategoryOf(form.strategy.mode),
+    set: (c: StrategyCategory) => {
+        if (c === "fixed") form.strategy.mode = lastFixedMode.value;
+        else if (c === "luaScript") form.strategy.mode = "luaScript";
+        else if (c === "off" || c === "replay") form.strategy.mode = "noAutoReply";
+        // 回放行情撮合（待开发）：暂时与"关闭自动回报"同行为
+    },
+});
+
+// 只有"固定回报"里的拆单两种模式需要"拆单笔数"和"价格档位"这两组参数
 const needSplit = () => form.strategy.mode === "fullSplit" || form.strategy.mode === "partialSplit";
 const needTick = () => needSplit();
-
-/** 当前拒单原因码在错误码表里的说明（拒单参数区的提示文字用） */
-const rejectTextHint = computed(() => rejectTextOf(props.category, form.strategy.rejectReason));
 
 // 按网关分类选用平台类型列表（上交所竞价仅“竞价平台”、新债券仅“新债券平台”）
 const platformTypes = computed(() => platformTypesOf(props.category));
@@ -130,11 +165,13 @@ watch(
 watch(
     () => form.strategy.mode,
     (m) => {
+        // 记住最近一次选的固定子模式，一级分类切回"固定回报"时沿用
+        if (strategyCategoryOf(m) === "fixed") lastFixedMode.value = m;
         if (m === "reject") initRejectDefaults();
-        // 切到 Lua 脚本模式且脚本为空（旧配置没有该字段）时预填示例模板，
-        // 降低上手门槛；用户主动清空后再切走/切回不会覆盖（只在为空时填）
+        // 切到 Lua 脚本配置且输入为空（旧配置没有脚本字段）时预填需求示例，
+        // 降低上手门槛；用户清空后再切走/切回不会反复覆盖（只在为空时填）
         if (m === "luaScript" && !form.strategy.luaScript) {
-            form.strategy.luaScript = DEFAULT_LUA_SCRIPT;
+            form.strategy.luaScript = DEFAULT_LUA_PROMPT;
         }
     },
 );
@@ -151,14 +188,35 @@ function applyRejectText() {
     if (t) form.strategy.rejectText = t;
 }
 
-/** 点“保存”：先把各数值整理成合法值，再交给父组件提交后端 */
-function submit() {    if (!form.name.trim()) {
+/** 点“保存”：先拦截不可保存的状态（Lua 框里还是示例提示词），
+ *  再规范化数值，最后交给父组件提交后端 */
+function submit() {
+    if (
+        form.strategy.mode === "luaScript" &&
+        form.strategy.luaScript.trim() === DEFAULT_LUA_PROMPT.trim()
+    ) {
+        emit(
+            "notify",
+            "当前只是示例提示词：请先点击「AI 生成脚本」把它变成 Lua 脚本，或直接粘贴脚本后再保存",
+            true,
+        );
+        return;
+    }
+    if (!form.name.trim()) {
         form.name = "未命名平台";
     }
     // 规范化数值，避免空输入：
     // 笔数至少为 1 且取整；各区间保证“最大 ≥ 最小”，
     // 不然后端在区间内随机取值时会出错
     const s = form.strategy;
+    // Lua 模式下确认/成交延迟不经界面配置（只能由脚本各项 delayMs 控制）：
+    // 这里把配置归零，避免旧版本留下的非零值在脚本没写 delayMs 时悄悄兜底生效
+    if (s.mode === "luaScript") {
+        s.ackDelay.minMs = 0;
+        s.ackDelay.maxMs = 0;
+        s.tradeDelay.minMs = 0;
+        s.tradeDelay.maxMs = 0;
+    }
     s.splitCountMin = Math.max(1, Math.floor(s.splitCountMin || 1));
     s.splitCountMax = Math.max(s.splitCountMin, Math.floor(s.splitCountMax || s.splitCountMin));
     s.ackDelay.minMs = Math.max(0, s.ackDelay.minMs || 0);
@@ -186,20 +244,32 @@ async function checkScript() {
 }
 
 // ---- AI 生成脚本（纯前端调大模型，模拟引擎不参与） ----
-/** 自然语言需求输入框内容 */
-const aiPrompt = ref("");
 /** 生成中标记：按钮转圈文字、期间禁用其他按钮 */
 const generating = ref(false);
 /** 脚本手册弹窗开关 */
 const docShow = ref(false);
 
-/** 「AI 生成脚本」：把自然语言需求发给大模型，按三种结果分别处理——
- *  生成成功（脚本填入编辑器，用户原话转为注释头）/ 当前不支持（弹窗说明
- *  具体不支持点）/ 信息不足（弹窗展示模型的追问）。网络或格式异常也弹窗 */
+/** 「AI 生成脚本」：把编辑框当前内容当作需求描述交给大模型，按三种结果分别处理——
+ *  生成成功（脚本填入同一编辑框，用户原话转为注释头）/ 当前不支持（弹窗说明
+ *  具体不支持点）/ 信息不足（弹窗展示模型的追问）。网络或格式异常也弹窗。
+ *  编辑框即需求描述入口：默认放的是示例文字（DEFAULT_LUA_PROMPT），
+ *  点生成就把它变成 Lua 脚本；想换需求直接改框内文字再点生成即可。
+ *  调用大模型前先做一次语法校验：框里已经是合法 Lua 脚本时（用户粘的
+ *  或上轮生成的），直接提示不走大模型——避免把现成脚本当需求再生成一遍 */
 async function generateScript() {
-    const input = aiPrompt.value.trim();
+    const input = form.strategy.luaScript.trim();
     if (!input) {
-        emit("notify", "请先输入要生成的回报逻辑描述", true);
+        emit("notify", "请先在脚本框中输入需求描述或 Lua 脚本文本", true);
+        return;
+    }
+    // 预校验：已合法则提示并结束，不调大模型（默认示例是中文需求描述，
+    // 语法非法，不会被误拦截；粘了现成脚本或上轮生成结果时才会命中）
+    const check = await props.backend?.dispatch({
+        cmd: "validate_lua_script",
+        script: input,
+    });
+    if (check?.ok) {
+        emit("notify", "当前已是合法 Lua 脚本，无需再生成；可直接保存或手动修改");
         return;
     }
     generating.value = true;
@@ -217,7 +287,8 @@ async function generateScript() {
         } else if (r.type === "unsupported") {
             emit("scriptError", r.reason, "当前不支持该功能");
         } else {
-            emit("scriptError", r.question, "AI 需要更多信息");
+            // clarify：信息不足或描述矛盾，弹窗展示模型的追问/矛盾点
+            emit("scriptError", r.question, "AI 需要澄清");
         }
     } catch (e) {
         emit("scriptError", String(e), "AI 生成失败");
@@ -282,39 +353,57 @@ async function generateScript() {
                         </div>
                     </div>
 
-                    <!-- 平台功能开关：展示收发报文（勾选即自动持久化）+ 缓存订单，
-                         同一排显示（不受密码区影响）；网关运行中置灰 -->
+<!-- 平台功能开关：展示收发报文（勾选即自动持久化）+ 缓存订单，
+                         同一排显示（不受密码区影响）；网关运行中置灰。
+                         说明文字改为问号图标（FieldHint）：悬停/点击查看 -->
                     <div class="field">
                         <label class="field-row">
                             <input v-model="form.showPackets" type="checkbox" :disabled="gatewayRunning" />
                             展示收发报文
+                            <FieldHint text="点击平台卡片“报文”可实时查看并按字段解析，同时自动持久化到 packets/ 目录" />
                         </label>
-                        <span class="hint">点击平台卡片“报文”可实时查看并按字段解析，同时自动持久化到 packets/ 目录</span>
                     </div>
                     <div class="field">
                         <label class="field-row">
                             <input v-model="form.cacheOrders" type="checkbox" :disabled="gatewayRunning" />
                             缓存订单
+                            <FieldHint right text="可查看订单列表，撤单按真实状态回执，并支持界面手动回复" />
                         </label>
-                        <span class="hint">可查看订单列表，撤单按真实状态回执，并支持界面手动回复</span>
                     </div>
 
-                    <div class="section-title">报单自动回报模式（未成交的挂单可以在平台-订单手动发送回报）</div>
+<!-- 报单自动回报模式区块：大标题旁带问号说明（FieldHint），
+                         随后依次是模式选择行、确认/成交回报延迟（仅固定回报模式显示） -->
+                    <div class="section-title">
+                        报单自动回报模式
+                        <FieldHint text="未成交的挂单可以在订单界面手动发送回报" />
+                    </div>
 
-                    <!-- 报单自动回报模式下拉框；选不同模式下面显示不同的参数区 -->
-                    <div class="field full">
-                        <label>自动回报模式</label>
-                        <select v-model="form.strategy.mode">
-                            <option v-for="m in STRATEGY_MODES" :key="m.value" :value="m.value">
-                                {{ m.label }}
-                            </option>
-                        </select>
+                    <!-- 模式选择行：一级 4 大类下拉；选"固定回报模式"时
+                         右侧显示具体的 6 种子模式下拉（二级）。一级只是界面归类，
+                         strategy.mode 仍写后端既有的枚举值 -->
+<div class="field full">
+                        <div class="field-row">
+                            <select v-model="strategyCategory">
+                                <option v-for="c in STRATEGY_CATEGORIES" :key="c.value" :value="c.value">
+                                    {{ c.label }}
+                                </option>
+                            </select>
+                            <select v-if="strategyCategory === 'fixed'" v-model="form.strategy.mode">
+                                <option v-for="m in FIXED_STRATEGY_MODES" :key="m.value" :value="m.value">
+                                    {{ m.label }}
+                                </option>
+                            </select>
+                            <!-- 回放行情撮合（待开发）：与关闭自动回报同行为，无附加参数 -->
+                        </div>
                     </div>
 
                     <!-- 拆单类模式的参数：拆几笔、逐笔价差 -->
                     <template v-if="needSplit()">
                         <div class="field">
-                            <label>拆单笔数（最小 ~ 最大，随机）</label>
+                            <label class="field-row">
+                                拆单笔数
+                                <FieldHint text="最小 ~ 最大之间随机" />
+                            </label>
                             <div class="field-row">
                                 <input v-model.number="form.strategy.splitCountMin" type="number" min="1" />
                                 <span class="hint">~</span>
@@ -324,9 +413,11 @@ async function generateScript() {
                     </template>
                     <template v-if="needTick()">
                         <div class="field">
-                            <label>价格档位（每笔递增/递减，元）</label>
+                            <label class="field-row">
+                                价格档位
+                                <FieldHint right text="每笔价格变动（元）；买单从委托价逐档递减，卖单逐档递增" />
+                            </label>
                             <input v-model.number="form.strategy.priceTick" type="number" step="0.001" min="0" />
-                            <span class="hint">买单从委托价逐档递减，卖单逐档递增</span>
                         </div>
                     </template>
 
@@ -342,10 +433,6 @@ async function generateScript() {
                         <div class="field">
                             <label>拒单原因码 (OrdRejReason)</label>
                             <input v-model.number="form.strategy.rejectReason" type="number" min="0" />
-                            <span class="hint" v-if="rejectTextHint">
-                                默认 {{ defaultRejectReason(props.category) }}（{{ rejectTextHint }}）
-                            </span>
-                            <span class="hint" v-else>默认 {{ defaultRejectReason(props.category) }}</span>
                         </div>
                         <div class="field full">
                             <label>拒单说明文本</label>
@@ -353,94 +440,107 @@ async function generateScript() {
                         </div>
                     </template>
 
-                    <!-- Lua 脚本回报模式：语法高亮编辑器 + AI 生成 + 即时检查。
-                         脚本在保存时由后端强制校验语法，运行时沙箱化执行 -->
+<!-- Lua 脚本配置：单一输入框（原 Lua 编辑器与 AI 输入框的合并）。
+                         默认放一段需求示例（DEFAULT_LUA_PROMPT），点「AI 生成脚本」
+                         变成 Lua 脚本并填回同一处；保存时后端强制校验语法 -->
                     <template v-if="form.strategy.mode === 'luaScript'">
                         <div class="field full">
-                            <label>Lua 回报脚本（收到新委托时执行）</label>
+                            <label class="field-row">
+                                Lua 回报脚本
+                                <FieldHint text='收到新委托时执行，变量 ord 为委托字段、ctx 为环境信息；return "confirm" / "trade" / "reject" 或回报计划表（拒单的方式/原因/文本在脚本里指定），确认/成交回报延迟由脚本各项的 delayMs（毫秒）控制，未写 delayMs 的项同步（0 延迟）发出，完整说明见「脚本手册」' />
+                            </label>
                             <LuaEditor v-model="form.strategy.luaScript" :height="240" />
-                            <span class="hint">
-                                变量 ord 为委托字段、ctx 为环境信息；return "confirm" / "trade" / "reject"
-                                或回报计划表（拒单的方式/原因/文本在脚本里指定），完整说明见「脚本手册」
-                            </span>
-                        </div>
-                        <div class="field full">
-                            <label>AI 生成脚本（用自然语言描述回报逻辑）</label>
-                            <textarea
-                                v-model="aiPrompt"
-                                rows="2"
-                                placeholder="例：委托数量>1000 拒单；500~800 回确认加一半数量成交；其余全部成交"
-                            ></textarea>
                         </div>
                         <div class="field">
                             <div class="field-row">
+                                <button
+                                    class="btn sm primary"
+                                    type="button"
+                                    @click="generateScript"
+                                    :disabled="generating"
+                                >
+                                    {{ generating ? "生成中…" : "AI 生成脚本" }}
+                                </button>
                                 <button class="btn sm" type="button" @click="checkScript" :disabled="generating">
                                     检查脚本
-                                </button>
-                                <button class="btn sm primary" type="button" @click="generateScript" :disabled="generating">
-                                    {{ generating ? "生成中…" : "AI 生成脚本" }}
                                 </button>
                                 <button class="btn sm" type="button" @click="docShow = true" :disabled="generating">
                                     脚本手册
                                 </button>
                             </div>
-                            <span class="hint">AI 按需求生成脚本并填入上方编辑器，生成后可继续手动调整；不支持的逻辑会说明原因</span>
                         </div>
                     </template>
 
-                    <div class="section-title">撤单自动回报模式</div>
-
-                    <!-- 撤单模式：默认（存在挂单撤单成功、否则拒单）/ 回撤单拒单 -->
-                    <div class="field full">
-                        <label>撤单模式</label>
-                        <select v-model="form.strategy.cancelMode">
-                            <option v-for="m in CANCEL_MODES" :key="m.value" :value="m.value">
-                                {{ m.label }}
-                            </option>
-                        </select>
-                    </div>
-                    <div class="field" v-if="form.strategy.cancelMode === 'alwaysReject'">
-                        <label>撤单拒单原因码</label>
-                        <input v-model.number="form.strategy.cancelRejectReason" type="number" min="0" />
-                        <span class="hint">回填到撤单拒单/业务拒绝消息的原因字段</span>
-                    </div>
-                    <div class="field">
-                        <label class="field-row">
-                            <input v-model="form.strategy.cancelFrontReject" type="checkbox" />
-                            前台拒单
-                        </label>
-                        <span class="hint">勾选后撤单拒单改发业务拒绝消息（深交所 MsgType=4 / 上交所 204）</span>
-                    </div>
-
-                    <!-- 回报延迟：拒单模式没有成交，所以不显示；只挂单模式只有确认延迟 -->
-                    <template v-if="form.strategy.mode !== 'reject'">
-                        <div class="section-title">回报延迟（毫秒，最小 = 最大为固定延迟，全 0 同步回报）</div>
+                    <!-- 确认/成交回报延迟：放在各固定模式参数区之后——拆单模式（随机拆多笔）在
+                         拆单笔数/价格档位下面一行，自动拒单在最底部，其余固定模式紧跟模式选择行。
+                         自动拒单只回一条拒单回报（无成交），该回报延迟也走"确认回报延迟"配置；
+                         只回确认同理无成交 -->
+                    <template v-if="strategyCategory === 'fixed'">
                         <div class="field">
-                            <label>确认回报延迟（最小 ~ 最大）</label>
+                            <label class="field-row">
+                                确认回报延迟（毫秒）
+                                <FieldHint text="确认回报与拒单回报均适用；最小=最大为固定延迟，否则为区间随机延迟；大于0走定时器异步回报，否则同步回报" />
+                            </label>
                             <div class="field-row">
                                 <input v-model.number="form.strategy.ackDelay.minMs" type="number" min="0" />
                                 <span class="hint">~</span>
                                 <input v-model.number="form.strategy.ackDelay.maxMs" type="number" min="0" />
                             </div>
                         </div>
-                        <div class="field" v-if="form.strategy.mode !== 'ackOnly' && form.strategy.mode !== 'noAutoReply'">
-                            <label>成交回报延迟（最小 ~ 最大）</label>
+                        <div class="field" v-if="form.strategy.mode !== 'ackOnly' && form.strategy.mode !== 'reject'">
+                            <label class="field-row">
+                                成交回报延迟（毫秒）
+                                <FieldHint right text="最小=最大为固定延迟，否则为区间随机延迟；大于0定时器异步回报，否则同步回报" />
+                            </label>
                             <div class="field-row">
                                 <input v-model.number="form.strategy.tradeDelay.minMs" type="number" min="0" />
                                 <span class="hint">~</span>
                                 <input v-model.number="form.strategy.tradeDelay.maxMs" type="number" min="0" />
                             </div>
                         </div>
-                        <div class="field">
-                            <label>撤单回报延迟（最小 ~ 最大）</label>
-                            <div class="field-row">
-                                <input v-model.number="form.strategy.cancelDelay.minMs" type="number" min="0" />
-                                <span class="hint">~</span>
-                                <input v-model.number="form.strategy.cancelDelay.maxMs" type="number" min="0" />
-                            </div>
-                            <span class="hint">撤单成功与撤单拒单回报均适用</span>
-                        </div>
                     </template>
+
+                    <!-- 撤单自动回报模式区块：撤单模式下拉占满整行（与报单模式行同宽），
+                         前台拒单开关与撤单回报延迟在其下一行左右两栏并排；
+                         区块标题已含 "撤单" 二字，不再设小标题与 "撤单模式" 标签；
+                         前台拒单的说明文字收敛到问号图标（FieldHint） -->
+                    <div class="section-title">撤单自动回报模式</div>
+
+                    <!-- 撤单模式：默认（存在挂单就撤单成功、否则拒单）/ 全部撤单成功 /
+                         全部撤单拒单（选此项时下方出现原因码输入框） -->
+                    <div class="field full">
+                        <select v-model="form.strategy.cancelMode">
+                            <option v-for="m in CANCEL_MODES" :key="m.value" :value="m.value">
+                                {{ m.label }}
+                            </option>
+                        </select>
+                    </div>
+
+                    <!-- 前台拒单与撤单回报延迟左右两栏：开关的说明在问号图标里；
+                         延迟对撤单成功与撤单拒单回报均生效、任何报单模式都可配 -->
+                    <div class="field">
+                        <label class="field-row">
+                            <input v-model="form.strategy.cancelFrontReject" type="checkbox" />
+                            前台拒单
+                            <FieldHint right text="勾选后撤单拒单将改发业务拒绝消息（深交所 MsgType=4 / 上交所 204）" />
+                        </label>
+                    </div>
+                    <div class="field">
+                        <label class="field-row">
+                            撤单回报延迟（毫秒）
+                            <FieldHint right text="撤单成功与撤单拒单回报均适用；最小=最大为固定延迟，否则为区间随机延迟；大于0走定时器异步回报，否则同步回报" />
+                        </label>
+                        <div class="field-row">
+                            <input v-model.number="form.strategy.cancelDelay.minMs" type="number" min="0" />
+                            <span class="hint">~</span>
+                            <input v-model.number="form.strategy.cancelDelay.maxMs" type="number" min="0" />
+                        </div>
+                    </div>
+                    <div class="field full" v-if="form.strategy.cancelMode === 'alwaysReject'">
+                        <label>撤单拒单原因码</label>
+                        <input v-model.number="form.strategy.cancelRejectReason" type="number" min="0" />
+                        <span class="hint">回填到撤单拒单/业务拒绝消息的原因字段</span>
+                    </div>
                 </div>
             </div>
             <div class="modal-foot">

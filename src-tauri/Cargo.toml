@@ -1,6 +1,6 @@
 [package]
 name = "simuxchange"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "SimuXchange 模拟撮合网关"
 
@@ -21,6 +21,12 @@ tokio = { workspace = true }
 # native-tls 在 Windows 走系统 schannel，纯 Rust 绑定无 C 编译负担
 ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
 native-tls = "0.2"
+# 更新文件完整性校验（updater.rs 下载后核对 sha256）
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+# 更新器等主进程退出：OpenProcess + WaitForSingleObject（updater.rs）
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [features]
 # 发布版默认启用 custom-protocol：将 dist 前端资源嵌入 exe；

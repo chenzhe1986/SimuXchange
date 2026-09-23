@@ -605,6 +605,10 @@ pub fn plan_reports(
 /// 3. 脚本执行出错（语法已在保存时拦截，这里只可能是运行时错误：访问
 ///    nil、死循环超限等）：本笔委托**不自动回报**（返回空计划），错误
 ///    通过 env.log 写到前端日志面板。
+///
+/// 延迟规则：Lua 模式的回报延迟**只由脚本项上的 `delayMs` 控制**，脚本
+/// 未写 delayMs 的项同步（0 延迟）发出——界面"回报延迟"配置不参与
+/// （前端的 Lua 模式不提供确认/成交延迟输入，保存时归零；撤单不走本函数）。
 pub fn plan_reports_lua(
     st: &StrategyConfig,
     partition_no: i32,
@@ -639,7 +643,7 @@ pub fn plan_reports_lua(
             ScriptKind::Confirm => {
                 let ack = base_ack(partition_no, order, &biz, stats, &order_id);
                 plans.push(PlannedReport {
-                    delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                    delay_ms: item.delay_ms.unwrap_or(0),
                     kind: ReportKind::Ack,
                     frame: ack.encode(),
                     desc: format!(
@@ -688,7 +692,7 @@ pub fn plan_reports_lua(
                     fill_qty, fill_px, cum_raw, leaves, status,
                 );
                 plans.push(PlannedReport {
-                    delay_ms: item.delay_ms.unwrap_or_else(|| st.trade_delay.sample()),
+                    delay_ms: item.delay_ms.unwrap_or(0),
                     kind: ReportKind::Trade,
                     frame: trade.encode(),
                     desc: format!(
@@ -733,7 +737,7 @@ pub fn plan_reports_lua(
                             .unwrap_or(st.reject_reason);
                         let rpt = build_reject_rpt(partition_no, order, &biz, stats, &order_id, reason);
                         plans.push(PlannedReport {
-                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            delay_ms: item.delay_ms.unwrap_or(0),
                             kind: ReportKind::Reject,
                             frame: rpt.encode(),
                             desc: format!(
@@ -757,7 +761,7 @@ pub fn plan_reports_lua(
                         let text = item.text.unwrap_or_else(|| st.reject_text.clone());
                         let rej = build_business_reject_msg(order, &biz, reason, &text);
                         plans.push(PlannedReport {
-                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            delay_ms: item.delay_ms.unwrap_or(0),
                             kind: ReportKind::BusinessReject,
                             frame: rej.encode(),
                             desc: format!("业务拒绝(4) ClOrdID={} 原因={}（Lua）", cl_ord_id, text),

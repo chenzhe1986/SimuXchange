@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 
+mod updater;
+
 /// 解析配置/数据目录：优先取可执行文件目录（存在 simx.config.json 时），
 /// 其次取当前工作目录及其上级（开发模式），最后回退到可执行文件目录。
 ///
@@ -147,45 +149,110 @@ async fn llm_chat(
     .map_err(|e| e.to_string())?
 }
 
-/// 下载新版安装包并启动安装（“发现新版本”弹窗里的“下载并安装”按钮触发）。
-///
-/// 下载到用户“下载”目录（文件名取 URL 最后一段），完成后直接启动安装程序
-/// （NSIS 安装包，会弹出安装向导）。下载是纯 IO 活，用 spawn_blocking 挪到
-/// 独立线程执行，避免卡住 Tauri 的异步运行时。
+/// 检查更新：拉 version.json 并与当前版本比较（逻辑见 updater::check_update_remote）。
+/// 返回”有新版 + 服务器清单”；网络/解析错误返回 Err 让前端展示，省略时不打扰启动。
+/// 检查放 Rust 走网络而不是前端 fetch，避开 WebView 的 CORS 限制。
 #[tauri::command]
-async fn download_update(url: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        // 从 URL 末尾提取文件名（没有则给个默认名，避免路径拼接问题）
-        let file_name = url
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("simuxchange-setup.exe");
-        // 下载目录：优先“用户/Downloads”，取不到（非常规环境）就退回临时目录
-        let downloads = std::env::var("USERPROFILE")
-            .map(|p| PathBuf::from(p).join("Downloads"))
-            .unwrap_or_else(|_| std::env::temp_dir());
-        let dest = downloads.join(file_name);
+fn check_update_server(
+    url: String,
+    current_version: String,
+) -> Result<Option<updater::RemoteManifest>, String> {
+    updater::check_update_remote(&url, &current_version)
+}
 
-        let resp = ureq::get(&url)
-            .call()
-            .map_err(|e| format!("连接更新服务器失败: {}", e))?;
-        let mut reader = resp.into_reader();
-        let mut file =
-            std::fs::File::create(&dest).map_err(|e| format!("创建文件失败: {}", e))?;
-        std::io::copy(&mut reader, &mut file).map_err(|e| format!("写入文件失败: {}", e))?;
-
-        // 启动安装程序（exe 直接执行即可，Windows 会弹出 NSIS 安装向导）
-        std::process::Command::new(&dest)
-            .spawn()
-            .map_err(|e| format!("启动安装程序失败: {}", e))?;
-        Ok(format!("安装包已下载到 {} 并启动安装", dest.display()))
+/// 下载新版本的整目录文件到临时区（“发现新版本”弹窗的“下载更新”按钮触发）。
+/// 下载过程在 updater::download_update_files：主 exe 恒最后下载，
+/// 逐文件校验 size/sha256，完成后写 pending.json 激活”重启以更新”提示。
+#[tauri::command]
+async fn download_update_files(
+    url: String,
+    manifest: updater::RemoteManifest,
+    state: State<'_, Mutex<updater::UpdateState>>,
+) -> Result<updater::PendingUpdate, String> {
+    // 下载是纯 IO 活，spawn_blocking 挪到线程池，避免卡住 Tauri 异步运行时
+    let pending = tauri::async_runtime::spawn_blocking(move || {
+        updater::download_update_files(&url, &manifest)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .pending = Some(pending.clone());
+    Ok(pending)
+}
+
+/// 应用已下载的更新（红色"重启以更新"图标点击时触发）：
+/// 启动更新器 → 主进程退出，更新器等主进程退出后覆盖文件并（按 restart）重启。
+#[tauri::command]
+fn apply_update(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<updater::UpdateState>>,
+    restart: bool,
+) -> Result<(), String> {
+    let mut st = state.lock().map_err(|e| e.to_string())?;
+    let pending = st
+        .pending
+        .clone()
+        .ok_or_else(|| "没有待应用的更新".to_string())?;
+    updater::spawn_applier(&pending, restart)?;
+    st.dispatched = true;
+    drop(st);
+    // 更新器已独立运行，这里结束主进程（窗口关闭事件不会再触发第二次）
+    app.exit(0);
+    Ok(())
+}
+
+/// 前端查询是否有待应用的更新（启动时恢复红色"重启以更新"提示）
+#[tauri::command]
+fn get_pending_update(
+    state: State<'_, Mutex<updater::UpdateState>>,
+) -> Option<updater::PendingUpdate> {
+    state.lock().ok().and_then(|g| g.pending.clone())
+}
+
+/// 在系统默认浏览器里打开外部网页（“关于”弹窗里的项目主页链接触发）。
+///
+/// 为什么不直接让前端 window.open：WebView 里打开外部域名会被 Tauri 拦截
+/// （安全策略：WebView 只允许加载应用自己的页面）。改用系统命令调起浏览器：
+/// Windows 用 `cmd /c start`，类 Unix 用 `xdg-open`——两者都是系统自带，
+/// 不引入额外依赖。URL 传参用引号包裹，防止被解析成命令行参数
+/// （URL 本身硬编码在前端常量里，属可信输入，双重保险）。
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // cmd.exe 是控制台程序，本程序是 GUI（无控制台）：spawn 它时 Windows
+        // 会为它新建一个控制台窗口再立即关闭，用户看到的就是“闪一下的黑窗”。
+        // 用 CREATE_NO_WINDOW 创建标志让子进程不建窗口即可根治。
+        // start 后的空引号是“窗口标题”占位参数（cmd 的 start 语法要求）。
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("打开链接失败: {}", e))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("打开链接失败: {}", e))?;
+    }
+    Ok(())
 }
 
 fn main() {
+    // 更新器入口：临时目录里"新版本 exe"带 --apply-update 参数启动时，
+    // 不进 Tauri 主程序（无窗口、无单实例逻辑），办完“覆盖+重启”就退出。
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--apply-update") {
+        let code = updater::run_apply_update(&args[2..]);
+        std::process::exit(code);
+    }
+
     let data_dir = resolve_data_dir();
     let app_config = load_app_config(&data_dir);
     let engine = Engine::new(data_dir);
@@ -208,6 +275,12 @@ fn main() {
         // State<T> 参数按类型取用（依赖注入）；Mutex 供运行时修改配置
         .manage(Mutex::new(app_config))
         .manage(engine.clone())
+        // 更新状态：pending 为已下载待应用的更新，dispatched 防止窗口关闭
+        // 事件重复触发更新器（下载完成后写在磁盘，启动时恢复）
+        .manage(Mutex::new(updater::UpdateState {
+            pending: updater::load_pending(),
+            dispatched: false,
+        }))
         .setup(move |app| {
             // 本地桌面端“前端接入”：操作日志记一条，与远程模式 WebSocket
             // 接入的日志语义对齐（远程模式记真实对端 IP）
@@ -240,13 +313,36 @@ fn main() {
             }
             Ok(())
         })
+        // 窗口关闭（点 ✕ / Alt+F4 / 任务栏关闭）时：若已有下载完成的更新且更新器
+        // 尚未启动，则先 spawn 更新器（restart=false）再放行关闭——主进程退出后
+        // 更新器自动覆盖文件，用户下次双击即运行新版本；点红色"重启以更新"按钮
+        // 走的是 apply_update 命令（restart=true，覆盖后自动重启）
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let st = window.state::<Mutex<updater::UpdateState>>();
+                // 显式取出锁结果再判断，避免 if-let 里的临时借用拖过 st 的存活期
+                let locked = st.lock();
+                if let Ok(mut guard) = locked {
+                    // 有待应用更新且还没交出更新器 → 交给更新器后放行关闭
+                    if let Some(pending) = guard.pending.clone() {
+                        if !guard.dispatched && updater::spawn_applier(&pending, false).is_ok() {
+                            guard.dispatched = true;
+                        }
+                    }
+                }
+            }
+        })
         // 注册前端可调用的 command 列表
         .invoke_handler(tauri::generate_handler![
             get_app_config,
             set_app_config,
             dispatch,
-            download_update,
-            llm_chat
+            check_update_server,
+            download_update_files,
+            apply_update,
+            get_pending_update,
+            llm_chat,
+            open_external
         ])
         .run(tauri::generate_context!())
         .expect("SimuXchange 启动失败");
@@ -259,7 +355,6 @@ fn main() {
 // 接上后向模型接口发一次无鉴权 GET，服务端应回 HTTP 400（缺 model 参数）。
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     #[ignore]

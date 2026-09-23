@@ -294,7 +294,9 @@ fn base_ack(
 /// Lua 脚本模式（StrategyMode::LuaScript）的回报计划生成（与 shjj 同构，
 /// 债券平台仅两个业务且都有成交回报，无 allow_trade 降级；业务拒绝
 /// OrderReject(204) 无文本字段）。脚本执行出错时本笔委托不自动回报
-/// （空计划），错误写日志面板。
+/// （空计划），错误写日志面板。延迟规则与 sz/shjj 一致：回报延迟只由
+/// 脚本项上的 `delayMs` 控制，脚本未写 delayMs 的项同步（0 延迟）发出——
+/// 界面"回报延迟"配置不参与 Lua 模式。
 pub fn plan_reports_lua(
     st: &StrategyConfig,
     partition_no: i32,
@@ -329,7 +331,7 @@ pub fn plan_reports_lua(
             ScriptKind::Confirm => {
                 let ack = base_ack(partition_no, order, pbu, &ord_cnfm_id);
                 plans.push(PlannedReport {
-                    delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                    delay_ms: item.delay_ms.unwrap_or(0),
                     kind: ReportKind::Ack,
                     frame: ack.encode(),
                     desc: format!(
@@ -388,7 +390,7 @@ pub fn plan_reports_lua(
                     user_info: order.user_info.clone(),
                 };
                 plans.push(PlannedReport {
-                    delay_ms: item.delay_ms.unwrap_or_else(|| st.trade_delay.sample()),
+                    delay_ms: item.delay_ms.unwrap_or(0),
                     kind: ReportKind::Trade,
                     frame: trade.encode(),
                     desc: format!(
@@ -428,7 +430,7 @@ pub fn plan_reports_lua(
                         let reason = item.reason.unwrap_or(st.reject_reason as u32);
                         let rpt = build_reject_rpt(partition_no, order, pbu, &ord_cnfm_id, reason);
                         plans.push(PlannedReport {
-                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            delay_ms: item.delay_ms.unwrap_or(0),
                             kind: ReportKind::Reject,
                             frame: rpt.encode(),
                             desc: format!(
@@ -448,7 +450,7 @@ pub fn plan_reports_lua(
                         let reason = item.reason.unwrap_or(st.reject_reason as u32);
                         let rej = build_order_reject_msg(order, reason);
                         plans.push(PlannedReport {
-                            delay_ms: item.delay_ms.unwrap_or_else(|| st.ack_delay.sample()),
+                            delay_ms: item.delay_ms.unwrap_or(0),
                             kind: ReportKind::BusinessReject,
                             frame: rej.encode(),
                             desc: format!(

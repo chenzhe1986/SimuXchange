@@ -109,6 +109,10 @@ export interface PlatformConfig {
     /** 是否缓存收到的订单（开启后可查看订单列表、撤单按真实状态回复） */
     cacheOrders: boolean;
     strategy: StrategyConfig;
+    /** 创建时间 yyyy-MM-dd HH:mm:ss（后端维护；右键「详情」查看） */
+    createdAt: string;
+    /** 修改时间 yyyy-MM-dd HH:mm:ss（平台配置变化或策略热更新时后端刷新） */
+    updatedAt: string;
 }
 
 /** 网关分类（与后端 config.rs 的 GatewayCategory 对应）：
@@ -140,6 +144,14 @@ export interface GatewayConfig {
     wasRunning: boolean;
     /** 所属目录 id（空 = 根层级，不归入任何目录） */
     dirId: string;
+    /** 创建时间 yyyy-MM-dd HH:mm:ss（后端维护；旧配置缺省时启动回填当前时间） */
+    createdAt: string;
+    /** 修改时间 yyyy-MM-dd HH:mm:ss（配置内容变化时后端刷新；启停不视为修改） */
+    updatedAt: string;
+    /** 标签：逗号分隔（如 "生产,联调"），侧栏支持按标签筛选展示 */
+    tags: string;
+    /** 备注：自由文本说明 */
+    notes: string;
 }
 
 /** 平台统计计数（后端 stats.rs 的快照） */
@@ -357,7 +369,21 @@ export function platformTypesOf(category: GatewayCategory): { value: number; lab
     return PLATFORM_TYPES;
 }
 
-/** 报单自动回报模式下拉框选项（value 必须与后端枚举的 camelCase 名一致） */
+/** 报单模式类别（一级下拉选项；value 与后端枚举无直接对应，只是界面归类） */
+export type StrategyCategory = "fixed" | "luaScript" | "replay" | "off";
+
+/** 一级下拉选项：固定回报模式 / Lua 脚本配置 / 回放行情撮合（待开发）/ 关闭自动回报。
+ *  分类只是界面层对既有 8 个 StrategyMode 的归类（见 STRATEGY_MODES），
+ *  后端枚举与 gateways.json 格式不变——"回放行情撮合"功能待开发，
+ *  当前保存时按"关闭自动回报"（noAutoReply）落地 */
+export const STRATEGY_CATEGORIES: { value: StrategyCategory; label: string }[] = [
+    { value: "fixed", label: "固定回报模式" },
+    { value: "luaScript", label: "Lua 脚本配置" },
+    { value: "replay", label: "回放行情撮合（待开发）" },
+    { value: "off", label: "关闭自动回报" },
+];
+
+/** 全部 8 种报单模式的标签对照表（除二级下拉外，卡片上显示模式名也用） */
 export const STRATEGY_MODES: { value: StrategyMode; label: string }[] = [
     { value: "fullSingle", label: "全部成交" },
     { value: "partialSingle", label: "部分成交" },
@@ -369,23 +395,23 @@ export const STRATEGY_MODES: { value: StrategyMode; label: string }[] = [
     { value: "noAutoReply", label: "关闭自动回报" },
 ];
 
-/** Lua 脚本回报模式的默认脚本模板（新建平台/切换模式时预填，
- *  也是 docs/Lua脚本回报编写说明.md 首例的"按委托数量分档"逻辑） */
-export const DEFAULT_LUA_SCRIPT = `-- Lua 回报脚本：收到新委托时执行，按 return 值生成回报
--- ord = 委托字段（ord.OrderQty 数量/股、ord.Price 价格/元、ord.SecurityID 证券代码…）
--- ctx = 环境信息（ctx.Platform 平台名、ctx.PartitionNo 分区号、ctx.PeerAddr 柜台地址）
--- 快捷方式：return "confirm" 只回确认 / "trade" 确认+全部成交 / "reject" 拒单
--- 详见 docs/Lua脚本回报编写说明.md
-if ord.OrderQty > 1000 then
-    return "reject"                       -- 数量超 1000：拒单
-elseif ord.OrderQty > 800 then
-    return "confirm"                      -- 800~1000：只回确认
-elseif ord.OrderQty > 500 then
-    -- 500~800：确认 + 按一半数量部分成交
-    return { { kind = "confirm" }, { kind = "trade", qty = math.floor(ord.OrderQty / 2) } }
-else
-    return "trade"                        -- 500 以内：确认 + 全部成交
-end`;
+/** 固定回报模式大类下的 6 种子模式（一级选"固定回报"后右侧二级下拉的选项） */
+export const FIXED_STRATEGY_MODES: { value: StrategyMode; label: string }[] = STRATEGY_MODES.filter(
+    (m) => m.value !== "luaScript" && m.value !== "noAutoReply",
+);
+
+/** 策略枚举值 → 所属大类（打开编辑界面时按存量配置还原一级下拉的选中项；
+ *  "回放行情撮合"暂无专门枚举（保存时按 noAutoReply 落地），存量配置不会落到该类） */
+export function strategyCategoryOf(mode: StrategyMode): StrategyCategory {
+    if (mode === "luaScript") return "luaScript";
+    if (mode === "noAutoReply") return "off";
+    return "fixed";
+}
+
+/** Lua 脚本配置模式下编辑框的默认内容（即"用户默认提示词"）。
+ *  合并 AI 生成输入框后，Lua 编辑器作唯一输入框：默认放一段需求示例，
+ *  点「AI 生成脚本」把它变成真正的 Lua 脚本并填回同一处 */
+export const DEFAULT_LUA_PROMPT = "支持输入中文需求描述，AI 会生成 Lua 脚本回报逻辑，快来试试吧！。\n示例：\n1. 只回确认回报，不成交；\n2. 价格小于 10 元的订单，随机拆成 2~5 笔成交，价格大于等于 10 元的订单，全部拒单；\n3. 委托数量小于500股，全部成交，大于500股小于1000股，按50%比例部分成交，确认回报延迟 100~500 毫秒，成交回报延迟 200~1000 毫秒。";
 
 /** 撤单自动回报模式下拉框选项（value 与后端 CancelMode 的 camelCase 名一致） */
 export const CANCEL_MODES: { value: CancelMode; label: string }[] = [
@@ -439,7 +465,7 @@ export function defaultStrategy(category: GatewayCategory = "sz"): StrategyConfi
         cancelRejectReason: 1,
         cancelFrontReject: false,
         cancelDelay: { minMs: 0, maxMs: 0 },
-        luaScript: DEFAULT_LUA_SCRIPT,
+        luaScript: DEFAULT_LUA_PROMPT,
     };
 }
 
@@ -474,6 +500,8 @@ export function defaultPlatform(port: number, category: GatewayCategory = "sz"):
             showPackets: true,
             persistPackets: true,
             cacheOrders: true,
+            createdAt: "",
+            updatedAt: "",
             strategy: defaultStrategy(category),
         };
     }
@@ -492,6 +520,8 @@ export function defaultPlatform(port: number, category: GatewayCategory = "sz"):
             showPackets: true,
             persistPackets: true,
             cacheOrders: true,
+            createdAt: "",
+            updatedAt: "",
             strategy: defaultStrategy(category),
         };
     }
@@ -509,6 +539,8 @@ export function defaultPlatform(port: number, category: GatewayCategory = "sz"):
         showPackets: true,
         persistPackets: true,
         cacheOrders: true,
+        createdAt: "",
+        updatedAt: "",
         strategy: defaultStrategy(category),
     };
 }

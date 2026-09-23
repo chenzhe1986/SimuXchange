@@ -108,7 +108,7 @@ watch(
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     user-select: none;
@@ -116,7 +116,7 @@ watch(
 
 .chevron {
     color: var(--text-faint);
-    font-size: 11px;
+    font-size: 12px;
 }
 
 .log-tools {
@@ -140,7 +140,7 @@ watch(
     background: transparent;
     color: var(--text-dim);
     padding: 3px 10px;
-    font-size: 11.5px;
+    font-size: 12px;
     cursor: pointer;
 }
 
@@ -154,7 +154,7 @@ watch(
     overflow-y: auto;
     padding: 2px 16px 10px;
     font-family: var(--mono);
-    font-size: 11.5px;
+    font-size: 12px;
 }
 
 .log-empty {

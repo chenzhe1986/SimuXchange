@@ -3,166 +3,258 @@
    主题机制：所有颜色统一以 CSS 变量（--bg、--accent 等）定义，
    组件样式通过 var(--xxx) 引用。切换主题即切换 <html> 的
    data-theme 属性值，对应主题块中的变量覆盖默认值，全界面随之变色。
-   主题选择与持久化逻辑见 App.vue 的“界面配色主题”部分。 */
+   主题选择与持久化逻辑见 App.vue 的“界面配色主题”部分。
+
+   配色原则（2025-09 全面重设计）：
+   - 文字分三层（正文 / 次要 / 弱），各主题下对背景对比度分别 ≥ 11 / 4.5 / 4.0
+     （WCAG AA 标准，白字/深字按钮文本同样按 ≥ 4.5 校验）；
+   - 主题色实底按钮上的文字色用 --on-accent 变量：浅色主题白字、深色主题深字，
+     解决“亮色按钮配白字看不清”的常见问题；
+   - 语义色（绿/黄/红）浅色主题用加深版、深色主题用提亮版，保证任意底上都可读。 */
+
+/* ---------- 字体 ----------
+   Windows 上字体锐利度取决于两点（这也是本次优化的核心）：
+   1. 抗锯齿方式：Chromium 在 Windows 默认走 ClearType 次像素渲染，小字号最锐利；
+      之前全局 -webkit-font-smoothing: antialiased 把它强制成灰度渲染，13px 以下
+      中文笔画会被“糊”在一起。现在默认按 macOS 习惯保留 antialiased，Windows
+      （main.ts 会在 <html> 上加 .win32 类）改回系统默认的次像素渲染。
+   2. 字号下限：正文提到 14px，组件里 11px 以下的小字统一上调（整数像素），
+      避免 9~11px 字号在次像素渲染下笔画残缺。 */
+:root {
+    --font-ui: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+        "Noto Sans SC", "Source Han Sans SC", sans-serif;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+}
 
 /* ---------- 默认主题：优雅白（浅色主题，语义色用加深版保证可读性） ----------
    启动时 App.vue 会立即设置 data-theme="light"，这里把 :root 也设成同值：
    即使 data-theme 尚未生效（如加载瞬间）也不会闪一下深色背景。 */
 :root {
-    --bg: #f4f6fa;
-    --bg-soft: #eceff5;
+    --bg: #f3f5f9;
+    --bg-soft: #e9edf4;
     --panel: #ffffff;
-    --panel-2: #f1f4f9;
-    --border: #d4dae4;
-    --border-soft: #e2e7ef;
-    --text: #1f2937;
-    --text-dim: #64748b;
-    --text-faint: #94a3b8;
-    --accent: #3b82f6;
-    --accent-soft: rgba(59, 130, 246, 0.12);
-    --accent-hover: #2570eb;
-    --green: #059669;
-    --green-soft: rgba(5, 150, 105, 0.12);
-    --amber: #d97706;
-    --amber-soft: rgba(217, 119, 6, 0.12);
-    --red: #dc2626;
-    --red-soft: rgba(220, 38, 38, 0.1);
+    --panel-2: #f2f5fa;
+    --border: #d2dae5;
+    --border-soft: #e0e6ee;
+    /* 三层文字色：正文 / 次要 / 弱提示，对白底对比度 14.5 / 5.3 / 4.3 */
+    --text: #1c2632;
+    --text-dim: #5b6d82;
+    --text-faint: #6b7b92;
+    --accent: #2563eb;
+    --accent-soft: rgba(37, 99, 235, 0.12);
+    --accent-hover: #1d4ed8;
+    /* 语义色用加深版：绿/黄/红作文字色时对白底对比度 ≥ 4.9 */
+    --green: #047857;
+    --green-soft: rgba(4, 120, 87, 0.12);
+    --amber: #ad5700;
+    --amber-soft: rgba(173, 87, 0, 0.12);
+    --red: #b91c1c;
+    --red-soft: rgba(185, 28, 28, 0.1);
+    /* 实底按钮上的文字色（浅色主题用白字） */
+    --on-accent: #ffffff;
+    --on-danger: #ffffff;
+    --btn-success-bg: #0a8057;
+    --btn-success-hover: #0a7450;
+    --btn-success-text: #ffffff;
+    /* 中性灰底的徽标底色、在线状态点的辉光（跟随主题微调） */
+    --gray-soft: rgba(90, 110, 130, 0.16);
+    --green-glow: rgba(4, 120, 87, 0.45);
     /* 细节配色：滚动条、按钮悬停、弹窗遮罩、灰色状态点、阴影 */
-    --scroll-thumb: #c6cdd9;
-    --scroll-thumb-hover: #aeb7c6;
-    --btn-hover-bg: #e8edf5;
-    --btn-hover-border: #b9c3d3;
-    --mask: rgba(15, 23, 42, 0.35);
-    --dot-off: #b0b9c8;
+    --scroll-thumb: #c3ccd8;
+    --scroll-thumb-hover: #a8b3c3;
+    --btn-hover-bg: #e6ebf4;
+    --btn-hover-border: #b7c3d5;
+    --mask: rgba(10, 28, 42, 0.35);
+    --dot-off: #a7b1bf;
     --shadow-modal: 0 24px 64px rgba(15, 23, 42, 0.18);
     --shadow-pop: 0 10px 32px rgba(15, 23, 42, 0.16);
     --radius: 10px;
     --radius-sm: 7px;
-    --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
 }
 
 /* ---------- 经典黑：蓝黑底 + 蓝色点缀 ---------- */
 :root[data-theme="dark"] {
-    --bg: #0e1117;
-    --bg-soft: #151a23;
-    --panel: #1a2029;
-    --panel-2: #202836;
-    --border: #2a3342;
-    --border-soft: #232c3a;
-    --text: #e2e8f2;
-    --text-dim: #8b98ab;
-    --text-faint: #5c6980;
-    --accent: #4f8cff;
-    --accent-soft: rgba(79, 140, 255, 0.14);
-    --accent-hover: #3e7cf5;
-    --green: #34d399;
-    --green-soft: rgba(52, 211, 153, 0.13);
-    --amber: #fbbf24;
-    --amber-soft: rgba(251, 191, 36, 0.12);
-    --red: #f87171;
-    --red-soft: rgba(248, 113, 113, 0.12);
-    --scroll-thumb: #2c3646;
-    --scroll-thumb-hover: #3a4658;
-    --btn-hover-bg: #26303f;
-    --btn-hover-border: #3d4a5e;
-    --mask: rgba(5, 8, 13, 0.62);
-    --dot-off: #4a5568;
+    --bg: #0b0f16;
+    --bg-soft: #121824;
+    --panel: #181c29;
+    --panel-2: #1f2935;
+    --border: #2c3747;
+    --border-soft: #242e3e;
+    --text: #e6ebf2;
+    --text-dim: #a3afc0;
+    --text-faint: #7e8fa8;
+    --accent: #67a4ff;
+    --accent-soft: rgba(103, 164, 255, 0.16);
+    --accent-hover: #7db0ff;
+    /* 语义色：深色底上直接提亮，够亮才清晰 */
+    --green: #45d6a0;
+    --green-soft: rgba(69, 214, 160, 0.13);
+    --amber: #f2c14f;
+    --amber-soft: rgba(242, 193, 79, 0.13);
+    --red: #f27f7f;
+    --red-soft: rgba(242, 127, 127, 0.12);
+    /* 深色主题的实心按钮用深色文字（亮底配深字，对比度反而更高、更高级） */
+    --on-accent: #0a1526;
+    --on-danger: #2d0f13;
+    --btn-success-bg: #2ebf96;
+    --btn-success-hover: #3ed2a1;
+    --btn-success-text: #0c1f18;
+    --gray-soft: rgba(160, 180, 210, 0.12);
+    --green-glow: rgba(69, 214, 160, 0.45);
+    --scroll-thumb: #303b4e;
+    --scroll-thumb-hover: #42506a;
+    --btn-hover-bg: #243046;
+    --btn-hover-border: #3b4d63;
+    --mask: rgba(2, 4, 8, 0.62);
+    --dot-off: #5a6b82;
     --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.55);
     --shadow-pop: 0 10px 32px rgba(0, 0, 0, 0.5);
 }
 
 /* ---------- 现代蓝：深邃海军蓝底 + 亮天蓝点缀 ---------- */
 :root[data-theme="blue"] {
-    --bg: #081c36;
-    --bg-soft: #0c2547;
-    --panel: #112c52;
-    --panel-2: #173a66;
-    --border: #2b4d7d;
-    --border-soft: #1f3d66;
-    --text: #d8e9fb;
-    --text-dim: #8fb2d9;
-    --text-faint: #6085ad;
-    --accent: #38bdf8;
-    --accent-soft: rgba(56, 189, 248, 0.15);
-    --accent-hover: #0ea5e9;
-    --scroll-thumb: #24456e;
-    --scroll-thumb-hover: #30598c;
-    --btn-hover-bg: #1d3f6d;
-    --btn-hover-border: #33608f;
-    --mask: rgba(3, 10, 22, 0.62);
-    --dot-off: #3e5c82;
+    --bg: #08162e;
+    --bg-soft: #0b2240;
+    --panel: #0e2c55;
+    --panel-2: #153a68;
+    --border: #27507e;
+    --border-soft: #1b3d61;
+    --text: #ddebfb;
+    --text-dim: #a3c3e8;
+    --text-faint: #8aa8c9;
+    --accent: #45c7f8;
+    --accent-soft: rgba(69, 199, 248, 0.16);
+    --accent-hover: #63d3f7;
+    --green: #45d6a0;
+    --green-soft: rgba(69, 214, 160, 0.13);
+    --amber: #ffc966;
+    --amber-soft: rgba(255, 201, 102, 0.13);
+    --red: #f78686;
+    --red-soft: rgba(247, 134, 134, 0.12);
+    --on-accent: #05262e;
+    --on-danger: #330f12;
+    --btn-success-bg: #22c3b4;
+    --btn-success-hover: #2fd1bf;
+    --btn-success-text: #05201e;
+    --gray-soft: rgba(170, 200, 230, 0.14);
+    --green-glow: rgba(69, 214, 160, 0.45);
+    --scroll-thumb: #1e4a6e;
+    --scroll-thumb-hover: #2b6594;
+    --btn-hover-bg: #1a3f5f;
+    --btn-hover-border: #356190;
+    --mask: rgba(2, 8, 18, 0.62);
+    --dot-off: #32567f;
+    --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.55);
+    --shadow-pop: 0 10px 32px rgba(0, 0, 0, 0.5);
 }
 
 /* ---------- 深空灰：暖石墨灰底 + 青碧色点缀 ---------- */
 :root[data-theme="gray"] {
-    --bg: #1a1c20;
-    --bg-soft: #212429;
-    --panel: #282b31;
-    --panel-2: #30343c;
-    --border: #3d424b;
-    --border-soft: #33383f;
-    --text: #e8eaee;
-    --text-dim: #a2a8b2;
-    --text-faint: #717884;
+    --bg: #17191d;
+    --bg-soft: #1d2127;
+    --panel: #23272e;
+    --panel-2: #2b3038;
+    --border: #3a414c;
+    --border-soft: #2e343d;
+    --text: #e9ecef;
+    --text-dim: #a0aab7;
+    --text-faint: #8b97a5;
     --accent: #2dd4bf;
-    --accent-soft: rgba(45, 212, 191, 0.14);
-    --accent-hover: #14b8a6;
-    --scroll-thumb: #3a3f47;
-    --scroll-thumb-hover: #494f59;
-    --btn-hover-bg: #333840;
-    --btn-hover-border: #484e58;
-    --mask: rgba(10, 11, 13, 0.62);
-    --dot-off: #545a63;
+    --accent-soft: rgba(45, 212, 191, 0.16);
+    --accent-hover: #46dcc7;
+    --green: #34d399;
+    --green-soft: rgba(52, 211, 153, 0.13);
+    --amber: #f2c14f;
+    --amber-soft: rgba(242, 193, 79, 0.13);
+    --red: #f07d8f;
+    --red-soft: rgba(240, 125, 143, 0.12);
+    --on-accent: #04231d;
+    --on-danger: #380d15;
+    --btn-success-bg: #1ebfa4;
+    --btn-success-hover: #2ecfb3;
+    --btn-success-text: #05231d;
+    --gray-soft: rgba(190, 200, 215, 0.13);
+    --green-glow: rgba(52, 211, 153, 0.45);
+    --scroll-thumb: #3a4149;
+    --scroll-thumb-hover: #4a525c;
+    --btn-hover-bg: #2f343d;
+    --btn-hover-border: #4a545f;
+    --mask: rgba(4, 5, 6, 0.62);
+    --dot-off: #545b64;
+    --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.55);
+    --shadow-pop: 0 10px 32px rgba(0, 0, 0, 0.5);
 }
 
 /* ---------- 极光紫：深紫夜空底 + 亮紫点缀 ---------- */
 :root[data-theme="purple"] {
-    --bg: #0f0a1e;
-    --bg-soft: #161030;
-    --panel: #1d1540;
-    --panel-2: #261c52;
-    --border: #3d2f6e;
-    --border-soft: #2f2458;
-    --text: #ece7f8;
-    --text-dim: #a99ecb;
-    --text-faint: #776b9c;
-    --accent: #c084fc;
-    --accent-soft: rgba(192, 132, 252, 0.16);
-    --accent-hover: #a855f7;
+    --bg: #100b20;
+    --bg-soft: #181031;
+    --panel: #1e1548;
+    --panel-2: #261c58;
+    --border: #3b2d65;
+    --border-soft: #2b2050;
+    --text: #f0ebff;
+    --text-dim: #b3a7d8;
+    --text-faint: #9d90c7;
+    --accent: #c08bfc;
+    --accent-soft: rgba(192, 139, 252, 0.16);
+    --accent-hover: #d0a2fd;
+    --green: #4fd6b1;
+    --green-soft: rgba(79, 214, 177, 0.13);
+    --amber: #f2c14f;
+    --amber-soft: rgba(242, 193, 79, 0.13);
+    --red: #f8938f;
+    --red-soft: rgba(248, 147, 143, 0.12);
+    --on-accent: #1d0b33;
+    --on-danger: #380f0f;
+    --btn-success-bg: #2fd4a4;
+    --btn-success-hover: #41ddb0;
+    --btn-success-text: #032218;
+    --gray-soft: rgba(200, 180, 240, 0.14);
+    --green-glow: rgba(79, 214, 177, 0.45);
     --scroll-thumb: #3b2f63;
     --scroll-thumb-hover: #4c3d80;
     --btn-hover-bg: #332661;
     --btn-hover-border: #4c3d80;
-    --mask: rgba(9, 6, 18, 0.64);
+    --mask: rgba(6, 3, 12, 0.64);
     --dot-off: #554a7c;
+    --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.55);
+    --shadow-pop: 0 10px 32px rgba(0, 0, 0, 0.5);
 }
 
 /* ---------- 优雅白：浅色主题，语义色也换成加深版保证可读性（默认主题，值同 :root） ---------- */
 :root[data-theme="light"] {
-    --bg: #f4f6fa;
-    --bg-soft: #eceff5;
+    --bg: #f3f5f9;
+    --bg-soft: #e9edf4;
     --panel: #ffffff;
-    --panel-2: #f1f4f9;
-    --border: #d4dae4;
-    --border-soft: #e2e7ef;
-    --text: #1f2937;
-    --text-dim: #64748b;
-    --text-faint: #94a3b8;
-    --accent: #3b82f6;
-    --accent-soft: rgba(59, 130, 246, 0.12);
-    --accent-hover: #2570eb;
-    --green: #059669;
-    --green-soft: rgba(5, 150, 105, 0.12);
-    --amber: #d97706;
-    --amber-soft: rgba(217, 119, 6, 0.12);
-    --red: #dc2626;
-    --red-soft: rgba(220, 38, 38, 0.1);
-    --scroll-thumb: #c6cdd9;
-    --scroll-thumb-hover: #aeb7c6;
-    --btn-hover-bg: #e8edf5;
-    --btn-hover-border: #b9c3d3;
-    --mask: rgba(15, 23, 42, 0.35);
-    --dot-off: #b0b9c8;
+    --panel-2: #f2f5fa;
+    --border: #d2dae5;
+    --border-soft: #e0e6ee;
+    --text: #1c2632;
+    --text-dim: #5b6d82;
+    --text-faint: #6b7b92;
+    --accent: #2563eb;
+    --accent-soft: rgba(37, 99, 235, 0.12);
+    --accent-hover: #1d4ed8;
+    --green: #047857;
+    --green-soft: rgba(4, 120, 87, 0.12);
+    --amber: #ad5700;
+    --amber-soft: rgba(173, 87, 0, 0.12);
+    --red: #b91c1c;
+    --red-soft: rgba(185, 28, 28, 0.1);
+    --on-accent: #ffffff;
+    --on-danger: #ffffff;
+    --btn-success-bg: #0a8057;
+    --btn-success-hover: #0a7450;
+    --btn-success-text: #ffffff;
+    --gray-soft: rgba(90, 110, 130, 0.16);
+    --green-glow: rgba(4, 120, 87, 0.45);
+    --scroll-thumb: #c3ccd8;
+    --scroll-thumb-hover: #a8b3c3;
+    --btn-hover-bg: #e6ebf4;
+    --btn-hover-border: #b7c3d5;
+    --mask: rgba(10, 28, 42, 0.35);
+    --dot-off: #a7b1bf;
     --shadow-modal: 0 24px 64px rgba(15, 23, 42, 0.18);
     --shadow-pop: 0 10px 32px rgba(15, 23, 42, 0.16);
 }
@@ -180,12 +272,21 @@ body,
 }
 
 body {
-    font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
-    font-size: 13px;
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.5;
     background: var(--bg);
     color: var(--text);
     overflow: hidden;
+    text-rendering: optimizeLegibility;
+    /* 非 Windows（macOS 等）保留灰度抗锯齿；Windows 用 clearType 见下方覆盖 */
     -webkit-font-smoothing: antialiased;
+}
+
+/* Windows 下改用 ClearType 次像素渲染（锐利），而非 macOS 习惯的灰度抗锯齿
+   —— 系统默认就是次像素渲染，这里显式写出来（原因见文件头注释） */
+html.win32 body {
+    -webkit-font-smoothing: subpixel-antialiased;
 }
 
 ::-webkit-scrollbar {
@@ -217,7 +318,7 @@ body {
     border-radius: var(--radius-sm);
     background: var(--panel-2);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: 13px;
     cursor: pointer;
     transition: all 0.15s;
     user-select: none;
@@ -239,10 +340,19 @@ body {
     transform: none;
 }
 
+/* 键盘 Tab 聚焦时给出可见描边（鼠标点击不显示，符合 :focus-visible 语义） */
+.btn:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
 .btn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .btn.primary:hover {
@@ -250,13 +360,13 @@ body {
 }
 
 .btn.success {
-    background: #0f9d6e;
-    border-color: #0f9d6e;
-    color: #fff;
+    background: var(--btn-success-bg);
+    border-color: var(--btn-success-bg);
+    color: var(--btn-success-text);
 }
 
 .btn.success:hover {
-    background: #0c8a60;
+    background: var(--btn-success-hover);
 }
 
 .btn.danger-ghost {
@@ -286,16 +396,17 @@ textarea {
     border-radius: var(--radius-sm);
     background: var(--bg-soft);
     color: var(--text);
-    font-size: 13px;
+    font-size: 14px;
     font-family: inherit;
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 input:focus,
 select:focus,
 textarea:focus {
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 input[type="checkbox"] {
@@ -305,7 +416,7 @@ input[type="checkbox"] {
 }
 
 label {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-dim);
 }
 
@@ -317,10 +428,10 @@ label {
     gap: 5px;
     padding: 2px 9px;
     border-radius: 20px;
-    font-size: 11.5px;
+    font-size: 12px;
     line-height: 1.6;
     white-space: nowrap;
-    /* 徽章兼作“切换后端”入口：重置 button 默认外观 */
+    /* 徽章兼作“切换后端”入口：重置按钮默认外观 */
     cursor: pointer;
     border: none;
     background: transparent;
@@ -334,7 +445,7 @@ label {
 }
 
 .badge.gray {
-    background: rgba(139, 152, 171, 0.12);
+    background: var(--gray-soft);
     color: var(--text-dim);
 }
 
@@ -362,7 +473,7 @@ label {
 
 .dot.on {
     background: var(--green);
-    box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
+    box-shadow: 0 0 6px var(--green-glow);
 }
 
 .dot.off {
@@ -435,7 +546,7 @@ label {
 
 .be-url {
     flex: 1;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -458,7 +569,7 @@ label {
 
 .be-del:hover {
     background: var(--red);
-    color: #fff;
+    color: var(--on-danger);
 }
 
 .be-add {
@@ -548,6 +659,39 @@ label {
     color: var(--text);
 }
 
+/* 弹窗头部右侧按钮组：最大化/还原 + 关闭挤在一起（OrderViewer / PacketViewer 用） */
+.head-btns {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+/* 右下角拖拽把手（查看类弹窗调整大小用；定位基准是 .modal 的 position: relative） */
+.resize-handle {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    /* 两条斜向小条纹，提示“可沿对角线拖大/缩下”
+       （repeating-linear-gradient 45°方向画等间距短线） */
+    background: repeating-linear-gradient(
+        135deg,
+        var(--text-faint) 0,
+        var(--text-faint) 1.6px,
+        transparent 1.6px,
+        transparent 5.6px
+    );
+    opacity: 0.55;
+    border-radius: 0 0 12px;
+    touch-action: none; /* 触屏下把斜向手势交给页面而不是浏览器滚动 */
+}
+
+.resize-handle:hover {
+    opacity: 1;
+}
+
 /* ---------- 表单布局 ---------- */
 
 .form-grid {
@@ -584,7 +728,7 @@ label {
 }
 
 .hint {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-faint);
 }
 

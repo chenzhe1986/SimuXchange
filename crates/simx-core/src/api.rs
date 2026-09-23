@@ -43,6 +43,14 @@ pub enum Command {
     /// 移动网关到目录（dir_id 空 = 移回根层级；只改归属，运行中也允许）
     #[serde(rename_all = "camelCase")]
     MoveGateway { id: String, dir_id: String },
+    /// 更新网关的标签与备注（右键“详情”弹窗保存时调用；
+    /// 只改元数据，运行中的网关也允许）
+    #[serde(rename_all = "camelCase")]
+    UpdateGatewayMeta {
+        id: String,
+        tags: String,
+        notes: String,
+    },
     /// 启动网关
     StartGateway { id: String },
     /// 停止网关
@@ -192,6 +200,14 @@ pub async fn dispatch(engine: &Engine, payload: Value, client_ip: &str) -> Value
             };
             engine.log_op(client_ip, &format!("移动网关 {} 到 {}", gw, target));
             match engine.move_gateway(&id, &dir_id).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
+        Command::UpdateGatewayMeta { id, tags, notes } => {
+            let name = engine.gateway_name(&id).await.unwrap_or_else(|| id.clone());
+            engine.log_op(client_ip, &format!("更新网关 {} 的标签与备注", name));
+            match engine.update_gateway_meta(&id, &tags, &notes).await {
                 Ok(()) => ok(Value::Null),
                 Err(e) => err(e),
             }

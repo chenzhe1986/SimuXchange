@@ -78,12 +78,13 @@ const statItems = computed(() => [
             <span class="badge" :class="listening ? 'green' : 'gray'">{{ listening ? "监听中" : "未启动" }}</span>
         </div>
 
-        <!-- 策略摘要：回报模式 + 确认/成交延迟 -->
+        <!-- 策略摘要：回报模式 + 确认/成交延迟（Lua 模式的延迟由脚本控制，不显示界面配置值） -->
         <div class="pcard-strategy">
             <span class="strategy-mode">{{ strategyModeLabel(platform.strategy.mode) }}</span>
-            <span class="strategy-delay">
+            <span class="strategy-delay" v-if="platform.strategy.mode !== 'luaScript'">
                 确认 {{ delayLabel(platform.strategy.ackDelay) }} · 成交 {{ delayLabel(platform.strategy.tradeDelay) }}
             </span>
+            <span class="strategy-delay" v-else>延迟：脚本 delayMs 控制</span>
         </div>
 
         <!-- 五格实时统计 -->
@@ -139,7 +140,7 @@ const statItems = computed(() => [
 }
 
 .pcard.live {
-    border-color: rgba(52, 211, 153, 0.35);
+    border-color: color-mix(in srgb, var(--green) 35%, transparent);
 }
 
 .pcard-head {
@@ -191,7 +192,7 @@ const statItems = computed(() => [
 
 .strategy-delay {
     color: var(--text-faint);
-    font-size: 11px;
+    font-size: 12px;
 }
 
 .pcard-stats {
@@ -213,7 +214,7 @@ const statItems = computed(() => [
 }
 
 .stat-label {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-faint);
     margin-top: 2px;
 }
@@ -251,7 +252,7 @@ const statItems = computed(() => [
 }
 
 .conn-toggle {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-faint);
 }
 
@@ -263,7 +264,7 @@ const statItems = computed(() => [
 
 .orders-btn {
     padding: 1px 10px;
-    font-size: 11px;
+    font-size: 12px;
 }
 
 .conn-list {
@@ -281,7 +282,7 @@ const statItems = computed(() => [
     padding: 5px 9px;
     background: var(--bg-soft);
     border-radius: var(--radius-sm);
-    font-size: 11.5px;
+    font-size: 12px;
 }
 
 .conn-row .peer {
@@ -295,7 +296,7 @@ const statItems = computed(() => [
 
 .conn-row .since {
     color: var(--text-faint);
-    font-size: 10.5px;
+    font-size: 11px;
 }
 
 .fade-enter-active,

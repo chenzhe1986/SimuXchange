@@ -95,7 +95,13 @@ impl Engine {
     /// 创建引擎并从 data_dir/gateways.json 加载历史配置（没有则为空）
     pub fn new(data_dir: PathBuf) -> Self {
         let (events, _) = broadcast::channel(4096);
-        let store = load_store(&data_dir);
+        let mut store = load_store(&data_dir);
+        // 历史配置可能没有创建/修改时间（本功能之前生成的）：
+        // 启动时统一回填当前时间并落盘一次，让时间固定下来——
+        // 否则每次启动都会生成新的“回填时间”，创建时间永远在变
+        if backfill_times(&mut store) {
+            let _ = persist_store_file(&data_dir, &store);
+        }
         Self {
             inner: Arc::new(Inner {
                 data_dir: data_dir.clone(),
@@ -200,10 +206,59 @@ impl Engine {
             return Err("同一网关下平台监听端口不能重复".into());
         }
 
+        // ---- 创建/修改时间维护 ----
+        // 新建（id 刚生成）→ 创建时间与修改时间都取当下；
+        // 编辑 → 创建时间保留（旧配置缺时间字段时由启动回填兜底），修改时间刷新。
+        // 平台同理：新平台两个时间都取当下；已有平台保留创建时间，
+        // 内容有变化才刷新修改时间（内容比较需先清掉时间字段，否则恒不相等）
+        let now = now_str();
         // 目录列表仅落盘用：先克隆（锁即取即还），避免持有网关表锁的同时
         // 再去等目录锁（全工程统一“先目录锁后网关锁”的加锁次序防死锁）
         let dirs = self.inner.dirs.lock().await.clone();
         let mut gws = self.inner.gateways.lock().await;
+        let old_gw = gws.iter().find(|g| g.id == gw.id).cloned();
+        match &old_gw {
+            Some(prev) => {
+                gw.created_at = if prev.created_at.is_empty() {
+                    now.clone()
+                } else {
+                    prev.created_at.clone()
+                };
+                gw.updated_at = now.clone();
+                for p in gw.platforms.iter_mut() {
+                    match prev.platforms.iter().find(|x| x.id == p.id) {
+                        Some(pp) => {
+                            p.created_at = pp.created_at.clone();
+                            // 时间字段由服务端维护，比较“内容有没有变”时先清掉
+                            let mut old_body = pp.clone();
+                            old_body.created_at.clear();
+                            old_body.updated_at.clear();
+                            let mut new_body = p.clone();
+                            new_body.created_at.clear();
+                            new_body.updated_at.clear();
+                            if old_body != new_body {
+                                p.updated_at = now.clone();
+                            } else {
+                                p.updated_at = pp.updated_at.clone();
+                            }
+                        }
+                        None => {
+                            p.created_at = now.clone();
+                            p.updated_at = now.clone();
+                        }
+                    }
+                }
+            }
+            None => {
+                gw.created_at = now.clone();
+                gw.updated_at = now.clone();
+                for p in gw.platforms.iter_mut() {
+                    p.created_at = now.clone();
+                    p.updated_at = now.clone();
+                }
+            }
+        }
+
         if let Some(slot) = gws.iter_mut().find(|g| g.id == gw.id) {
             // 保存配置不改变“上次运行状态”（was_running 保留旧值，
             // 与旧版 gateway_state.json 不被保存配置改动时的行为一致）
@@ -233,13 +288,13 @@ impl Engine {
     /// 调用方负责在持锁期间把两份最新数据切片传进来；本函数内部不再取任何
     /// 锁，因此不存在加锁次序问题。
     fn persist_store(&self, dirs: &[DirConfig], gateways: &[GatewayConfig]) -> Result<(), String> {
-        let store = GatewayStore {
-            dirs: dirs.to_vec(),
-            gateways: gateways.to_vec(),
-        };
-        let path = gateways_path(&self.inner.data_dir);
-        let s = serde_json::to_string_pretty(&store).map_err(|e| e.to_string())?;
-        std::fs::write(&path, s).map_err(|e| format!("保存配置失败 {}: {}", path.display(), e))
+        persist_store_file(
+            &self.inner.data_dir,
+            &GatewayStore {
+                dirs: dirs.to_vec(),
+                gateways: gateways.to_vec(),
+            },
+        )
     }
 
     /// 新建或重命名网关目录并落盘（id 为空 = 新建，自动生成 id）。
@@ -313,6 +368,7 @@ impl Engine {
             // 不删网关：目录（含子目录）下的网关移回根层级（dir_id 清空）
             for g in gws.iter_mut().filter(|g| in_scope(&g.dir_id)) {
                 g.dir_id = String::new();
+                g.updated_at = now_str(); // 归属变化属于配置修改，刷新修改时间
             }
         }
         dirs.retain(|d| !in_scope(&d.id));
@@ -337,6 +393,25 @@ impl Engine {
             .find(|g| g.id == id)
             .ok_or_else(|| "网关不存在，可能已被删除".to_string())?;
         gw.dir_id = dir_id.to_string();
+        gw.updated_at = now_str(); // 归属变化属于配置修改，刷新修改时间
+        self.persist_store(&dirs, &gws)?;
+        Ok(())
+    }
+
+    /// 更新网关的标签与备注（右键“详情”弹窗保存时调用）。
+    /// 只改元数据字段、不触碰运行时数据，因此运行中的网关也允许修改；
+    /// 修改时间随标签/备注一起刷新。
+    pub async fn update_gateway_meta(&self, id: &str, tags: &str, notes: &str) -> Result<(), String> {
+        // 目录列表仅落盘用：先克隆（锁即取即还），理由同 save_gateway
+        let dirs = self.inner.dirs.lock().await.clone();
+        let mut gws = self.inner.gateways.lock().await;
+        let gw = gws
+            .iter_mut()
+            .find(|g| g.id == id)
+            .ok_or_else(|| "网关不存在，可能已被删除".to_string())?;
+        gw.tags = tags.trim().to_string();
+        gw.notes = notes.trim().to_string();
+        gw.updated_at = now_str();
         self.persist_store(&dirs, &gws)?;
         Ok(())
     }
@@ -564,6 +639,9 @@ impl Engine {
                 .find(|p| p.id == platform_id)
                 .ok_or("平台不存在")?;
             p.strategy = strategy;
+            // 策略热更新属于配置修改：平台与网关的修改时间一起刷新
+            p.updated_at = now_str();
+            gw.updated_at = now_str();
             p.name.clone()
         };
         self.persist_store(&dirs, &gws)?;
@@ -910,6 +988,42 @@ fn load_store(dir: &PathBuf) -> GatewayStore {
         },
         Err(_) => GatewayStore::default(),
     }
+}
+
+/// 把整个 GatewayStore 写回 gateways.json（全量重写，简单可靠）
+fn persist_store_file(dir: &PathBuf, store: &GatewayStore) -> Result<(), String> {
+    let s = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    std::fs::write(gateways_path(dir), s)
+        .map_err(|e| format!("保存配置失败 {}: {}", gateways_path(dir).display(), e))
+}
+
+/// 当前时间字符串（yyyy-MM-dd HH:mm:ss），网关/平台的创建、修改时间用。
+/// 该格式可直接按字典序比较大小（同一年度内），存储与界面展示两用。
+fn now_str() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 为旧配置补齐创建/修改时间：网关或平台的时间字段为空时，把当前时间
+/// 同时赋给创建时间与修改时间。返回是否发生过补齐（调用方据此决定是否
+/// 落盘一次让时间固定下来，否则每次启动都会生成新的“回填时间”）。
+fn backfill_times(store: &mut GatewayStore) -> bool {
+    let now = now_str();
+    let mut changed = false;
+    for g in &mut store.gateways {
+        if g.created_at.is_empty() || g.updated_at.is_empty() {
+            g.created_at = now.clone();
+            g.updated_at = now.clone();
+            changed = true;
+        }
+        for p in &mut g.platforms {
+            if p.created_at.is_empty() || p.updated_at.is_empty() {
+                p.created_at = now.clone();
+                p.updated_at = now.clone();
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 /// 简易唯一 ID：时间戳 + 随机数（单机场景足够，无需 UUID 那么重）

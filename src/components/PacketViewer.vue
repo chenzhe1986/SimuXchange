@@ -18,6 +18,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import type { Backend } from "../backend";
 import type { PacketConn, PacketPage, PacketRecord } from "../types";
+import { useResizableModal } from "../resizableModal";
+
+/** 窗口默认/最小尺寸与订单弹窗保持一致（默认大窗、可拖拽、可最大化） */
+const { maximized, style, startResize, toggleMaximize } = useResizableModal({
+    defaultW: 1220,
+    defaultH: 660,
+    minW: 1000,
+    minH: 480,
+});
 
 const props = defineProps<{
     /** 后端通道（轮询拉报文用） */
@@ -155,10 +164,19 @@ onBeforeUnmount(() => clearInterval(pollTimer));
 <template>
     <!-- @mousedown.self：只有点在遮罩（弹窗外的暗区）才关闭 -->
     <div class="modal-mask" @mousedown.self="emit('close')">
-        <div class="modal pv-modal">
+        <div class="modal pv-modal" :class="{ maximized }" :style="style">
             <div class="modal-head">
                 <span>收发报文 · {{ platformName }}</span>
-                <button class="modal-close" @click="emit('close')">✕</button>
+                <span class="head-btns">
+                    <button
+                        class="modal-close btn-max"
+                        :title="maximized ? '还原窗口大小' : '最大化窗口'"
+                        @click="toggleMaximize"
+                    >
+                        {{ maximized ? "❐" : "⛶" }}
+                    </button>
+                    <button class="modal-close" @click="emit('close')">✕</button>
+                </span>
             </div>
             <div class="modal-body">
                 <!-- 平台信息 + 展示模式说明 -->
@@ -215,14 +233,32 @@ onBeforeUnmount(() => clearInterval(pollTimer));
                     </template>
                 </div>
             </div>
+            <!-- 右下角拖拽把手：调整弹窗大小（最小/最大尺寸由 useResizableModal 钳制） -->
+            <div class="resize-handle" title="拖动调整大小" @pointerdown="startResize"></div>
         </div>
     </div>
 </template>
 
 <style scoped>
+/* 弹窗尺寸由 useResizableModal 的 style 内联控制（与订单弹窗同默认/最小尺寸） */
 .pv-modal {
-    width: 900px;
-    max-width: 94vw;
+    position: relative;
+    max-width: none;
+    max-height: none;
+}
+
+/* 弹窗主体改为纵向伸缩：报文列表 flex:1 填满剩余高度，滚滚动只在列表内 */
+.pv-modal .modal-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.btn-max {
+    font-size: 13px;
+    padding: 2px 4px;
+    line-height: 1;
 }
 
 .pv-meta {
@@ -236,12 +272,12 @@ onBeforeUnmount(() => clearInterval(pollTimer));
 .pv-count {
     margin-left: auto;
     color: var(--text-faint);
-    font-size: 11px;
+    font-size: 12px;
 }
 
 .pv-list {
-    height: 60vh;
-    max-height: 520px;
+    flex: 1 1 auto;
+    min-height: 120px;
     overflow-y: auto;
     background: var(--bg-soft);
     border: 1px solid var(--border-soft);
@@ -267,10 +303,10 @@ onBeforeUnmount(() => clearInterval(pollTimer));
     gap: 8px;
     margin: 10px -10px 4px;
     padding: 6px 10px;
-    background: rgba(99, 102, 241, 0.1);
-    border-top: 1px dashed rgba(99, 102, 241, 0.35);
-    border-bottom: 1px solid rgba(99, 102, 241, 0.2);
-    font-size: 11.5px;
+    background: var(--accent-soft);
+    border-top: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    font-size: 12px;
     font-weight: 600;
     color: var(--text);
 }
@@ -289,7 +325,7 @@ onBeforeUnmount(() => clearInterval(pollTimer));
 }
 
 .pv-conn-id {
-    color: var(--accent, #818cf8);
+    color: var(--accent);
 }
 
 .pv-conn-head.dead .pv-conn-id {
@@ -307,14 +343,14 @@ onBeforeUnmount(() => clearInterval(pollTimer));
 }
 
 .pv-conn-state {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 500;
     padding: 0 7px;
     border-radius: 8px;
 }
 
 .pv-conn-state.on {
-    background: rgba(52, 211, 153, 0.15);
+    background: var(--green-soft);
     color: var(--green);
 }
 
@@ -326,7 +362,7 @@ onBeforeUnmount(() => clearInterval(pollTimer));
 .pv-conn-count {
     margin-left: auto;
     color: var(--text-faint);
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 400;
 }
 
@@ -356,9 +392,9 @@ onBeforeUnmount(() => clearInterval(pollTimer));
    与下方的解析字段（无衬线字体）形成字体差异 */
 .pv-item .pv-row {
     padding: 0;
-    font-size: 11.5px;
+    font-size: 12px;
 }
-/* 解析字段行：无衬线小字，字段块可换行排列；
+/* 解析字段：无衬线小字，字段块可换行排列；
    底色按收发方向区分（与方向标签同色系但更淡，不抢正文） */
 .pv-fields {
     display: flex;
@@ -368,22 +404,22 @@ onBeforeUnmount(() => clearInterval(pollTimer));
     margin: 2px 0 2px 56px;
     border-radius: 6px;
     font-family: inherit;
-    font-size: 11px;
+    font-size: 12px;
     line-height: 1.5;
 }
 
-/* 收到（recv）：绿色调底色 */
+/* 收到（recv）：绿色调底色（跟随主题 --green，浅色主题自动用加深绿） */
 .pv-fields.recv {
-    background: rgba(52, 211, 153, 0.07);
-    border-left: 2px solid rgba(52, 211, 153, 0.35);
+    background: var(--green-soft);
+    border-left: 2px solid color-mix(in srgb, var(--green) 35%, transparent);
 }
 
 /* 发送（send）：琥珀色调底色 */
 .pv-fields.send {
-    background: rgba(251, 191, 36, 0.07);
-    border-left: 2px solid rgba(251, 191, 36, 0.35);
+    background: var(--amber-soft);
+    border-left: 2px solid color-mix(in srgb, var(--amber) 35%, transparent);
 }
-/* 单个字段块：字段名统一着色（紫蓝），值保持正文色 */
+/* 单个字段块：字段名统一着色（主题色），值保持正文色 */
 .pf {
     display: inline-flex;
     gap: 4px;
@@ -392,7 +428,7 @@ onBeforeUnmount(() => clearInterval(pollTimer));
 }
 
 .pf-name {
-    color: var(--accent, #818cf8);
+    color: var(--accent);
     font-weight: 600;
 }
 
@@ -444,7 +480,7 @@ onBeforeUnmount(() => clearInterval(pollTimer));
 .pv-hex {
     min-width: 0;
     flex: 1;
-    font-size: 10.5px;
+    font-size: 11px;
     font-style: italic;
     word-break: break-all;
     white-space: normal;

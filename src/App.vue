@@ -15,13 +15,13 @@
 //   4. 网关/平台的增删改查、启停等操作
 //   5. 各种弹窗（网关命名、平台编辑、删除确认、赞赏）和 toast 提示
 // 平台卡片、平台编辑器、日志面板拆成了 components/ 下的三个子组件。
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import type { Backend } from "./backend";
 import { createBackend } from "./backend";
 import type { AppCfg, BackendEntry, DirConfig, GatewayCategory, GatewayConfig, GatewaySnapshot, LogEvent, PlatformConfig, Snapshot } from "./types";
 import { defaultPlatform, emptyStats, GATEWAY_CATEGORIES, gatewayCategoryLabel } from "./types";
-import { APP_VERSION, CHANGELOG } from "./changelog";
-import { checkForUpdate, type UpdateInfo } from "./updater";
+import { APP_VERSION, CHANGELOG, GITHUB_URL, GITEE_URL } from "./changelog";
+import { checkForUpdate, type UpdateInfo, type UpdateManifest } from "./updater";
 import PlatformCard from "./components/PlatformCard.vue";
 import PlatformEditor from "./components/PlatformEditor.vue";
 import LogPanel from "./components/LogPanel.vue";
@@ -69,11 +69,11 @@ const showReward = ref(false);
 /** 可选主题列表：id 对应 style.css 里的 data-theme 值，bg/accent 用于选择面板的色块预览。
  * 优雅白放第一位并作为默认主题（浅色更适合日常办公环境） */
 const THEMES = [
-    { id: "light", name: "优雅白", bg: "#f4f6fa", accent: "#3b82f6" },
-    { id: "dark", name: "经典黑", bg: "#0e1117", accent: "#4f8cff" },
-    { id: "blue", name: "现代蓝", bg: "#081c36", accent: "#38bdf8" },
-    { id: "gray", name: "深空灰", bg: "#1a1c20", accent: "#2dd4bf" },
-    { id: "purple", name: "极光紫", bg: "#0f0a1e", accent: "#c084fc" },
+    { id: "light", name: "优雅白", bg: "#f3f5f9", accent: "#2563eb" },
+    { id: "dark", name: "经典黑", bg: "#0b0f16", accent: "#67a4ff" },
+    { id: "blue", name: "现代蓝", bg: "#08162e", accent: "#45c7f8" },
+    { id: "gray", name: "深空灰", bg: "#17191d", accent: "#2dd4bf" },
+    { id: "purple", name: "极光紫", bg: "#100b20", accent: "#c08bfc" },
 ];
 
 /** localStorage 的存储键名 */
@@ -291,6 +291,12 @@ function onGlobalKeydown(e: KeyboardEvent) {
         if (dirEditor.show) dirEditor.show = false;
         if (delDirBox.show) delDirBox.show = false;
         if (moveGwBox.show) moveGwBox.show = false;
+        if (gwInfo.show) {
+            // 标签下拉面板先收起，第二次 Esc 再关整个弹窗
+            if (gwInfo.pickerOpen) gwInfo.pickerOpen = false;
+            else gwInfo.show = false;
+        }
+        if (pfInfo.show) pfInfo.show = false;
         if (pfEditor.show) pfEditor.show = false;
         if (pvViewer.show) pvViewer.show = false;
         if (ovViewer.show) ovViewer.show = false;
@@ -334,6 +340,14 @@ const showAbout = ref(false);
 const currentVersion = ref(APP_VERSION);
 /** 检查更新弹窗：发现新版本时弹出，携带服务器上的版本信息 */
 const updateBox = reactive({ show: false, info: null as UpdateInfo | null, busy: false, msg: "" });
+/**
+ * 更新已下载完成、等待"重启以更新"（顶栏关于按钮变红提示）。
+ * 下载完成后或启动时发现磁盘有待应用更新（pending.json）都会置真；
+ * 置真后点击红色按钮 → 覆盖并自动重启，直接关闭程序 → 覆盖、下次启动生效
+ */
+const updateReady = ref(false);
+/** 待应用的版本号（提示文案用） */
+const updateVersion = ref("");
 
 /** 读取应用版本号（仅 Tauri 环境有真实版本，失败时保持内置回退值） */
 async function loadVersion() {
@@ -346,14 +360,47 @@ async function loadVersion() {
     }
 }
 
-/** 执行一次更新检查：silent 为 true 时只有“发现新版”才弹窗（启动自动检查用） */
+/** 在系统浏览器里打开开源主页（“关于”弹窗的 GitHub / Gitee 链接）。
+ *  Tauri 环境 WebView 不允许直接跳转外部域名，交给桌面壳的 open_external
+ *  command 用系统命令调起默认浏览器；纯浏览器环境直接开新标签页 */
+async function openExternalUrl(url: string) {
+    if (isTauri) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        try {
+            await invoke("open_external", { url });
+        } catch (e) {
+            showToast(`打开链接失败：${e}`, true);
+        }
+    } else {
+        window.open(url, "_blank");
+    }
+}
+
+/** 执行一次更新检查：silent 为 true 时只有"发现新版"才弹窗（启动自动检查用） */
 async function runUpdateCheck(silent: boolean) {
     const url = updateUrl.value.trim();
     if (!url) {
-        if (!silent) showToast("未配置更新服务器地址，请在后端设置里填写", true);
+        if (!silent) showToast("未配置更新服务器地址", true);
         return;
     }
-    const info = await checkForUpdate(url, currentVersion.value);
+    let info: UpdateInfo | null = null;
+    if (isTauri) {
+        // 桌面端：检查由 Rust 壳完成（避免 WebView 跨域限制），返回完整清单
+        const { invoke } = await import("@tauri-apps/api/core");
+        try {
+            const manifest = (await invoke("check_update_server", {
+                url,
+                currentVersion: currentVersion.value,
+            })) as UpdateManifest | null;
+            if (manifest) info = { manifest };
+        } catch {
+            if (!silent) showToast("检查更新失败：无法连接更新服务器", true);
+            return;
+        }
+    } else {
+        // 浏览器环境：直接 fetch（仅调试用途，桌面端请用 exe）
+        info = await checkForUpdate(url, currentVersion.value);
+    }
     if (info) {
         updateBox.info = info;
         updateBox.msg = "";
@@ -363,23 +410,43 @@ async function runUpdateCheck(silent: boolean) {
     }
 }
 
-/** 下载新版本安装包并启动安装（由后端 command 执行，返回提示文案） */
-async function downloadUpdate() {
-    const info = updateBox.info;
-    if (!info || !info.installerUrl || updateBox.busy) return;
-    if (!isTauri) {
-        // 纯浏览器环境没有后端可下载，直接打开下载地址交给浏览器
-        window.open(info.installerUrl, "_blank");
-        updateBox.show = false;
+/** 点击顶栏"关于"按钮：有待应用的更新时走"重启并更新"，否则打开关于弹窗 */
+async function onAboutClick() {
+    if (!updateReady.value) {
+        showAbout.value = true;
         return;
     }
-    updateBox.busy = true;
-    updateBox.msg = "正在下载安装包…";
+    // 覆盖并比重启由 Rust 壳完成（启动更新器后退出主进程），这里提示后即可
     try {
         const { invoke } = await import("@tauri-apps/api/core");
-        updateBox.msg = (await invoke("download_update", { url: info.installerUrl })) as string;
-        showToast("已下载新版本，请按安装向导完成升级");
+        await invoke("apply_update", { restart: true });
+    } catch (e) {
+        showToast(`重启更新失败：${e}`, true);
+    }
+}
+
+/** 下载服务器发布目录里的全部文件（"发现新版本"弹窗的"下载更新"按钮触发） */
+async function downloadUpdate() {
+    const info = updateBox.info;
+    if (!info || updateBox.busy) return;
+    if (!isTauri) {
+        // 浏览器环境没有文件系统权限，无法整目录更新
+        showToast("浏览器环境不支持更新，请在桌面版（exe）中操作", true);
+        return;
+    }
+    const { invoke } = await import("@tauri-apps/api/core");
+    updateBox.busy = true;
+    updateBox.msg = "正在下载更新文件…";
+    try {
+        // 整目录下载到临时区（Rust 侧主 exe 最后下载 + 逐文件校验）
+        const pending = (await invoke("download_update_files", {
+            url: updateUrl.value.trim(),
+            manifest: info.manifest,
+        })) as { version: string };
+        updateVersion.value = pending.version;
+        updateReady.value = true;
         updateBox.show = false;
+        showToast(`新版本 v${pending.version} 已下载完成，点右上角「↻ 重启以更新」，或关闭程序后下次启动生效`);
     } catch (e) {
         updateBox.msg = `下载失败：${e}`;
     } finally {
@@ -488,16 +555,107 @@ const globalStats = computed(() => {
     return { ...total, conns };
 });
 
+/** 顶栏的网关/平台数量：分别给出总数与已启动数，展示为“已启动/总数”。
+ *  网关的启动以网关快照 running 为准；平台的启动以其监听端口
+ *  （PlatformSnapshot.listening）为准——网关运行中平台都在监听 */
+const gwPlatformCounts = computed(() => {
+    let gwTotal = 0;
+    let gwRunning = 0;
+    let pfTotal = 0;
+    let pfRunning = 0;
+    for (const gw of snapshot.value.gateways) {
+        gwTotal += 1;
+        if (gw.running) gwRunning += 1;
+        for (const p of gw.platforms) {
+            pfTotal += 1;
+            if (p.listening) pfRunning += 1;
+        }
+    }
+    return { gwTotal, gwRunning, pfTotal, pfRunning };
+});
+
 /** 在网关快照里找某个平台的运行状态（传给 PlatformCard 显示） */
 function platformSnapshotOf(gw: GatewaySnapshot, platformId: string) {
     return gw.platforms.find((p) => p.platformId === platformId);
 }
 
+// ---------- 网关标签与筛选 ----------
+// 网关的标签存后端（update_gateway_meta 命令），配置里是逗号分隔的
+// 字符串（后端不动，兼容旧数据）；前端一律按数组使用。侧栏顶部有
+// 一排筛选 chip（全部 / 无标签 / 各标签），点选后侧栏只显示带该标签
+// 的网关。筛选纯前端展示逻辑：只影响 sidebarRows 的组装（含目录行的
+// 网关计数与空目录隐藏），不改任何配置。
+// 标签的“信息”（颜色）由标签名哈希成色相值得出，不单独存储——
+// 因此没有任何网关使用的标签自然不残留任何信息，无需清理。
+
+/** 当前选中的筛选标签："" = 全部；TAG_NONE = 只看无标签；其余 = 标签原文 */
+const tagFilter = ref("");
+/** 无标签筛选的哨兵值（后端不产生这个名字的标签，不会与真实标签撞车） */
+const TAG_NONE = "__none__";
+
+/** 把网关配置的标签串（逗号分隔）拆成去空格、去空项的标签数组 */
+function tagOf(cfg: GatewayConfig): string[] {
+    return cfg.tags.split(",").map((t) => t.trim()).filter(Boolean);
+}
+
+/** 全部网关用到的标签（去重、按中文习惯排序），驱动筛选 chip 渲染 */
+const allTags = computed<string[]>(() => {
+    const set = new Set<string>();
+    for (const gw of snapshot.value.gateways) {
+        for (const t of tagOf(gw.config)) set.add(t);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, "zh"));
+});
+
+/** 是否存在无标签的网关（决定「无标签」chip 是否显示） */
+const hasNoTagGw = computed(() => snapshot.value.gateways.some((g) => tagOf(g.config).length === 0));
+
+/** 网关是否通过当前标签筛选（没选标签 = 全部通过） */
+function gwPassTagFilter(gw: GatewaySnapshot): boolean {
+    if (!tagFilter.value) return true;
+    const tags = tagOf(gw.config);
+    if (tagFilter.value === TAG_NONE) return tags.length === 0;
+    return tags.includes(tagFilter.value);
+}
+
+// ---------- 标签色块 ----------
+// 每个标签固定对应一个颜色（由标签名哈希成色相值）：同一标签永远同色，
+// 不用持久化任何标签信息——“没有网关使用时，标签的所有信息自动消失”。
+// 用 HSL 色相环而不是固定色板：几十个标签也能均匀撒开、互不撞色。
+
+/** 标签名 → 色相（0~359）。djb2 哈希取模，同名恒同色；360 个色相位
+ *  让两个标签撞色的概率趋近于零（固定色板索引容易相邻撞色） */
+function tagHueOf(name: string): number {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return h % 360;
+}
+
+/** 标签色块的常规外观：浅色底 + 同色文字（HSL 带透明度，深浅主题通用） */
+function tagStyleOf(name: string) {
+    const hue = tagHueOf(name);
+    return {
+        background: `hsl(${hue} 55% 45% / 0.12)`,
+        color: `hsl(${hue} 55% 45%)`,
+        borderColor: `hsl(${hue} 55% 45% / 0.35)`,
+    };
+}
+
+/** 筛选 chip 的选中态：实底 + 白字（与未选中的浅色块形成对比） */
+function tagChipStyleOn(name: string) {
+    const hue = tagHueOf(name);
+    return {
+        background: `hsl(${hue} 55% 45%)`,
+        borderColor: `hsl(${hue} 55% 45%)`,
+        color: "#fff",
+    };
+}
+
 // ---------- 网关目录 ----------
 // 目录（文件夹）定义在后端 gateways.json 里、随快照每秒下发；而“哪些目录
-// 被折叠”属于个人界面偏好，存前端 localStorage（键 simx-dir-collapsed，
-// 内容是 { 目录id: true } 表），没有记录的目录一律视为展开——这样新用户
-// 或清了缓存的用户看到的是全展开的完整目录树，与后端目录数据保持一致。
+// 被折叠”属于个人界面偏好，存 localStorage（键 simx-dir-collapsed，
+// 内容是 { 目录id: true } 表），没有记录的目录一律按展开处理——这样新用户
+// 或清了缓存的用户看到的是全展开的目录树，与后端目录数据保持一致。
 
 /** localStorage 的存储键名 */
 const DIR_COLLAPSE_KEY = "simx-dir-collapsed";
@@ -530,14 +688,19 @@ type SidebarRow =
     | { kind: "dir"; dir: DirConfig; depth: number; count: number }
     | { kind: "gw"; gw: GatewaySnapshot };
 
-/** 把快照里的目录+网关组装成侧栏行列表（顺序：根级网关 → 各目录[子目录 → 网关]） */
+/** 把快照里的目录+网关组装成侧栏行列表（顺序：根级网关 → 各目录[子目录 → 网关]）。
+ *  标签筛选激活时：网关行只输出通过的；目录行只统计过滤后可见的网关数，
+ *  一个可见网关都没有的目录（含其子目录）整棵树隐藏 */
 const sidebarRows = computed<SidebarRow[]>(() => {
-    const inDir = (dirId: string) => snapshot.value.gateways.filter((g) => g.config.dirId === dirId);
+    const inDir = (dirId: string) =>
+        snapshot.value.gateways.filter((g) => g.config.dirId === dirId && gwPassTagFilter(g));
     const knownDirIds = new Set(snapshot.value.dirs.map((d) => d.id));
     const rows: SidebarRow[] = [];
     // 根层级网关：dirId 为空，或指向的目录已被删除（防御性兜底，正常流程不会出现）
     for (const gw of snapshot.value.gateways) {
-        if (!gw.config.dirId || !knownDirIds.has(gw.config.dirId)) rows.push({ kind: "gw", gw });
+        if ((!gw.config.dirId || !knownDirIds.has(gw.config.dirId)) && gwPassTagFilter(gw)) {
+            rows.push({ kind: "gw", gw });
+        }
     }
     // 目录区块：子目录排在网关前面（与文件管理器“文件夹优先”的习惯一致）
     for (const d of snapshot.value.dirs) {
@@ -545,10 +708,13 @@ const sidebarRows = computed<SidebarRow[]>(() => {
         const subs = snapshot.value.dirs.filter((s) => s.parentId === d.id);
         // 目录行上的网关数 = 目录直属 + 子目录直属（给用户一个“里面有多少”的预期）
         const count = inDir(d.id).length + subs.reduce((n, s) => n + inDir(s.id).length, 0);
+        if (!count) continue; // 没有可见网关的目录整棵隐藏（含其子目录）
         rows.push({ kind: "dir", dir: d, depth: 0, count });
         if (collapsedDirs.value[d.id]) continue; // 折叠的目录不输出内部行
         for (const s of subs) {
-            rows.push({ kind: "dir", dir: s, depth: 1, count: inDir(s.id).length });
+            const subCount = inDir(s.id).length;
+            if (!subCount) continue;
+            rows.push({ kind: "dir", dir: s, depth: 1, count: subCount });
             if (collapsedDirs.value[s.id]) continue;
             for (const gw of inDir(s.id)) rows.push({ kind: "gw", gw });
         }
@@ -573,6 +739,109 @@ const delDirBox = reactive({
 
 /** 移动网关弹窗：列出根层级与全部目录，点选目标即移动 */
 const moveGwBox = reactive({ show: false, gatewayId: "", gatewayName: "" });
+
+// ---------- 网关/平台“详情”弹窗（右键菜单入口） ----------
+// 展示创建/修改时间等后端维护的信息。网关详情里标签与备注可编辑（走
+// update_gateway_meta 命令——它只写配置不动运行时，所以网关运行中也能保存）；
+// 平台详情纯只读（平台的时间是配置属性，修改会随平台编辑整体保存）。
+
+/**
+ * 网关详情：只记住 id 与表单草稿，展示用的最新配置从快照里现查。
+ * 标签草稿是数组（界面按色块编辑），保存时才拼回逗号字符串写后端。
+ */
+const gwInfo = reactive({
+    show: false,
+    id: "",
+    tagList: [] as string[],
+    notes: "",
+    /** 「＋ 添加标签」下拉面板是否展开 */
+    pickerOpen: false,
+    /** 下拉面板里“新建标签”输入框的草稿 */
+    newTag: "",
+});
+
+/** 平台详情：只读展示，无需后端调用 */
+const pfInfo = reactive({ show: false, gwName: "", platform: null as PlatformConfig | null });
+
+/** 打开网关详情弹窗：以当前快照里的配置预填标签与备注 */
+function openGwInfo(gw: GatewaySnapshot) {
+    gwInfo.id = gw.config.id;
+    gwInfo.tagList = tagOf(gw.config);
+    gwInfo.notes = gw.config.notes ?? "";
+    gwInfo.pickerOpen = false;
+    gwInfo.newTag = "";
+    gwInfo.show = true;
+}
+
+/** 详情弹窗展示的数据源：从每秒快照里现查，弹窗开着时配置被改也会跟着刷新 */
+const infoGw = computed(() => snapshot.value.gateways.find((g) => g.config.id === gwInfo.id) ?? null);
+
+/** 下拉面板的候选标签：全部网关已用的标签，去掉本网关已加的 */
+const candidateTags = computed(() => allTags.value.filter((t) => !gwInfo.tagList.includes(t)));
+
+/** 弹窗里“＋ 添加标签”用的输入框元素（展开后自动聚焦） */
+const tagInputEl = ref<HTMLInputElement | null>(null);
+
+/** 展开/收起标签下拉面板；展开后聚焦输入框，可直接打字新建 */
+/** 展开/收起标签下拉面板（展开后聚焦输入框，可直接回车新建） */
+function toggleTagPicker() {
+    gwInfo.pickerOpen = !gwInfo.pickerOpen;
+    if (gwInfo.pickerOpen) void nextTick(() => tagInputEl.value?.focus());
+}
+
+/** 下拉面板输入框回车：中文输入法组词中的回车不算提交（否则选字会误新建标签） */
+function onTagNewEnter(e: KeyboardEvent) {
+    if (!e.isComposing) addGwTag(gwInfo.newTag);
+}
+
+/**
+ * 把标签加入草稿：被点选（已有标签）或回车（输入新名）都会走到这里。
+ * 逗号是后端的标签分隔符，输入里出现就剔除；重名或空名直接忽略。
+ */
+function addGwTag(name: string) {
+    const t = name.replace(/[,，]/g, "").trim();
+    if (!t || gwInfo.tagList.includes(t)) return;
+    gwInfo.tagList.push(t);
+    gwInfo.newTag = "";
+}
+
+/** 从草稿里移除标签（点一下已添加的色块即移除，不弹确认） */
+function removeGwTag(name: string) {
+    const i = gwInfo.tagList.indexOf(name);
+    if (i >= 0) gwInfo.tagList.splice(i, 1);
+}
+
+/** 保存网关标签与备注（成功后再拉一次快照，让侧栏标签与时间立即刷新）。
+ *  注意这里不走 call() 而是直接 dispatch 判 resp.ok：update_gateway_meta
+ *  成功时后端返回 { ok: true, data: null }，call() 会把 null 数据当失败 */
+async function saveGwInfo() {
+    const r = await backend?.dispatch({
+        cmd: "update_gateway_meta",
+        id: gwInfo.id,
+        tags: gwInfo.tagList.join(","),
+        notes: gwInfo.notes,
+    });
+    if (r && r.ok) {
+        gwInfo.show = false;
+        await refresh();
+        showToast("网关标签与备注已保存");
+    } else {
+        showToast(r?.error ?? "保存失败", true);
+    }
+}
+
+/** 打开平台详情弹窗（纯只读） */
+function openPfInfo(gwName: string, p: PlatformConfig) {
+    pfInfo.platform = p;
+    pfInfo.gwName = gwName;
+    pfInfo.show = true;
+}
+
+/** 由目录 id 查名称（详情弹窗“所属目录”行用；找不到按根层级兜底） */
+function dirNameOf(dirId: string): string {
+    if (!dirId) return "根层级";
+    return snapshot.value.dirs.find((d) => d.id === dirId)?.name ?? "根层级";
+}
 
 /** 拖拽中的网关 id（网关行 dragstart 记录，目录行 drop 时消费） */
 const dragGwId = ref("");
@@ -1141,6 +1410,8 @@ function gwCtxMenu(e: MouseEvent, gw: GatewaySnapshot) {
         { label: "＋ 添加平台", disabled: gw.running, action: openNewPlatform },
         { label: "重命名网关", action: openRenameGateway },
         { label: "重置统计", action: resetStats },
+        // 详情弹窗：查看创建/修改时间，编辑标签与备注（运行中也可保存）
+        { label: "查看详情/标签/备注", action: () => openGwInfo(gw) },
         // 移动归属不触碰运行时，运行中网关也可移动；一个目录都没有时无从移起
         { label: "移动到目录…", disabled: !snapshot.value.dirs.length, action: () => openMoveGateway(gw) },
         { label: "", divider: true },
@@ -1165,6 +1436,8 @@ function platformCtxMenu(e: MouseEvent, p: PlatformConfig) {
         // 运行中也可编辑：保存时只热更新“模拟回报策略与回报延迟”，
         // 其余字段（端口等）由后端拦截并提示需停止网关后修改
         { label: "编辑平台", action: () => openEditPlatform(p) },
+        // 详情弹窗：只读展示创建/修改时间（时间由后端维护，不支持直接改）
+        { label: "详情", action: () => openPfInfo(selectedGw.value?.config.name ?? "", p) },
         {
             label: "复制监听地址",
             action: () => {
@@ -1247,7 +1520,21 @@ onMounted(async () => {
     document.addEventListener("contextmenu", onGlobalContextMenu);
     document.addEventListener("keydown", onGlobalKeydown);
     await loadVersion();
-    // 启动 3 秒后静默检查一次更新：不打扰使用，只有“发现新版”才弹窗
+    // 启动时恢复”待应用更新”状态（上次下载完成但未点重启更新的情况），
+    // 让顶栏红色"重启以更新"提示在重启程序后仍然显示
+    if (isTauri) {
+        try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const pending = (await invoke("get_pending_update")) as { version: string } | null;
+            if (pending) {
+                updateVersion.value = pending.version;
+                updateReady.value = true;
+            }
+        } catch {
+            // 读取失败不阻塞启动（不显示红色按钮即可）
+        }
+    }
+    // 启动 3 秒后静默检查一次更新：不打扰使用，只有"发现新版"才弹窗
     setTimeout(() => void runUpdateCheck(true), 3000);
 });
 
@@ -1280,11 +1567,24 @@ onBeforeUnmount(() => {
                 <span class="brand-sub" data-tauri-drag-region>模拟撮合网关</span>
             </div>
             <div class="topbar-stats" data-tauri-drag-region>
-                <div class="tstat" data-tauri-drag-region><span class="tstat-v num">{{ globalStats.conns }}</span><span class="tstat-l">连接</span></div>
-                <div class="tstat" data-tauri-drag-region><span class="tstat-v num">{{ globalStats.orders }}</span><span class="tstat-l">委托</span></div>
-                <div class="tstat" data-tauri-drag-region><span class="tstat-v num c-blue">{{ globalStats.acks }}</span><span class="tstat-l">确认</span></div>
-                <div class="tstat" data-tauri-drag-region><span class="tstat-v num c-green">{{ globalStats.trades }}</span><span class="tstat-l">成交</span></div>
-                <div class="tstat" data-tauri-drag-region><span class="tstat-v num c-red">{{ globalStats.orderRejects }}</span><span class="tstat-l">拒单</span></div>
+                <!-- 四组全局统计：中文描述在前（正常字号黑色）、数字在后按类型着色——
+                     网关一路用蓝色、平台一路用绿色；委托默认色、确认蓝、成交绿、拒单红 -->
+                <div class="tstat" title="总网关数 / 总平台数" data-tauri-drag-region>
+                    <span class="tstat-l">总网关/平台</span>
+                    <span class="tstat-v num"><span class="c-blue">{{ gwPlatformCounts.gwTotal }}</span>/<span class="c-green">{{ gwPlatformCounts.pfTotal }}</span></span>
+                </div>
+                <div class="tstat" title="已启动网关数 / 已启动平台数" data-tauri-drag-region>
+                    <span class="tstat-l">已启动网关/平台</span>
+                    <span class="tstat-v num"><span class="c-blue">{{ gwPlatformCounts.gwRunning }}</span>/<span class="c-green">{{ gwPlatformCounts.pfRunning }}</span></span>
+                </div>
+                <div class="tstat" title="当前已连接的柜台数" data-tauri-drag-region>
+                    <span class="tstat-l">已连接</span>
+                    <span class="tstat-v num">{{ globalStats.conns }}</span>
+                </div>
+                <div class="tstat" title="委托 / 确认 / 成交 / 拒单（所有平台汇总）" data-tauri-drag-region>
+                    <span class="tstat-l">委托/确认/成交/拒单</span>
+                    <span class="tstat-v num">{{ globalStats.orders }}<span class="c-blue">/{{ globalStats.acks }}</span><span class="c-green">/{{ globalStats.trades }}</span><span class="c-red">/{{ globalStats.orderRejects }}</span></span>
+                </div>
             </div>
             <div class="topbar-right">
                 <button class="badge" :class="backendConnected ? 'green' : 'red'" title="点击切换后端" @click="openBackendCfg">
@@ -1292,7 +1592,14 @@ onBeforeUnmount(() => {
                     {{ badgeText }}
                 </button>
                 <button class="reward-btn" title="赞赏作者" @click="showReward = true">♥ 赞赏</button>
-                <button class="about-btn" title="版本信息与更新" @click="showAbout = true">ⓘ 关于</button>
+                <button
+                    class="about-btn"
+                    :class="{ 'update-ready': updateReady }"
+                    :title="updateReady ? '新版本 v' + updateVersion + ' 已下载，点击重启并更新' : '版本信息与更新'"
+                    @click="onAboutClick"
+                >
+                    {{ updateReady ? "↻ 重启以更新" : "ⓘ 关于" }}
+                </button>
                 <!-- 配色主题按钮：点击展开/收起选择面板 -->
                 <button class="win-btn theme-btn" title="界面配色" @click="showThemePicker = !showThemePicker">◐</button>
                 <div v-if="isTauri" class="win-controls">
@@ -1311,6 +1618,24 @@ onBeforeUnmount(() => {
                 <div class="side-head">
                     <span>交易网关</span>
                     <button class="btn sm primary" @click="openNewGateway">＋ 新建</button>
+                </div>
+                <!-- 标签筛选条：点选后侧栏只显示带该标签的网关（本地过滤，不改配置） -->
+                <div class="tag-bar" v-if="snapshot.gateways.length">
+                    <span class="tag-chip" :class="{ on: !tagFilter }" @click="tagFilter = ''">全部</span>
+                    <span
+                        v-if="hasNoTagGw"
+                        class="tag-chip"
+                        :class="{ on: tagFilter === TAG_NONE }"
+                        @click="tagFilter = TAG_NONE"
+                    >无标签</span>
+                    <span
+                        v-for="t in allTags"
+                        :key="t"
+                        class="tag-chip"
+                        :class="{ on: tagFilter === t }"
+                        :style="tagFilter === t ? tagChipStyleOn(t) : tagStyleOf(t)"
+                        @click="tagFilter = t"
+                    >{{ t }}</span>
                 </div>
                 <div class="gw-list" @dragover="onListDragOver" @drop="onListDrop">
                     <!-- 扁平行列表：目录行（点击折叠/展开、可拖入网关）与网关行交替输出 -->
@@ -1346,6 +1671,16 @@ onBeforeUnmount(() => {
                             <div class="gw-item-main">
                                 <div class="gw-item-name">{{ row.gw.config.name }}</div>
                                 <div class="gw-item-sub">{{ gatewayCategoryLabel(row.gw.config.category ?? "sz") }} · {{ row.gw.config.platforms.length }} 个平台</div>
+                                <!-- 网关行附带标签（与顶部筛选条联动，色块展示让人一眼分清多个标签） -->
+                                <div v-if="tagOf(row.gw.config).length" class="gw-item-tags">
+                                    <span
+                                        v-for="t in tagOf(row.gw.config)"
+                                        :key="t"
+                                        class="tag-pill sm"
+                                        :style="tagStyleOf(t)"
+                                        :title="t"
+                                    >{{ t }}</span>
+                                </div>
                             </div>
                             <span class="badge" :class="row.gw.running ? 'green' : 'gray'">
                                 {{ row.gw.running ? "运行" : "停止" }}
@@ -1353,7 +1688,9 @@ onBeforeUnmount(() => {
                         </div>
                     </template>
                     <div v-if="!sidebarRows.length" class="gw-empty">
-                        暂无网关<br />点击「新建」创建第一个交易网关
+                        <!-- 筛选激活时空态别误导用户去“新建”——是筛选结果为空 -->
+                        <template v-if="tagFilter">没有匹配该标签的网关<br />点上方「全部」恢复显示</template>
+                        <template v-else>暂无网关<br />点击「新建」创建第一个交易网关</template>
                     </div>
                 </div>
             </aside>
@@ -1535,6 +1872,98 @@ onBeforeUnmount(() => {
             </div>
         </div>
 
+        <!-- 网关详情弹窗（侧栏网关右键“查看详情/标签/备注”）：
+             时间只读展示，标签与备注可编辑（保存走 update_gateway_meta） -->
+        <div v-if="gwInfo.show" class="modal-mask" @mousedown.self="gwInfo.show = false">
+            <div class="modal" style="width: 460px">
+                <div class="modal-head">
+                    <span>网关详情</span>
+                    <button class="modal-close" @click="gwInfo.show = false">✕</button>
+                </div>
+                <div class="modal-body" @mousedown="gwInfo.pickerOpen = false">
+                    <!-- 基本信息与时间：从每秒快照里现查，避免用打开弹窗时的旧数据 -->
+                    <div class="info-grid">
+                        <div class="info-row"><span class="info-label">名称</span><span>{{ infoGw?.config.name ?? "—" }}</span></div>
+                        <div class="info-row"><span class="info-label">分类</span><span>{{ gatewayCategoryLabel(infoGw?.config.category ?? "sz") }}</span></div>
+                        <div class="info-row"><span class="info-label">所属目录</span><span>{{ dirNameOf(infoGw?.config.dirId ?? "") }}</span></div>
+                        <div class="info-row"><span class="info-label">状态</span><span>{{ infoGw?.running ? "运行中" : "已停止" }}</span></div>
+                        <div class="info-row"><span class="info-label">创建时间</span><span>{{ infoGw?.config.createdAt || "—" }}</span></div>
+                        <div class="info-row"><span class="info-label">修改时间</span><span>{{ infoGw?.config.updatedAt || "—" }}</span></div>
+                    </div>
+                    <hr class="info-hr" />
+                    <!-- 标签编辑器：已加标签 = 可点击移除的色块；「＋ 添加标签」展开
+                         下拉面板，点选现有标签或输入新名回车即可添加 -->
+                    <div class="field" @mousedown.stop>
+                        <label>标签（点击已添加的标签可移除，侧栏可按标签筛选）</label>
+                        <div class="tag-editor">
+                            <span
+                                v-for="t in gwInfo.tagList"
+                                :key="t"
+                                class="tag-pill remov"
+                                :style="tagStyleOf(t)"
+                                :title="`点击移除「${t}」`"
+                                @click="removeGwTag(t)"
+                            >{{ t }}<i class="tag-pill-x">✕</i></span>
+                            <button class="btn sm ghost" :class="{ on: gwInfo.pickerOpen }" @click="toggleTagPicker">＋ 添加标签</button>
+                                <!-- 下拉面板必须放在 .tag-editor 内部：它用绝对定位（top:100%），
+                                     定位基准是最近的有 position 的祖先 .tag-editor；
+                                     若放在外面，基准连到视口，面板会掉到窗口外看不见 -->
+                                <div v-if="gwInfo.pickerOpen" class="tag-picker">
+                                    <input
+                                        ref="tagInputEl"
+                                        v-model="gwInfo.newTag"
+                                        class="tag-picker-input"
+                                        placeholder="输入标签名，回车新建"
+                                        @keydown.enter="onTagNewEnter"
+                                    />
+                                    <div class="tag-picker-tip">点击已有标签快速添加：</div>
+                                    <div class="tag-picker-list">
+                                        <span
+                                            v-for="t in candidateTags"
+                                            :key="t"
+                                            class="tag-pill add"
+                                            :style="tagStyleOf(t)"
+                                            @click="addGwTag(t)"
+                                        >＋ {{ t }}</span>
+                                        <span v-if="!candidateTags.length" class="tag-picker-empty">没有别的标签，直接在输入框新建</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    <div class="field" style="margin-top: 10px">
+                        <label>备注</label>
+                        <textarea v-model="gwInfo.notes" rows="4" placeholder="记录网关用途、对端柜台、注意事项等"></textarea>
+                    </div>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn" @click="gwInfo.show = false">关闭</button>
+                    <button class="btn primary" @click="saveGwInfo">保存</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 平台详情弹窗（平台右键“详情”）：只读展示后端维护的时间等属性 -->
+        <div v-if="pfInfo.show" class="modal-mask" @mousedown.self="pfInfo.show = false">
+            <div class="modal" style="width: 420px">
+                <div class="modal-head">
+                    <span>平台详情</span>
+                    <button class="modal-close" @click="pfInfo.show = false">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div class="info-grid">
+                        <div class="info-row"><span class="info-label">所属网关</span><span>{{ pfInfo.gwName || "—" }}</span></div>
+                        <div class="info-row"><span class="info-label">名称</span><span>{{ pfInfo.platform?.name ?? "—" }}</span></div>
+                        <div class="info-row"><span class="info-label">监听地址</span><span>{{ pfInfo.platform?.listenHost }}:{{ pfInfo.platform?.port }}</span></div>
+                        <div class="info-row"><span class="info-label">创建时间</span><span>{{ pfInfo.platform?.createdAt || "—" }}</span></div>
+                        <div class="info-row"><span class="info-label">修改时间</span><span>{{ pfInfo.platform?.updatedAt || "—" }}</span></div>
+                    </div>
+                </div>
+                <div class="modal-foot">
+                    <button class="btn" @click="pfInfo.show = false">关闭</button>
+                </div>
+            </div>
+        </div>
+
         <!-- 平台编辑弹窗 -->
         <PlatformEditor
             v-if="pfEditor.show"
@@ -1707,6 +2136,11 @@ onBeforeUnmount(() => {
                         <li v-for="(n, i) in CHANGELOG[0]?.notes ?? []" :key="i">{{ n }}</li>
                     </ul>
                     <p class="about-license">本项目遵循 GPL 开源协议</p>
+                    <!-- 开源主页：点击在系统浏览器中打开（见 openExternalUrl） -->
+                    <div class="about-links">
+                        <a class="about-link" title="GitHub" @click="openExternalUrl(GITHUB_URL)">GitHub</a>
+                        <a class="about-link" title="Gitee" @click="openExternalUrl(GITEE_URL)">Gitee</a>
+                    </div>
                 </div>
                 <div class="modal-foot">
                     <button class="btn ghost" @click="showAbout = false">关闭</button>
@@ -1715,7 +2149,7 @@ onBeforeUnmount(() => {
             </div>
         </div>
 
-        <!-- 发现新版本弹窗：版本号 + 更新说明 + 下载安装 -->
+        <!-- 发现新版本弹窗：版本号 + 下载更新 -->
         <div v-if="updateBox.show" class="modal-mask" @mousedown.self="updateBox.show = false">
             <div class="modal" style="width: 420px">
                 <div class="modal-head">
@@ -1724,17 +2158,18 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="modal-body">
                     <p class="hint" style="margin-bottom: 8px">当前版本 v{{ currentVersion }}</p>
-                    <ul class="about-notes" v-if="updateBox.info?.manifest.notes?.length">
-                        <li v-for="(n, i) in updateBox.info?.manifest.notes" :key="i">{{ n }}</li>
-                    </ul>
                     <p v-if="updateBox.msg" class="update-msg">{{ updateBox.msg }}</p>
                 </div>
                 <div class="modal-foot">
                     <button class="btn" :disabled="updateBox.busy" @click="updateBox.show = false">
                         以后再说
                     </button>
-                    <button class="btn primary" :disabled="updateBox.busy || !updateBox.info?.installerUrl" @click="downloadUpdate">
-                        {{ updateBox.busy ? "下载中…" : "下载并安装" }}
+                    <button
+                        class="btn primary"
+                        :disabled="updateBox.busy || !updateBox.info?.manifest.files?.length"
+                        @click="downloadUpdate"
+                    >
+                        {{ updateBox.busy ? "下载更新中…" : "下载更新" }}
                     </button>
                 </div>
             </div>
@@ -1823,7 +2258,7 @@ onBeforeUnmount(() => {
 }
 
 .brand-sub {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--text-faint);
 }
 
@@ -1844,8 +2279,11 @@ onBeforeUnmount(() => {
 }
 
 .tstat-l {
-    font-size: 11px;
-    color: var(--text-faint);
+    /* 与左侧品牌名 SimuXchange 同款字体（同样的字号/粗细/字距） */
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: var(--text);
 }
 
 .c-blue {
@@ -1871,7 +2309,7 @@ onBeforeUnmount(() => {
     border: 1px solid var(--border);
     background: transparent;
     color: #f472b6;
-    font-size: 11.5px;
+    font-size: 12px;
     padding: 4px 10px;
     border-radius: 30px;
     cursor: pointer;
@@ -1888,7 +2326,7 @@ onBeforeUnmount(() => {
     border: 1px solid var(--border);
     background: transparent;
     color: var(--accent);
-    font-size: 11.5px;
+    font-size: 12px;
     padding: 4px 10px;
     border-radius: 30px;
     cursor: pointer;
@@ -1898,6 +2336,29 @@ onBeforeUnmount(() => {
 .about-btn:hover {
     border-color: var(--accent);
     background: var(--accent-soft);
+}
+
+/* "重启以更新"状态：红色实体 + 脉冲光圈，提醒用户点击（醒目但不挡界面） */
+.about-btn.update-ready {
+    background: #e03636;
+    border-color: #e03636;
+    color: #fff;
+    font-weight: 600;
+    animation: update-pulse 1.6s ease-out infinite;
+}
+
+.about-btn.update-ready:hover {
+    background: #c82e2e;
+    border-color: #c82e2e;
+}
+
+@keyframes update-pulse {
+    0%, 100% {
+        box-shadow: 0 0 0 0 rgba(224, 54, 54, 0.45);
+    }
+    50% {
+        box-shadow: 0 0 0 7px rgba(224, 54, 54, 0);
+    }
 }
 
 /* 关于弹窗 */
@@ -1925,7 +2386,7 @@ onBeforeUnmount(() => {
 
 .about-sec {
     text-align: left;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--text-faint);
     margin-top: 14px;
     margin-bottom: 4px;
@@ -1935,17 +2396,45 @@ onBeforeUnmount(() => {
     text-align: left;
     list-style: disc;
     padding-left: 18px;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--text-dim);
     line-height: 1.9;
 }
 
 .about-license {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-faint);
     margin-top: 12px;
     padding-top: 10px;
     border-top: 1px dashed var(--border);
+}
+
+/* 开源主页链接（GitHub / Gitee）：胶囊造型的小徽章，hover 变主题色实底，
+   点击由 openExternalUrl 在系统浏览器中打开（WebView 不能直接跳外链） */
+.about-links {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.about-link {
+    font-size: 12px;
+    line-height: 1;
+    padding: 7px 18px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.about-link:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
 }
 
 /* 更新弹窗里的下载状态提示 */
@@ -1979,7 +2468,7 @@ onBeforeUnmount(() => {
 
 .win-btn.close:hover {
     background: var(--red);
-    color: #fff;
+    color: var(--on-danger);
 }
 
 /* 配色主题选择面板（固定在顶栏配色按钮下方） */
@@ -1997,7 +2486,7 @@ onBeforeUnmount(() => {
 }
 
 .theme-pop-title {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-faint);
     padding: 4px 9px 6px;
 }
@@ -2041,7 +2530,7 @@ onBeforeUnmount(() => {
 
 .theme-name {
     flex: 1;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--text);
 }
 
@@ -2056,7 +2545,7 @@ onBeforeUnmount(() => {
 }
 
 .reward-text {
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--text-dim);
     line-height: 1.7;
     margin-bottom: 12px;
@@ -2072,7 +2561,7 @@ onBeforeUnmount(() => {
 }
 
 .reward-tip {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--text-faint);
     margin-top: 10px;
 }
@@ -2131,7 +2620,7 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: space-between;
     padding: 12px 14px;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-dim);
 }
@@ -2143,6 +2632,159 @@ onBeforeUnmount(() => {
     display: flex;
     flex-direction: column;
     gap: 4px;
+}
+
+/* 标签筛选条（侧栏顶部）：一排 chip，点选后侧栏只显示带该标签的网关。
+   标签 chip 的颜色由行内 style 按标签名动态注入（tagStyleOf / tagChipStyleOn）；
+   这里只定义尺寸、圆角等公共外观 */
+.tag-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding: 0 12px 8px;
+}
+
+.tag-chip {
+    font-size: 12px;
+    line-height: 1;
+    padding: 4px 9px;
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s, color 0.12s, border-color 0.12s, filter 0.12s;
+}
+
+.tag-chip:hover {
+    filter: brightness(1.12);
+}
+
+/* 选中态：实底 + 白字，一眼看出当前筛的是哪个标签
+  （「全部 / 无标签」chip 走主题色；标签 chip 的颜色由行内样式注入） */
+.tag-chip.on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+}
+
+/* 标签色块（侧栏网关行 / 详情弹窗共用）：底色与文字色由 tagStyleOf 行内注入 */
+.tag-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 1.7;
+    border: 1px solid transparent;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: filter 0.12s;
+}
+
+.tag-pill.sm {
+    padding: 1px 7px;
+    font-size: 10.5px;
+}
+
+.tag-pill:hover {
+    filter: brightness(1.12);
+}
+
+/* 详情弹窗里“已添加”的标签：点整个色块移除；尾部 ✕ 平时隐藏、悬停浮现 */
+.tag-pill.remov:hover {
+    border-color: var(--red);
+}
+
+.tag-pill-x {
+    font-style: normal;
+    font-size: 10px;
+    opacity: 0;
+    transition: opacity 0.12s;
+}
+
+.tag-pill.remov:hover .tag-pill-x {
+    opacity: 0.9;
+}
+
+/* ---------- 详情弹窗的标签编辑器 ---------- */
+
+/* 已添加标签 + 「＋ 添加标签」按钮的一行（可换行） */
+.tag-editor {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+/* 「＋ 添加标签」下拉面板：绝对定位在编辑器正下方，盖住下面的备注框 */
+.tag-picker {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 10px 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-pop);
+}
+
+.tag-picker-input {
+    width: 100%;
+}
+
+.tag-picker-tip {
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.tag-picker-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+/* 没有可选标签时的提示行 */
+.tag-picker-empty {
+    font-size: 11px;
+    color: var(--text-faint);
+    padding: 2px 0 4px;
+}
+
+/* “详情”弹窗里的键值对：label 固定宽对齐，值可换行 */
+.info-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.info-row {
+    display: flex;
+    gap: 10px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.info-row .info-label {
+    flex-shrink: 0;
+    width: 64px;
+    color: var(--text-dim);
+}
+
+.info-hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 12px 0;
 }
 
 .gw-item {
@@ -2164,7 +2806,7 @@ onBeforeUnmount(() => {
     padding: 6px 10px 6px 5px;
     border-radius: var(--radius-sm);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-dim);
     transition: background 0.12s;
@@ -2188,7 +2830,7 @@ onBeforeUnmount(() => {
 
 /* 折叠箭头：折叠时朝右、展开时旋转 90° 朝下 */
 .dir-arrow {
-    font-size: 9px;
+    font-size: 10px;
     color: var(--text-faint);
     transition: transform 0.15s;
     flex-shrink: 0;
@@ -2208,7 +2850,7 @@ onBeforeUnmount(() => {
 }
 
 .dir-count {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 500;
     color: var(--text-faint);
     background: var(--panel);
@@ -2231,6 +2873,14 @@ onBeforeUnmount(() => {
     min-width: 0;
 }
 
+/* 网关行内的标签色块行（与顶部筛选条同色系，可换行展示多个标签） */
+.gw-item-tags {
+    margin-top: 3px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+
 .gw-item-name {
     font-size: 13px;
     font-weight: 500;
@@ -2242,7 +2892,7 @@ onBeforeUnmount(() => {
 }
 
 .gw-item-sub {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-faint);
     margin-top: 1px;
 }
@@ -2330,7 +2980,7 @@ onBeforeUnmount(() => {
 
 .ctx-item {
     padding: 7px 12px;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--text);
     border-radius: 4px;
     cursor: pointer;
@@ -2340,7 +2990,7 @@ onBeforeUnmount(() => {
 
 .ctx-item:hover {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .ctx-item.danger {
@@ -2349,7 +2999,7 @@ onBeforeUnmount(() => {
 
 .ctx-item.danger:hover {
     background: var(--red);
-    color: #fff;
+    color: var(--on-danger);
 }
 
 .ctx-item.disabled {
@@ -2383,13 +3033,13 @@ onBeforeUnmount(() => {
     color: var(--text);
     padding: 9px 20px;
     border-radius: 30px;
-    font-size: 12.5px;
+    font-size: 13px;
     box-shadow: var(--shadow-pop);
     z-index: 200;
 }
 
 .toast.error {
-    border-color: rgba(248, 113, 113, 0.5);
+    border-color: color-mix(in srgb, var(--red) 45%, transparent);
     color: var(--red);
 }
 
@@ -2458,7 +3108,7 @@ onBeforeUnmount(() => {
 
 .move-cur {
     margin-left: auto;
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--accent);
 }
 </style>

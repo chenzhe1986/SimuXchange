@@ -4,7 +4,11 @@
 // 发版时统一修改（项目规范：所有版本号同步更新）。
 
 /** 当前版本号（Tauri 环境以 tauri.conf.json 的 version 为准，此处为浏览器环境回退值） */
-export const APP_VERSION = "1.1.0";
+export const APP_VERSION = "1.2.0";
+
+/** 开源项目主页（“关于”弹窗里的链接，点击在系统浏览器中打开） */
+export const GITHUB_URL = "https://github.com/chenzhe1986/SimuXchange";
+export const GITEE_URL = "https://gitee.com/chenzhe1986/SimuXchange";
 
 /** 更新说明：按版本从新到旧排列，每项含版本号与本次改动要点 */
 export interface ChangelogEntry {
@@ -13,6 +17,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+    {
+        version: "1.2.0",
+        notes: [
+            "五套配色主题全面重设计：文字对比度全部达到 WCAG AA 标准，弱提示文字不再灰到看不清",
+            "字体渲染优化：Windows 下恢复 ClearType 次像素渲染（文字更锐利），正文 14px、全界面小字/小数号统一上调",
+            "输入框聚焦增加高亮描边，主题色实底按钮的按钮字色自动适配深/浅主题",
+        ],
+    },
     {
         version: "1.1.0",
         notes: [

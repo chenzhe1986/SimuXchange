@@ -38,7 +38,7 @@ const html = computed(() => marked.parse(docRaw) as string);
 /* Markdown 基础排版：全部引用主题变量，五套配色下自动跟随 */
 .md-body {
     line-height: 1.75;
-    font-size: 13px;
+    font-size: 14px;
     color: var(--text);
 }
 .md-body :deep(h1),
@@ -61,7 +61,7 @@ const html = computed(() => marked.parse(docRaw) as string);
     font-size: 15px;
 }
 .md-body :deep(h4) {
-    font-size: 13.5px;
+    font-size: 14px;
 }
 .md-body :deep(p) {
     margin: 8px 0;
@@ -106,7 +106,7 @@ const html = computed(() => marked.parse(docRaw) as string);
     border-collapse: collapse;
     margin: 10px 0;
     width: 100%;
-    font-size: 12.5px;
+    font-size: 13px;
 }
 .md-body :deep(th),
 .md-body :deep(td) {

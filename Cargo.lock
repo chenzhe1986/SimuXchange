@@ -3355,17 +3355,19 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simuxchange"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "native-tls",
  "serde",
  "serde_json",
+ "sha2",
  "simx-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
  "tokio",
  "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3401,6 +3403,7 @@ dependencies = [
  "matchit",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
