@@ -3,6 +3,9 @@
 跨平台模拟撮合软件：模拟交易所交易网关（TGW），接受柜台（OMS）的 Binary 协议连接，
 按配置策略回送确认回报 / 成交回报，无真实订单簿与撮合。
 
+项目介绍、部署形态（前后端一体 / 分离）、性能与线程模型等概览见
+[docs/项目简介.md](docs/项目简介.md)。
+
 **开源主页**（本项目遵循 GPL 开源协议）：[GitHub](https://github.com/chenzhe1986/SimuXchange) · [Gitee](https://gitee.com/chenzhe1986/SimuXchange)
 
 支持三类网关（新建网关时选择分类）：
@@ -137,6 +140,47 @@ sha256）；下载完成后顶栏「ⓘ 关于」变红色「↻ 重启以更新
 **独立后端**：启动时加 `--update-url <地址>` 参数，启动过程会拉取同一份
 `version.json` 并打印"发现新版本/已是最新版本"提示（后端长时间驻留，不自动
 替换二进制，请按提示手动部署新版）。检查失败静默忽略。
+
+### 6. CLI 命令行控制工具（simx-cli，自动测试用）
+
+`simx-cli` 是不依赖界面的命令行控制工具：连到已启动的 simx-server，用一条条
+命令完成"查状态 / 改策略 / 手动回报"等自动化测试常用操作（每次调用一条命令、
+退出即返回，适配 shell 脚本与 CI）。引擎与 simx-server 本身零改动，CLI 只是
+现有 WebSocket 控制协议的一个客户端。
+
+构建（Windows，产物 `target\release\simx-cli.exe`）：
+
+```powershell
+cargo build --release -p simx-cli
+```
+
+先启动后端，登录一次后即可免地址调用（CLI 默认连 `ws://127.0.0.1:9800/ws`，
+单条命令可用 `--url` 临时覆盖）：
+
+```powershell
+.\simx-cli.exe login --url ws://<服务器IP>:9800/ws   # 登录：探活+保存地址（写用户主目录 .simx-cli.json），此后免 --url
+.\simx-cli.exe snapshot
+.\simx-cli.exe set-strategy --gateway <网关名或id> --platform <平台名或id> --mode ackOnly --ack-delay 100,300
+.\simx-cli.exe orders --gateway <网关名或id> --platform <平台名或id>        # 查委托编号
+.\simx-cli.exe send --gateway <网关名或id> --platform <平台名或id> --order <委托编号> trade --qty 100
+.\simx-cli.exe logout                # 清除保存的地址，恢复默认本机
+```
+
+退出码：0 = 成功；1 = 后端错误/连接失败；2 = 参数错误。加 `--json` 输出后端
+原始 JSON 响应，便于脚本解析。完整命令说明与用例见
+[docs/CLI工具使用手册.md](docs/CLI工具使用手册.md)（速查见《产品使用手册》第 8 章）。
+
+### 7. 一键打包（全部产物）
+
+```powershell
+.\scripts\pack-all.ps1
+```
+
+一条命令完成全部编译并汇总到 `dist\`（不进仓库）：`dist\windows\` 放桌面
+客户端 `simuxchange.exe` 与 Windows 版 `simx-cli.exe`（可直接运行）；
+`dist\linux\` 放 `simx-server` / `simx-update-server` / `simx-cli` 三件套
+（musl 静态链接，任意 x86_64 Linux 可跑，拷到服务器后 `chmod +x`）。NSIS
+安装包等 bundle 产物仍在 `target\release\bundle\`。
 
 ## 使用流程
 

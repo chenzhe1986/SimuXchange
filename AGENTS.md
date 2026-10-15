@@ -45,7 +45,8 @@ SimuXchange/
 │  │   ├─ src/api.rs      # 统一控制接口（供 Tauri 与 server 复用）
 │  │   └─ tests/e2e_sz.rs / e2e_shjj.rs / e2e_shbond.rs  # 端到端测试（真 TCP，深交所 18101~ / 上交所竞价 18201~ / 上交所新债券 18301~）
 │  ├─ simx-server/      # 独立后端：axum WebSocket 控制接口（远程部署）
-│  └─ simx-update-server/  # 升级服务器：自动扫描发布目录 + 生成清单 + 文件下载
+│  ├─ simx-update-server/  # 升级服务器：自动扫描发布目录 + 生成清单 + 文件下载
+│  └─ simx-cli/         # 命令行控制工具（自动测试用）：纯 WebSocket 客户端连 simx-server，复用 api 协议，引擎零改动
 ├─ src-tauri/           # Tauri 2 桌面壳（包名 simuxchange，内嵌 simx-core）
 ├─ src/                 # 前端 Vue 3 + TypeScript
 │  ├─ App.vue           # 主页面（全部界面状态与交互）
@@ -57,7 +58,7 @@ SimuXchange/
 │  ├─ changelog.ts      # APP_VERSION / CHANGELOG（“ⓘ 关于”弹窗的版本号与更新说明）
 │  └─ updater.ts        # 更新检查：version.json 清单协议、版本比较（checkForUpdate）
 ├─ docs/                # 构建调试手册、产品使用手册、协议 PDF
-├─ scripts/             # build-all.ps1（tauri build 前准备 Linux 产物+前端）、musl-cc/（zig cc 参数翻译 shim）等
+├─ scripts/             # build-all.ps1（tauri build 前准备 Linux 产物+Windows CLI+前端）、pack-all.ps1（一键打包汇总 dist\windows 与 dist\linux）、musl-cc/（zig cc 参数翻译 shim）等
 ├─ .cargo/config.toml   # 项目级镜像配置（aliyun sparse，覆盖全局 tuna）
 ├─ simx.config.json     # 运行时配置：backend = local / remote + 可选 updateUrl
 └─ Cargo.toml           # Cargo workspace 根
@@ -216,6 +217,8 @@ Rust 结构体（serde 序列化为 **camelCase**）与 `src/types.ts` 的 inter
 | 前端构建验证 | `npx vite build`（类型检查：`node .\node_modules\typescript\bin\tsc --noEmit`） |
 | 打包桌面发布版 | `npm run tauri build` |
 | 构建独立后端 | `cargo build --release -p simx-server` |
+| 构建 CLI 工具 | `cargo build --release -p simx-cli`（用法见 docs/CLI工具使用手册.md，速查见产品手册第 8 章） |
+| 一键打包全部产物 | `.\scripts\pack-all.ps1`（桌面端+CLI+Linux 三件套汇总到 dist\，见构建手册 6.1） |
 
 ## 6. 环境与踩坑记录（不在本文件维护）
 

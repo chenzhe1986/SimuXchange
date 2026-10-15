@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "beautiful-gui-design": {
+      "source": "../../../../../AppData/Local/Temp/bg-design-src",
+      "sourceType": "local",
+      "computedHash": "e9f589fbcdbba45c34ae7fff9abfccc1e86ed08e62a7df233d8fef1a2b68cb67"
+    }
+  }
+}

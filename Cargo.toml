@@ -4,6 +4,7 @@ members = [
     "crates/simx-core",
     "crates/simx-server",
     "crates/simx-update-server",
+    "crates/simx-cli",
     "src-tauri",
 ]
 

@@ -4,7 +4,7 @@
 // 发版时统一修改（项目规范：所有版本号同步更新）。
 
 /** 当前版本号（Tauri 环境以 tauri.conf.json 的 version 为准，此处为浏览器环境回退值） */
-export const APP_VERSION = "1.2.0";
+export const APP_VERSION = "1.3.0";
 
 /** 开源项目主页（“关于”弹窗里的链接，点击在系统浏览器中打开） */
 export const GITHUB_URL = "https://github.com/chenzhe1986/SimuXchange";
@@ -17,6 +17,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+    {
+        version: "1.3.0",
+        notes: [
+            "新增 simx-cli 命令行控制工具：连接已运行的 simx-server，用一条条命令完成查状态/查订单、热更新回报策略、手动回报订单等操作，方便自动化测试脚本调用（详见 docs/CLI工具使用手册.md）",
+            "simx-cli 支持登录（login）把服务器地址保存到用户主目录 .simx-cli.json，之后所有命令免 --url；单条命令可临时 --url 覆盖，logout 清除",
+            "simx-cli 定位网关/平台时按 id 优先；名称允许重复，命中多个时明确报错并列出候选 id（不再默默取第一个）",
+            "新增一键打包脚本 pack-all.ps1：一条命令产出桌面客户端、Windows/Linux 双版 CLI 与 Linux 后端三件套，汇总到 dist\\windows 与 dist\\linux（见构建手册 6.1）",
+        ],
+    },
     {
         version: "1.2.0",
         notes: [

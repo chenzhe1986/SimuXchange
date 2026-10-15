@@ -1,0 +1,18 @@
+[package]
+name = "simx-cli"
+version = "1.0.0"
+edition = "2021"
+description = "SimuXchange 命令行控制工具（自动化测试用）：经 WebSocket 控制 simx-server 的回报策略与手动回报"
+license = "MIT"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-util = "0.3"
+# WebSocket 客户端（连 simx-server 的 /ws 控制接口）。只开 connect/handshake/url
+# 三个特性、不引入 TLS：默认连 127.0.0.1 明文即可；native-tls 依赖在
+# Linux musl 静态链接下会拖 OpenSSL 之类系统库，本工具用不上，不开
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "url"] }
+# 命令行解析：子命令 + 十几个参数，手写解析容易漏边界情况，引入解析库
+clap = { version = "4", features = ["derive"] }

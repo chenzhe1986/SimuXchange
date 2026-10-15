@@ -16,6 +16,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $target = "x86_64-unknown-linux-musl"
 $linuxServerBin = Join-Path $root "target\$target\release\simx-server"
 $updateServerBin = Join-Path $root "target\$target\release\simx-update-server"
+$linuxCliBin = Join-Path $root "target\$target\release\simx-cli"
 # 链接方式标记文件（放 target 目录，不进仓库）：记录上次使用的链接方式，
 # 保证 RUSTFLAGS 稳定——cargo 把 RUSTFLAGS 计入编译指纹，稳定了代码没变时
 # 才不会重复链接
@@ -114,18 +115,24 @@ if ($mode -eq "") {
 # 始终执行 cargo build：由 cargo 按源码编译指纹自行判断是否需要重编/重链。
 # 不能“产物存在就跳过”——那样改了 simx-core/simx-server/simx-update-server 代码后，
 # 打包进安装包 / 发布到服务器的仍是旧版。cargo 的指纹判断很快：代码没变时这一步接近秒过。
-# 一次编译两个 Linux 二进制（simx-server + simx-update-server），共享依赖编译。
+# 一次编译三个 Linux 二进制（simx-server + simx-update-server + simx-cli），共享依赖编译。
+#
+# 链接参数用 CARGO_TARGET_<三元组>_RUSTFLAGS（只作用于 musl target），不能用全局
+# RUSTFLAGS：本脚本后续还要编 Windows 版 CLI（不带 --target，host 即 MSVC），
+# 全局 RUSTFLAGS 里的 -C link-self-contained 是 musl 专属选项，MSVC 不认，
+# 会把 host 侧所有 build script 编译全部炸掉（坑⑫）。
+Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
 if ($mode -eq "rust-lld") {
-    $env:RUSTFLAGS = "-C linker=rust-lld -C link-self-contained=yes"
+    $env:CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS = "-C linker=rust-lld -C link-self-contained=yes"
 }
-cargo build --release -p simx-server -p simx-update-server --target $target
+cargo build --release -p simx-server -p simx-update-server -p simx-cli --target $target
 if ($LASTEXITCODE -ne 0) {
     if ($mode -eq "musl-gcc") {
         # 装了工具链但链接仍失败（版本不匹配等）：退回 rust-lld 并更新标记
         Write-Host "常规链接失败，改用 rust-lld 自包含链接重试..."
         Set-Content -Path $marker -Value "rust-lld" -NoNewline -Encoding ascii
-        $env:RUSTFLAGS = "-C linker=rust-lld -C link-self-contained=yes"
-        cargo build --release -p simx-server -p simx-update-server --target $target
+        $env:CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS = "-C linker=rust-lld -C link-self-contained=yes"
+        cargo build --release -p simx-server -p simx-update-server -p simx-cli --target $target
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Linux 后端编译失败，请检查 musl 交叉编译工具链（或确认 rustc 版本 >= 1.82 以使用 rust-lld）" -ForegroundColor Red
             exit 1
@@ -136,18 +143,34 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
-# 产物校验：两个二进制都必须存在，缺一个即视为失败（simx-server 要进安装包，
-# simx-update-server 是发布服务器用的，缺一不可提醒到）
+# 产物校验：三个二进制都必须存在，缺一个即视为失败（simx-server 要进安装包，
+# simx-update-server 是发布服务器用的，simx-cli 是自动化测试工具，缺一不可提醒到）
 $allOk = $true
-foreach ($b in @($linuxServerBin, $updateServerBin)) {
+foreach ($b in @($linuxServerBin, $updateServerBin, $linuxCliBin)) {
     if (Test-Path $b) {
-        Write-Host "Linux 后端就绪: $b"
+        Write-Host “Linux 后端就绪: $b”
     } else {
-        Write-Host "缺少产物: $b" -ForegroundColor Red
+        Write-Host “缺少产物: $b” -ForegroundColor Red
         $allOk = $false
     }
 }
 if (-not $allOk) { exit 1 }
+
+# ---- Windows 版 simx-cli（宿主 target）：桌面端使用者在 Windows 上直接跑，----
+# 连本机后端或远程 Linux 后端都行。与 Linux 版共用同一份代码，只是目标三元组
+# 不同（不指定 --target 即为宿主），cargo 按指纹判断，代码没变时秒过。
+Write-Host “== 编译 Windows 版 simx-cli ==”
+$winCliBin = Join-Path $root “target\release\simx-cli.exe”
+cargo build --release -p simx-cli
+if ($LASTEXITCODE -ne 0) {
+    Write-Host “Windows 版 simx-cli 编译失败” -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path $winCliBin)) {
+    Write-Host “缺少产物: $winCliBin” -ForegroundColor Red
+    exit 1
+}
+Write-Host “Windows CLI 就绪: $winCliBin”
 
 Write-Host "== 构建前端 =="
 Push-Location $root
