@@ -80,6 +80,10 @@ export interface StrategyConfig {
     /** Lua 回报脚本源码（仅 luaScript 模式使用；保存时后端校验语法，
      *  运行时沙箱化执行，详见 docs/Lua脚本回报编写说明.md） */
     luaScript: string;
+    /** ETF 清单文件目录（仅深圳非交易处理平台用）：收到 ETF 申赎委托时从该目录
+     *  按证券代码查找最新的清单文件（pcf_<代码>_<YYYYMMDD>.xml），把成份股明细
+     *  填入执行报告；留空 = 不启用（成份股数为 0） */
+    etfPcfDir: string;
 }
 
 /** 一个模拟交易平台（= 一个 TCP 监听端口）的配置 */
@@ -466,6 +470,7 @@ export function defaultStrategy(category: GatewayCategory = "sz"): StrategyConfi
         cancelFrontReject: false,
         cancelDelay: { minMs: 0, maxMs: 0 },
         luaScript: DEFAULT_LUA_PROMPT,
+        etfPcfDir: "",
     };
 }
 

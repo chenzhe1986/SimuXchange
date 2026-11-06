@@ -38,6 +38,7 @@ SimuXchange/
 │  │   ├─ src/shbond/   # 上海新债券网关：protocol.rs / session.rs / strategy.rs
 │  │   │               # （上交所两套会话共用 sz/session.rs 的 SessionCtx）
 │  │   ├─ src/lua_engine.rs  # "Lua 脚本回报"模式执行器（沙箱编译运行用户脚本）
+│  │   ├─ src/pcf.rs      # 深交所 ETF 申赎清单（pcf_*.xml）解析（执行报告成份股明细数据源）
 │  │   ├─ src/capture.rs  # 连接收发报文捕获（16 进制 + 按字段名解析 + 可选持久化到文件）
 │  │   ├─ src/orderbook.rs  # 订单缓存（界面订单列表、撤单按状态判断）
 │  │   ├─ src/oplog.rs    # 前端操作日志（带前端 IP，按日期存 log/ 目录）
@@ -57,7 +58,7 @@ SimuXchange/
 │  ├─ backend.ts        # 后端抽象层：LocalBackend(Tauri invoke) / RemoteBackend(WebSocket)
 │  ├─ changelog.ts      # APP_VERSION / CHANGELOG（“ⓘ 关于”弹窗的版本号与更新说明）
 │  └─ updater.ts        # 更新检查：version.json 清单协议、版本比较（checkForUpdate）
-├─ docs/                # 构建调试手册、产品使用手册、协议 PDF
+├─ docs/                # 构建调试手册、产品使用手册、协议 PDF、PCF示例/（ETF 清单内容定义表 + 真实示例清单）
 ├─ scripts/             # build-all.ps1（tauri build 前准备 Linux 产物+Windows CLI+前端）、pack-all.ps1（一键打包汇总 dist\windows 与 dist\linux）、musl-cc/（zig cc 参数翻译 shim）等
 ├─ .cargo/config.toml   # 项目级镜像配置（aliyun sparse，覆盖全局 tuna）
 ├─ simx.config.json     # 运行时配置：backend = local / remote + 可选 updateUrl
@@ -125,6 +126,22 @@ SimuXchange/
   无订单缓存也成功）/ 全部撤单拒单（一律拒单，原因码 cancel_reject_reason 可配置）；
   勾选 cancel_front_reject（前台拒单）时撤单拒单
   改发业务拒绝消息（深市 MsgType=4 / 沪市 204）。撤单回报延迟 cancel_delay 对撤单成功与拒单均生效。
+- **ETF 申赎成份股明细**（深圳非交易处理平台，`platformType=3`）：ETF 实时申购赎回
+  新订单（101201）的执行报告 201202 的"成份股明细"不在委托报文里，引擎按平台配置的
+  `strategy.etf_pcf_dir`（界面"ETF清单文件路径"，随策略配置保存/热更新）从该目录按
+  证券代码查找**日期最新**的清单文件 `pcf_<代码>_<YYYYMMDD>.xml`（PCF XML，解析器
+  `pcf.rs`；`find_latest_pcf` 用长度预检 + 字节级大小写不敏感匹配，零拷贝，日期直接
+  折数值比较）填充：篮子数 = 委托份额 ÷ CreationRedemptionUnit；每条成份券
+  DeliveryQty = ComponentShare × 篮子数（协议 ×100 放大），SubstCash 按方向取
+  CreationCashSubstitute（申购）/ RedemptionCashSubstitute（赎回）× 篮子数
+  （协议 ×10000 放大）；目录留空、目录不可用或找不到该代码的清单文件时按 0 只成份股
+  回复并推送告警日志。**查找/解析带缓存**（`SessionCtx.pcf_cache`，`pcf::PcfCache`，
+  按 (目录, 代码) 记忆）：目录 mtime 未变且未超 30 秒兜底 → 零扫描直接复用（负结果
+  同样缓存）；目录变化 → 重扫一次目录，若文件 mtime/大小未变仍复用已解析结果；
+  同名文件盘中更新会被文件 stat 发现并重新解析——清单目录可能非常大，避免逐笔
+  委托全量遍历目录。报文弹窗对成份股重复组按
+  `Security[i].UnderlyingSecurityID/SecurityIDSource/DeliveryQty/SubstCash` 结构化
+  解析展示（`describe_ack_extend`，无需额外改动）。
 - **多分区号**：`PlatformConfig.partition_nos`（逗号分隔字符串）支持一个平台配置多个分区号，
   回报按**证券代码哈希**（`partition_for(&security_id)`）分配到其中一个分区——同一证券恒落
   同一分区，保证该证券的确认/成交/撤单回报都在同一分区；为空时回退单分区 `partition_no`。
@@ -194,10 +211,10 @@ Rust 结构体（serde 序列化为 **camelCase**）与 `src/types.ts` 的 inter
 
 - 前端遵循既有模式：状态集中在 `App.vue`，子组件只通过 props 接收、emit 上报；
   所有后端调用走 `backend.ts` 抽象层，**不得**在组件里直接 `invoke`；
-- 修改协议/策略逻辑后必须跑 `cargo test -p simx-core`（含 28 个 e2e 测试：深交所 15 + 上交所竞价 7 + 上交所新债券 6）；
+- 修改协议/策略逻辑后必须跑 `cargo test -p simx-core`（含 29 个 e2e 测试：深交所 16 + 上交所竞价 7 + 上交所新债券 6）；
 - 右键菜单、弹窗等 UI 交互遵循现有实现风格（贴边修正、运行态置灰、Esc 关闭）；
 - 端口约定：Vite 开发端口 **14200**（`vite.config.ts` 与 `tauri.conf.json` 的
-  devUrl 两处必须一致）；e2e 测试占用 18101~18111（深交所）、18201~18206（上交所竞价）与 18301~18305（上交所新债券）；平台默认端口从 10001 起。
+  devUrl 两处必须一致）；e2e 测试占用 18101~18115（深交所）、18201~18206（上交所竞价）与 18301~18305（上交所新债券）；平台默认端口从 10001 起。
 
 ## 5. 常用命令（PowerShell）
 
@@ -247,7 +264,7 @@ zig 交叉编译、目录搬迁缓存等）。
 
 - [ ] `cargo check -p simx-core -p simx-server` 通过（Finished）
 - [ ] 涉及 Tauri 时：`cargo check --manifest-path src-tauri/Cargo.toml` 通过
-- [ ] 涉及协议/策略/会话时：`cargo test -p simx-core` 全绿（111 单元 + 4 自动启动 + 28 e2e）
+- [ ] 涉及协议/策略/会话时：`cargo test -p simx-core` 全绿（115 单元 + 4 自动启动 + 29 e2e）
 - [ ] 涉及前端时：`npx vite build` 通过 + `tsc --noEmit` 无错误
 - [ ] 前后端类型已同步（types.ts ↔ Rust 结构体）
 - [ ] 新增逻辑已按 4.1 规范补注释

@@ -85,6 +85,7 @@ function normalizePlatform(p: PlatformConfig): PlatformConfig {
             cancelFrontReject: s.cancelFrontReject ?? false,
             cancelDelay: s.cancelDelay ?? { ...d },
             luaScript: s.luaScript ?? "",
+            etfPcfDir: s.etfPcfDir ?? "",
         },
     };
 }
@@ -499,6 +500,24 @@ async function generateScript() {
                             </div>
                         </div>
                     </template>
+
+                    <!-- ETF 清单文件路径：仅深圳非交易处理平台（平台类型 3）显示，位置在
+                         "成交回报延迟"下一行（fixed 模式下即紧邻其下；Lua/关闭自动回报等
+                         模式也显示——成份股填充对任何报单模式都生效）。收到 ETF 申赎委托
+                         （101201）时从该目录按证券代码找最新清单文件 pcf_<代码>_<日期>.xml
+                         解析成份股，填入执行报告 201202；留空或找不到文件则按 0 只成份股
+                         回复并在日志推送告警 -->
+                    <div class="field full" v-if="props.category === 'sz' && form.platformType === 3">
+                        <label class="field-row">
+                            ETF清单文件路径
+                            <FieldHint text="ETF申赎需要从该目录读取清单文件并发送成交明细" />
+                        </label>
+                        <input
+                            v-model="form.strategy.etfPcfDir"
+                            type="text"
+                            placeholder="如 /opt/simx/pcf（留空 = 不启用，执行报告成份股数为 0）"
+                        />
+                    </div>
 
                     <!-- 撤单自动回报模式区块：撤单模式下拉占满整行（与报单模式行同宽），
                          前台拒单开关与撤单回报延迟在其下一行左右两栏并排；

@@ -15,7 +15,7 @@
 //! id 的作用：WebSocket 是双向自由收发的，响应不一定紧跟请求，
 //! 前端靠 id 把响应对回到发起的那次请求上。
 //!
-//! 用法：simx-server [--listen 0.0.0.0:9800] [--auto-start] [--update-url <地址>]
+//! 用法：simx-server [--listen 0.0.0.0:9800] [--auto-start] [--update-url <地址>] [-V|--version]
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
@@ -61,7 +61,13 @@ async fn main() {
                 i += 2;
             }
             "-h" | "--help" => {
-                println!("用法: simx-server [--listen 0.0.0.0:9800] [--auto-start] [--update-url <地址>]");
+                println!("用法: simx-server [--listen 0.0.0.0:9800] [--auto-start] [--update-url <地址>] [-V|--version]");
+                return;
+            }
+            // 打印版本号后退出（版本号来自本 crate 的 Cargo.toml，随发版同步更新；
+            // 与 --update-url 的版本比较共用同一来源，两者恒一致）
+            "-V" | "--version" => {
+                println!("simx-server {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             _ => i += 1,
@@ -76,7 +82,8 @@ async fn main() {
 
     // 创建引擎（会从 data_dir/gateways.json 加载历史配置）
     let engine = Engine::new(data_dir.clone());
-    println!("SimuXchange 后端已启动");
+    // 启动横幅带版本号：服务长时间驻留，运维从启动日志即可确认部署的版本
+    println!("SimuXchange 后端已启动 v{}", env!("CARGO_PKG_VERSION"));
     println!("  控制接口 : ws://{}/ws", listen);
     println!("  数据目录 : {}", data_dir.display());
 

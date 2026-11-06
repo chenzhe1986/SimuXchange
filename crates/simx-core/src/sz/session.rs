@@ -40,7 +40,7 @@ use crate::stats::PlatformStats;
 use super::strategy::{self as strategy, biz_info_by_appl_id, ReportKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -74,6 +74,12 @@ pub struct SessionCtx {
     /// 按脚本内容缓存已编译的 Lua 运行时，策略热更新后自动重新编译；
     /// 所有连接共享同一个缓存（Mutex 串行化访问）
     pub lua_cache: Arc<lua_engine::ScriptCache>,
+    /// ETF 申赎清单（PCF）查找/解析缓存（深交所非交易处理平台用）：
+    /// 按 (清单目录, ETF 代码) 记忆最近找到的清单文件与解析结果——
+    /// 清单目录可能有所有 ETF 代码多日的文件，缓存避免每笔委托都全量
+    /// 遍历目录并重新读取解析（目录 mtime 未变时零扫描，见 pcf::PcfCache）；
+    /// Arc 包裹供各连接 clone 共享（Mutex 串行化访问）
+    pub pcf_cache: Arc<parking_lot::Mutex<crate::pcf::PcfCache>>,
     /// 平台统计计数器（委托数/成交数…），各连接共同累加
     pub stats: Arc<PlatformStats>,
     /// 当前存活连接表：连接建立时登记、断开时移除，供前端展示
@@ -669,7 +675,7 @@ async fn handle_new_order(
     conn_id: u64,
     report_tasks: &Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) {
-    let order = match NewOrder::decode(mt, body) {
+    let mut order = match NewOrder::decode(mt, body) {
         Ok(o) => o,
         Err(e) => {
             ctx.log("error", format!("新订单({})解析失败: {}", mt, e));
@@ -748,6 +754,12 @@ async fn handle_new_order(
     // Lua 脚本模式在这里同步执行脚本（无 await，非 Send 值同样不跨 await）
     let plans = {
         let st = ctx.strategy.read().unwrap();
+        // ETF 实时申购赎回（101201）：执行报告的“成份股明细”不在委托报文里，
+        // 按平台配置的清单目录读取 PCF 文件填充（未配置/找不到时保持 0 只
+        // 成份股并推送告警）；在读锁块内做以拿到最新的目录配置（可热更新）
+        if order.msg_type == msg_type::NEW_ORDER_ETF_SUB_RED {
+            fill_etf_delivery_details(ctx, &st.etf_pcf_dir, &mut order);
+        }
         // 柜台地址从连接表取（连接建立时登记），给 Lua 脚本的 ctx.PeerAddr 用
         let peer_str = ctx
             .connections
@@ -830,6 +842,99 @@ async fn handle_new_order(
         let h = tokio::spawn(fut);
         report_tasks.lock().push(h);
     }
+}
+
+/// 为 ETF 实时申购赎回委托填充执行报告的“成份股明细”扩展字段。
+///
+/// 执行报告（201202）的成份股明细不来自委托报文，需按申购赎回清单
+/// （PCF 文件）生成：从配置目录按 ETF 代码查找日期最新的
+/// `pcf_<代码>_<YYYYMMDD>.xml`（解析逻辑见 pcf 模块），解析后按
+/// “委托份额 ÷ 最小申赎单位”的篮子数缩放每只成份券——
+/// - 交付数量 DeliveryQty = 每篮子数量 × 篮子数（Qty 放大 100）
+/// - 现金替代金额 SubstCash = 申购取申购替代金额 / 赎回取赎回替代金额
+///   × 篮子数（Amt 放大 10000）
+///
+/// 目录未配置、目录无效或找不到对应代码的清单文件时**保持原样**
+/// （成份股记录数 0，与旧行为一致），并通过日志推送告警，
+/// 便于测试时定位清单数据缺失问题。
+fn fill_etf_delivery_details(ctx: &SessionCtx, dir: &str, order: &mut NewOrder) {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return; // 未配置清单目录：不启用该功能
+    }
+    let code = order.common.security_id.trim().to_string();
+    // 走平台级缓存查找：目录 mtime 未变时零扫描，文件未变时复用已解析结果
+    // （清单目录可能很大，逐笔全量遍历会拖慢收单路径；缓存机制见 pcf::PcfCache）
+    let loaded = ctx.pcf_cache.lock().load(Path::new(dir), &code);
+    match loaded {
+        Ok(Some((path, pcf))) => {
+            let details = pcf_delivery_details(&pcf, order.common.side, order.common.order_qty);
+            let count = details.len();
+            order.extend.underlying_securities = details;
+            order.extend.no_security = count as u32;
+            ctx.log(
+                "info",
+                format!(
+                    "ETF 申赎成份股明细：按清单文件 [{}] 填充 {} 只成份券（{}）",
+                    path.display(),
+                    count,
+                    if order.common.side == b'E' { "赎回" } else { "申购" }
+                ),
+            );
+        }
+        Ok(None) => ctx.log(
+            "warn",
+            format!(
+                "ETF 清单目录 [{}] 中未找到代码 [{}] 的清单文件（应为 pcf_{}_<日期>.xml），本笔委托的执行报告按 0 只成份股回复",
+                dir, code, code
+            ),
+        ),
+        Err(e) => ctx.log(
+            "warn",
+            format!(
+                "ETF 清单目录 [{}] 不可用（{}），本笔委托的执行报告按 0 只成份股回复",
+                dir, e
+            ),
+        ),
+    }
+}
+
+/// 按 PCF 清单与委托份额生成执行报告的成份股明细（协议放大整数）。
+///
+/// 篮子数 = 委托份额 ÷ 最小申赎单位（委托非篮子整数倍时按小数折算，
+/// 模拟器不做申报数量校验）；每只成份券：
+/// - DeliveryQty（Qty 放大 100）= 每篮子数量 × 篮子数
+/// - SubstCash（Amt 放大 10000）= 按申赎方向取替代金额 × 篮子数
+/// （替代标志 0/1 的券替代金额为 0、标志 2 的券每篮子数量为 0，
+/// 清单文件的数据本身即区分，这里不做标志分支）。
+fn pcf_delivery_details(
+    pcf: &crate::pcf::PcfFile,
+    side: u8,
+    order_qty_raw: i64,
+) -> Vec<protocol::UnderlyingSecurity> {
+    let shares = order_qty_raw as f64 / 100.0;
+    let baskets = if pcf.creation_redemption_unit > 0.0 {
+        shares / pcf.creation_redemption_unit
+    } else {
+        0.0
+    };
+    let is_redeem = side == b'E';
+    pcf.components
+        .iter()
+        .map(|c| {
+            let cash = if is_redeem {
+                c.redemption_cash_substitute
+            } else {
+                c.creation_cash_substitute
+            };
+            protocol::UnderlyingSecurity {
+                security_id: c.security_id.clone(),
+                security_id_source: c.security_id_source.clone(),
+                delivery_qty: (c.component_share * baskets * 100.0).round() as i64,
+                subst_cash: (cash * baskets * 10000.0).round() as i64,
+            }
+        })
+        .collect()
 }
 
 /// 处理撤单请求(190007)。

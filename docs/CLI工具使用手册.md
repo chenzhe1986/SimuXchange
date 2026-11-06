@@ -101,6 +101,10 @@ simx-cli --json snapshot
 simx-cli snapshot --json
 ```
 
+另有 clap 内置的 `-h/--help` 与 `-V/--version`：`simx-cli --version` 打印
+版本号（如 `simx-cli 2.0.0`），`simx-cli --help` 打印全部子命令与参数说明；
+两者不连服务器、直接退出。
+
 退出码（脚本据此判断成败）：
 
 | 退出码 | 含义 |

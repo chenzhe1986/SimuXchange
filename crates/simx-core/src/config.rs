@@ -396,6 +396,12 @@ pub struct StrategyConfig {
     /// 保存时后端校验语法（engine 的 update_strategy / save_gateway），
     /// 运行时由 lua_engine 模块沙箱化编译执行
     pub lua_script: String,
+    /// ETF 清单文件目录（深交所非交易处理平台 ETF 实时申赎用；serde → etfPcfDir）。
+    /// 收到 ETF 申赎委托时从该目录按证券代码查找最新的申购赎回清单
+    /// （pcf_<代码>_<YYYYMMDD>.xml，见 pcf 模块）并把成份股明细填入执行报告；
+    /// 留空 = 不启用（执行报告成份股记录数为 0）。
+    /// 虽属数据源类配置，但随策略配置一起保存/热更新（运行中改目录即时生效）
+    pub etf_pcf_dir: String,
 }
 
 impl Default for StrategyConfig {
@@ -415,6 +421,7 @@ impl Default for StrategyConfig {
             cancel_front_reject: false,
             cancel_delay: DelayConfig::default(),
             lua_script: String::new(),
+            etf_pcf_dir: String::new(),
         }
     }
 }

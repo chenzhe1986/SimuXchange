@@ -1228,3 +1228,160 @@ end
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 构造一笔 ETF 实时申购赎回新订单（101201）：公共字段 + NoAccounts=0 扩展字段。
+/// side 用协议字符：b'D' 申购 / b'E' 赎回；qty_100x 是 ETF 份额×100。
+fn etf_sub_red_frame(cl_ord_id: &str, security_id: &str, qty_100x: i64, side: u8) -> Vec<u8> {
+    let mut w = BodyWriter::new();
+    w.str("120", 3); // ApplID
+    w.str("100001", 6); // SubmittingPBUID
+    w.str(security_id, 8); // SecurityID（ETF 代码）
+    w.str("102", 4); // SecurityIDSource
+    w.u16(1); // OwnerType
+    w.str("01", 2); // ClearingFirm
+    w.i64(protocol::now_timestamp()); // TransactTime
+    w.str("", 8); // UserInfo
+    w.str(cl_ord_id, 10); // ClOrdID
+    w.str("0123456789AB", 12); // AccountID
+    w.str("0001", 4); // BranchID
+    w.str("", 4); // OrderRestrictions
+    w.ch(side); // Side：D=申购 E=赎回
+    w.ch(b'2'); // OrdType
+    w.i64(qty_100x); // OrderQty N15(2)
+    w.i64(0); // Price
+    w.u32(0); // NoAccounts（非全实物申赎模式为 0）
+    protocol::frame(msg_type::NEW_ORDER_ETF_SUB_RED, &w.into_inner())
+}
+
+/// ETF 测试清单（最新日 20260615）：申赎现金（申购替代 10000 元 / 赎回替代 200 元）
+/// + 一只普通成份券（每篮子 2200 股）
+const PCF_ETF_NEW: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<PCFFile xmlns="http://ts.szse.cn/Fund">
+  <Version>1.0</Version>
+  <SecurityID>159901</SecurityID>
+  <SecurityIDSource>102</SecurityIDSource>
+  <UnderlyingSecurityID>399330</UnderlyingSecurityID>
+  <CreationRedemptionUnit>700000.00</CreationRedemptionUnit>
+  <Components>
+    <Component>
+      <UnderlyingSecurityID>159900</UnderlyingSecurityID>
+      <UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
+      <ComponentShare>0.00</ComponentShare>
+      <SubstituteFlag>2</SubstituteFlag>
+      <CreationCashSubstitute>10000.0000</CreationCashSubstitute>
+      <RedemptionCashSubstitute>200.0000</RedemptionCashSubstitute>
+    </Component>
+    <Component>
+      <UnderlyingSecurityID>000001</UnderlyingSecurityID>
+      <UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
+      <ComponentShare>2200.00</ComponentShare>
+      <SubstituteFlag>1</SubstituteFlag>
+      <CreationCashSubstitute>0.0000</CreationCashSubstitute>
+      <RedemptionCashSubstitute>0.0000</RedemptionCashSubstitute>
+    </Component>
+  </Components>
+</PCFFile>"#;
+
+/// 干扰用旧清单（20260612）：替代金额为 1 元——若误取旧文件，断言会失败
+const PCF_ETF_OLD: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<PCFFile xmlns="http://ts.szse.cn/Fund">
+  <Version>1.0</Version>
+  <SecurityID>159901</SecurityID>
+  <CreationRedemptionUnit>700000.00</CreationRedemptionUnit>
+  <Components>
+    <Component>
+      <UnderlyingSecurityID>159900</UnderlyingSecurityID>
+      <UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
+      <ComponentShare>0.00</ComponentShare>
+      <SubstituteFlag>2</SubstituteFlag>
+      <CreationCashSubstitute>1.0000</CreationCashSubstitute>
+      <RedemptionCashSubstitute>1.0000</RedemptionCashSubstitute>
+    </Component>
+  </Components>
+</PCFFile>"#;
+
+/// 测试十六：ETF 实时申购赎回（101201）的执行报告（201202）按 PCF 清单填充
+/// “成份股明细”——清单目录配好后，收到申赎委托时按 ETF 代码取目录中日期最新
+/// 的 pcf_<代码>_<日期>.xml 解析：
+/// - 交付数量 = 每篮子数量 × 篮子数（篮子数 = 委托份额 / 最小申赎单位）
+/// - 现金替代金额按申赎方向取申购/赎回替代金额 × 篮子数
+/// 找不到对应代码清单文件时按 0 只成份股回复（旧行为），确认回报照常发出。
+#[tokio::test]
+async fn test_etf_sub_red_pcf_components() {
+    let dir = std::env::temp_dir().join(format!("simx_sz_etf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // 清单目录：同代码两日文件（应取最新 20260615 那份）
+    let pcf_dir = dir.join("pcf");
+    std::fs::create_dir_all(&pcf_dir).unwrap();
+    std::fs::write(pcf_dir.join("pcf_159901_20260612.xml"), PCF_ETF_OLD).unwrap();
+    std::fs::write(pcf_dir.join("pcf_159901_20260615.xml"), PCF_ETF_NEW).unwrap();
+
+    let engine = Engine::new(dir.clone());
+    let gw = engine
+        .save_gateway(test_gateway(
+            18115,
+            3,
+            StrategyConfig {
+                etf_pcf_dir: pcf_dir.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("保存网关失败");
+    engine.start_gateway(&gw.id).await.expect("启动网关失败");
+    let mut stream = connect_and_logon(18115).await;
+
+    // 单 1：申购（D）1 个篮子（700000 份）→ 明细 = 清单每篮子数量 × 1
+    stream
+        .write_all(&etf_sub_red_frame("ETF0000001", "159901", 700_000 * 100, b'D'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_ETF_ACK, "ETF 申赎应回 201202 执行报告");
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.extend.no_security, 2, "成份股记录数应等于清单条目数");
+    let cash = &rpt.extend.underlying_securities[0];
+    assert_eq!(cash.security_id, "159900");
+    assert_eq!(cash.security_id_source, "102");
+    assert_eq!(cash.delivery_qty, 0, "必须现金替代券无交付数量");
+    assert_eq!(cash.subst_cash, 10000 * 10000, "申购替代金额 10000 元（Amt 放大 10000）");
+    let stock = &rpt.extend.underlying_securities[1];
+    assert_eq!(stock.security_id, "000001");
+    assert_eq!(stock.delivery_qty, 2200 * 100, "每篮子 2200 股（Qty 放大 100）");
+    assert_eq!(stock.subst_cash, 0);
+
+    // 单 2：申购（D）2 个篮子 → 交付数量与替代金额翻倍
+    stream
+        .write_all(&etf_sub_red_frame("ETF0000002", "159901", 1_400_000 * 100, b'D'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_ETF_ACK);
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.extend.underlying_securities[0].subst_cash, 10000 * 2 * 10000);
+    assert_eq!(rpt.extend.underlying_securities[1].delivery_qty, 2200 * 2 * 100);
+
+    // 单 3：赎回（E）1 个篮子 → 现金替代金额取“赎回替代金额”
+    stream
+        .write_all(&etf_sub_red_frame("ETF0000003", "159901", 700_000 * 100, b'E'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_ETF_ACK);
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.extend.underlying_securities[0].subst_cash, 200 * 10000);
+
+    // 单 4：目录中没有清单文件的代码 → 0 只成份股（旧行为），确认回报照常
+    stream
+        .write_all(&etf_sub_red_frame("ETF0000004", "510300", 700_000 * 100, b'D'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_ETF_ACK);
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.extend.no_security, 0);
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

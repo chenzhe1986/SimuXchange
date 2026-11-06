@@ -68,9 +68,15 @@ async fn main() {
                 }
             }
             "--help" | "-h" => {
-                println!("用法: simx-update-server [--listen IP:端口] [--dir 发布目录]");
+                println!("用法: simx-update-server [--listen IP:端口] [--dir 发布目录] [-V|--version]");
                 println!("默认: --listen 0.0.0.0:8080  --dir ./update");
                 println!("发布：把程序目录拷进 --dir，再放 release.txt（一行版本号）或 release.json（{{\"version\":\"1.3.0\"}}）");
+                return;
+            }
+            // 打印本程序版本号后退出（与发布目录里的“发布版本号”是两回事：
+            // 这里是升级服务器自身版本，来自本 crate 的 Cargo.toml）
+            "-V" | "--version" => {
+                println!("simx-update-server {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             _ => {}
@@ -99,7 +105,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .expect("端口被占用，请换一个端口（如 8081）");
-    println!("升级服务器已启动，浏览器打开 http://{} 管理发布", listen);
+    println!("升级服务器已启动 v{}，浏览器打开 http://{} 管理发布", env!("CARGO_PKG_VERSION"), listen);
     println!("客户端升级地址填: http://{} （或本机局域网 IP 同端口）", listen);
     axum::serve(listener, app).await.expect("服务器异常退出");
 }

@@ -477,6 +477,9 @@ impl Engine {
                 // Lua 回报脚本编译缓存：平台生命周期内共享，策略热更新后
                 // 下一笔委托自动重新编译
                 lua_cache: Arc::new(crate::lua_engine::ScriptCache::new()),
+                // ETF 申赎清单缓存：平台生命周期内共享（网关重启自然清空），
+                // 避免每笔委托全量扫描清单目录（见 pcf::PcfCache）
+                pcf_cache: Arc::new(parking_lot::Mutex::new(crate::pcf::PcfCache::new())),
                 stats: stats.clone(),
                 connections: connections.clone(),
                 recorders: recorders.clone(),
