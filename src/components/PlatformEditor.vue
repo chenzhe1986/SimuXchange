@@ -24,6 +24,7 @@ import type { Backend } from "../backend";
 import {
     CANCEL_MODES,
     DEFAULT_LUA_PROMPT,
+    defaultDbConfig,
     defaultPartitionNos,
     defaultRejectReason,
     FIXED_STRATEGY_MODES,
@@ -34,6 +35,7 @@ import {
 import LuaEditor from "./LuaEditor.vue";
 import FieldHint from "./FieldHint.vue";
 import LuaDocViewer from "./LuaDocViewer.vue";
+import PositionSyncDialog from "./PositionSyncDialog.vue";
 import { generateLuaScript } from "../llm";
 import { rejectTextOf } from "../errors";
 
@@ -70,19 +72,20 @@ function normalizePlatform(p: PlatformConfig): PlatformConfig {
     const d = { minMs: 0, maxMs: 0 };
     return {
         ...p,
+        db: p.db ?? (props.category === "shzh" ? defaultDbConfig() : undefined),
         strategy: {
             mode: s.mode ?? "fullSingle",
             splitCountMin: s.splitCountMin ?? 2,
             splitCountMax: s.splitCountMax ?? 5,
             priceTick: s.priceTick ?? 0.01,
-            rejectVia: s.rejectVia ?? "executionReport",
+            rejectVia: props.category === "shzh" ? "executionReport" : (s.rejectVia ?? "executionReport"),
             rejectReason: s.rejectReason ?? 1,
             rejectText: s.rejectText ?? "模拟拒单",
             ackDelay: s.ackDelay ?? { ...d },
             tradeDelay: s.tradeDelay ?? { ...d },
             cancelMode: s.cancelMode ?? "default",
             cancelRejectReason: s.cancelRejectReason ?? 1,
-            cancelFrontReject: s.cancelFrontReject ?? false,
+            cancelFrontReject: props.category === "shzh" ? false : (s.cancelFrontReject ?? false),
             cancelDelay: s.cancelDelay ?? { ...d },
             luaScript: s.luaScript ?? "",
             etfPcfDir: s.etfPcfDir ?? "",
@@ -143,6 +146,8 @@ const needTick = () => needSplit();
 const platformTypes = computed(() => platformTypesOf(props.category));
 // 上交所协议（竞价/新债券）Logon 无密码字段，故仅深交所网关显示密码校验选项
 const showPassword = computed(() => props.category === "sz");
+/** 上海综合网关：走数据库接口，界面显示数据库字段而不是监听地址/端口 */
+const isDb = computed(() => props.category === "shzh");
 
 /** 自定义成交已删除（有手动回复功能替代），无需 addFill/removeFill */
 
@@ -226,6 +231,24 @@ function submit() {
     s.tradeDelay.maxMs = Math.max(s.tradeDelay.minMs, s.tradeDelay.maxMs || 0);
     s.cancelDelay.minMs = Math.max(0, s.cancelDelay.minMs || 0);
     s.cancelDelay.maxMs = Math.max(s.cancelDelay.minMs, s.cancelDelay.maxMs || 0);
+    // 上海综合平台没有独立的业务拒绝消息：拒单统一走执行报告拒绝，
+    // 撤单拒绝固定回 OrderCancelReject(9)；隐藏的开关在保存时归一化
+    if (isDb.value) {
+        s.rejectVia = "executionReport";
+        s.cancelFrontReject = false;
+        const db = (form.db ??= defaultDbConfig());
+        db.host = db.host.trim() || "127.0.0.1";
+        db.port = Math.max(1, Math.floor(db.port || 1433));
+        db.database = db.database.trim();
+        db.user = db.user.trim();
+        db.reqRespTable = db.reqRespTable.trim() || "reqresp";
+        db.execReportTable = db.execReportTable.trim() || "execreport";
+        db.pollIntervalMs = Math.max(10, Math.floor(db.pollIntervalMs || 100));
+        if (!db.database) {
+            emit("notify", "数据库名不能为空", true);
+            return;
+        }
+    }
     emit("save", JSON.parse(JSON.stringify(form)));
 }
 
@@ -249,6 +272,8 @@ async function checkScript() {
 const generating = ref(false);
 /** 脚本手册弹窗开关 */
 const docShow = ref(false);
+/** “同步持仓数据”弹窗开关（ETF 清单路径下方的按钮） */
+const posShow = ref(false);
 
 /** 「AI 生成脚本」：把编辑框当前内容当作需求描述交给大模型，按三种结果分别处理——
  *  生成成功（脚本填入同一编辑框，用户原话转为注释头）/ 当前不支持（弹窗说明
@@ -323,22 +348,81 @@ async function generateScript() {
                             </option>
                         </select>
                     </div>
-                    <div class="field">
-                        <label>监听地址</label>
-                        <input v-model="form.listenHost" placeholder="0.0.0.0" :disabled="gatewayRunning" />
-                    </div>
-                    <div class="field">
-                        <label>监听端口</label>
-                        <input v-model.number="form.port" type="number" min="1" max="65535" :disabled="gatewayRunning" />
-                    </div>
-                    <div class="field">
-                        <label>网关 CompID（回报中的 SenderCompID）</label>
-                        <input v-model="form.compId" maxlength="20" :disabled="gatewayRunning" />
-                    </div>
-                    <div class="field">
-                        <label>平台分区号 (PartitionNo)</label>
-                        <input v-model="form.partitionNos" placeholder="如 115,116,117,118（逗号分隔）" :disabled="gatewayRunning" />
-                    </div>
+                    <!-- 上海综合网关：数据库连接与接口表配置（不走 TCP） -->
+                    <template v-if="isDb && form.db">
+                        <div class="field">
+                            <label>数据库主机</label>
+                            <input v-model="form.db.host" placeholder="如 127.0.0.1" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label>数据库端口</label>
+                            <input
+                                v-model.number="form.db.port"
+                                type="number"
+                                min="1"
+                                max="65535"
+                                :disabled="gatewayRunning"
+                            />
+                        </div>
+                        <div class="field">
+                            <label>数据库名</label>
+                            <input v-model="form.db.database" placeholder="如 ezstep" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label>数据库账号</label>
+                            <input v-model="form.db.user" placeholder="如 sa" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label>数据库密码</label>
+                            <input v-model="form.db.password" type="password" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label class="field-row">
+                                委托表名
+                                <FieldHint text="请求及响应接口表（EzSTEP 标准表名 reqresp）：柜台写入委托、网关回写确认" />
+                            </label>
+                            <input v-model="form.db.reqRespTable" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label class="field-row">
+                                成交表名
+                                <FieldHint right text="执行报告表（EzSTEP 标准表名 execreport）：网关把成交回报插入该表" />
+                            </label>
+                            <input v-model="form.db.execReportTable" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label class="field-row">
+                                轮询间隔（毫秒）
+                                <FieldHint text="每隔多久查一次委托表里 ordstatus='R' 的新委托；建议 50~500" />
+                            </label>
+                            <input
+                                v-model.number="form.db.pollIntervalMs"
+                                type="number"
+                                min="10"
+                                max="60000"
+                                :disabled="gatewayRunning"
+                            />
+                        </div>
+                    </template>
+
+                    <template v-if="!isDb">
+                        <div class="field">
+                            <label>监听地址</label>
+                            <input v-model="form.listenHost" placeholder="0.0.0.0" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label>监听端口</label>
+                            <input v-model.number="form.port" type="number" min="1" max="65535" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label>网关 CompID（回报中的 SenderCompID）</label>
+                            <input v-model="form.compId" maxlength="20" :disabled="gatewayRunning" />
+                        </div>
+                        <div class="field">
+                            <label>平台分区号 (PartitionNo)</label>
+                            <input v-model="form.partitionNos" placeholder="如 115,116,117,118（逗号分隔）" :disabled="gatewayRunning" />
+                        </div>
+                    </template>
                     <!-- 登录校验密码（仅网关停止/新建时显示；运行中隐藏）：
                          勾选框与密码输入框横向同一排；勾选后输入框才出现 -->
                     <div class="field full" v-if="showPassword && !gatewayRunning">
@@ -428,7 +512,7 @@ async function generateScript() {
                             <label>拒单方式</label>
                             <select v-model="form.strategy.rejectVia">
                                 <option value="executionReport">确认回报 (ExecType=8 拒绝)</option>
-                                <option value="businessReject">业务拒绝消息 (BusinessReject)</option>
+                                <option v-if="!isDb" value="businessReject">业务拒绝消息 (BusinessReject)</option>
                             </select>
                         </div>
                         <div class="field">
@@ -501,22 +585,34 @@ async function generateScript() {
                         </div>
                     </template>
 
-                    <!-- ETF 清单文件路径：仅深圳非交易处理平台（平台类型 3）显示，位置在
-                         "成交回报延迟"下一行（fixed 模式下即紧邻其下；Lua/关闭自动回报等
-                         模式也显示——成份股填充对任何报单模式都生效）。收到 ETF 申赎委托
-                         （101201）时从该目录按证券代码找最新清单文件 pcf_<代码>_<日期>.xml
-                         解析成份股，填入执行报告 201202；留空或找不到文件则按 0 只成份股
-                         回复并在日志推送告警 -->
-                    <div class="field full" v-if="props.category === 'sz' && form.platformType === 3">
+                    <!-- ETF 清单文件路径：深圳非交易处理平台（平台类型 3）或
+                         上海综合平台显示，位置在策略配置区（随策略保存/热更新）。
+                         收到 ETF 申赎委托时从该目录按证券代码找日期最新的清单文件：
+                         深圳 pcf_<代码>_<日期>.xml；上海 ssepcf_<代码>_<日期>.xml。
+                         留空或找不到文件时按 0 只成份券/0 现金替代回复并告警 -->
+                    <div
+                        class="field full"
+                        v-if="(props.category === 'sz' && form.platformType === 3) || props.category === 'shzh'"
+                    >
                         <label class="field-row">
                             ETF清单文件路径
-                            <FieldHint text="ETF申赎需要从该目录读取清单文件并发送成交明细" />
+                            <FieldHint
+                                text="ETF申赎需要从该目录读取清单文件并生成成交明细。深圳文件名 pcf_<代码>_<日期>.xml；上海综合文件名 ssepcf_<代码>_<日期>.xml。留空 = 不启用"
+                            />
                         </label>
                         <input
                             v-model="form.strategy.etfPcfDir"
                             type="text"
-                            placeholder="如 /opt/simx/pcf（留空 = 不启用，执行报告成份股数为 0）"
+                            placeholder="如 /opt/simx/pcf（留空 = 不启用，成份券/现金替代按 0 处理）"
                         />
+                        <!-- 同步持仓数据：从 Oracle 持仓库按资金账号拉取成份股库存，
+                             保存后作为 ETF 申购扣减依据（服务端全局唯一一份） -->
+                        <div class="field-row" style="margin-top: 6px">
+                            <button class="btn sm" type="button" @click="posShow = true">
+                                同步持仓数据
+                            </button>
+                            <FieldHint right text="用于作为成分股进行ETF申购" />
+                        </div>
                     </div>
 
                     <!-- 撤单自动回报模式区块：撤单模式下拉占满整行（与报单模式行同宽），
@@ -537,7 +633,7 @@ async function generateScript() {
 
                     <!-- 前台拒单与撤单回报延迟左右两栏：开关的说明在问号图标里；
                          延迟对撤单成功与撤单拒单回报均生效、任何报单模式都可配 -->
-                    <div class="field">
+                    <div class="field" v-if="!isDb">
                         <label class="field-row">
                             <input v-model="form.strategy.cancelFrontReject" type="checkbox" />
                             前台拒单
@@ -570,5 +666,12 @@ async function generateScript() {
 
         <!-- 脚本手册弹窗（内嵌 docs/ 下的编写说明，Markdown 渲染） -->
         <LuaDocViewer v-if="docShow" @close="docShow = false" />
+        <!-- 同步持仓数据弹窗（Oracle 查询 + 持仓表编辑保存） -->
+        <PositionSyncDialog
+            v-if="posShow"
+            :backend="backend"
+            @close="posShow = false"
+            @notify="(t, e) => emit('notify', t, e)"
+        />
     </div>
 </template>

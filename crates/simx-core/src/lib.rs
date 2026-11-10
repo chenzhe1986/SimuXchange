@@ -2,20 +2,22 @@
 //!
 //! # 模块地图（建议按此顺序阅读）
 //!
-//! 三类网关按目录分放：`sz/`（深圳统一网关）、`shjj/`（上海竞价网关）、
-//! `shbond/`（上海新债券网关），每目录内含三个模块：
-//! - protocol：Binary 协议编解码（报文长什么样、怎么拆装）
-//! - session：TCP 会话管理（Logon/心跳/委托处理，连接生命周期）
+//! 四类网关按目录分放：`sz/`（深圳统一网关）、`shjj/`（上海竞价网关）、
+//! `shbond/`（上海新债券网关）、`shzh/`（上海综合网关，EzSTEP 数据库接口），
+//! 每目录内含协议/会话/策略三层：
+//! - protocol：协议编解码（报文长什么样、怎么拆装）
+//! - session：会话管理（TCP 登录/心跳/委托处理；上海综合为数据库轮询任务）
 //! - strategy：模拟回报策略（收到委托后“导演”什么回报剧本）
 //!
 //! 网关间共享的基础设施（与具体协议无关）：
 //! - config：网关/平台/策略配置模型（界面上能配的都在这，含网关分类）
-//! - stats：统计计数（委托/成交数、订单号发生器，三类网关共用）
+//! - stats：统计计数（委托/成交数、订单号发生器，各网关共用）
 //! - capture：连接收发报文捕获（16 进制记录 + 可选持久化到文件）
 //! - orderbook：订单缓存（平台级，界面查看订单列表 + 撤单按状态判断）
 //! - oplog：前端操作日志（带前端 IP 的操作留痕，按日期存 log/ 目录）
 //! - lua_engine："Lua 脚本回报"模式的脚本执行器（沙箱化编译运行用户脚本）
 //! - pcf：ETF 实时申购赎回清单（pcf_*.xml）解析（执行报告成份股明细数据源）
+//! - positions：ETF 申购持仓同步（Oracle 查询）与持仓扣减（全局唯一一份）
 //! - engine：网关生命周期管理（总管家：启停/配置/快照，按分类分派会话）
 //! - event：引擎事件（日志推送到前端的载体）
 //! - api：统一 JSON 控制接口（Tauri 与远程 WebSocket 共用）
@@ -36,7 +38,9 @@ pub mod lua_engine;
 pub mod oplog;
 pub mod orderbook;
 pub mod pcf;
+pub mod positions;
 pub mod shbond;
 pub mod shjj;
+pub mod shzh;
 pub mod stats;
 pub mod sz;

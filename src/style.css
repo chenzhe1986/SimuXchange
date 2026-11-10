@@ -43,6 +43,13 @@
     --accent: #2563eb;
     --accent-soft: rgba(37, 99, 235, 0.12);
     --accent-hover: #1d4ed8;
+    /* 侧栏目录层级配色：一级目录蓝 / 二级目录紫 / 网关青。
+       soft 用于目录计数徽标与网关行的层级底色，各主题单独调亮度保证对比度 */
+    --dir1: #2563eb;
+    --dir1-soft: rgba(37, 99, 235, 0.1);
+    --dir2: #7c3aed;
+    --dir2-soft: rgba(124, 58, 237, 0.1);
+    --gw: #0f766e;
     /* 语义色用加深版：绿/黄/红作文字色时对白底对比度 ≥ 4.9 */
     --green: #047857;
     --green-soft: rgba(4, 120, 87, 0.12);
@@ -86,6 +93,12 @@
     --accent: #67a4ff;
     --accent-soft: rgba(103, 164, 255, 0.16);
     --accent-hover: #7db0ff;
+    /* 侧栏目录层级配色（深色底提亮，保证目录名/徽标可读） */
+    --dir1: #6ea8ff;
+    --dir1-soft: rgba(110, 168, 255, 0.14);
+    --dir2: #b795ff;
+    --dir2-soft: rgba(183, 149, 255, 0.14);
+    --gw: #4fd1c5;
     /* 语义色：深色底上直接提亮，够亮才清晰 */
     --green: #45d6a0;
     --green-soft: rgba(69, 214, 160, 0.13);
@@ -125,6 +138,12 @@
     --accent: #45c7f8;
     --accent-soft: rgba(69, 199, 248, 0.16);
     --accent-hover: #63d3f7;
+    /* 侧栏目录层级配色（海军蓝底用偏亮蓝紫，避免与主题青蓝混在一起） */
+    --dir1: #6fb8ff;
+    --dir1-soft: rgba(111, 184, 255, 0.14);
+    --dir2: #c3a6ff;
+    --dir2-soft: rgba(195, 166, 255, 0.14);
+    --gw: #5eead4;
     --green: #45d6a0;
     --green-soft: rgba(69, 214, 160, 0.13);
     --amber: #ffc966;
@@ -162,6 +181,12 @@
     --accent: #2dd4bf;
     --accent-soft: rgba(45, 212, 191, 0.16);
     --accent-hover: #46dcc7;
+    /* 侧栏目录层级配色（主题本身是青碧色，网关沿用主题青，目录用蓝/紫区分） */
+    --dir1: #7fb3ff;
+    --dir1-soft: rgba(127, 179, 255, 0.14);
+    --dir2: #c3a6f0;
+    --dir2-soft: rgba(195, 166, 240, 0.14);
+    --gw: #2dd4bf;
     --green: #34d399;
     --green-soft: rgba(52, 211, 153, 0.13);
     --amber: #f2c14f;
@@ -199,6 +224,12 @@
     --accent: #c08bfc;
     --accent-soft: rgba(192, 139, 252, 0.16);
     --accent-hover: #d0a2fd;
+    /* 侧栏目录层级配色（主题本身是紫色，二级目录用更亮的粉紫与主题区分） */
+    --dir1: #82b4ff;
+    --dir1-soft: rgba(130, 180, 255, 0.15);
+    --dir2: #d8a6ff;
+    --dir2-soft: rgba(216, 166, 255, 0.15);
+    --gw: #4fd6b1;
     --green: #4fd6b1;
     --green-soft: rgba(79, 214, 177, 0.13);
     --amber: #f2c14f;
@@ -236,6 +267,12 @@
     --accent: #2563eb;
     --accent-soft: rgba(37, 99, 235, 0.12);
     --accent-hover: #1d4ed8;
+    /* 侧栏目录层级配色（与 :root 默认值一致） */
+    --dir1: #2563eb;
+    --dir1-soft: rgba(37, 99, 235, 0.1);
+    --dir2: #7c3aed;
+    --dir2-soft: rgba(124, 58, 237, 0.1);
+    --gw: #0f766e;
     --green: #047857;
     --green-soft: rgba(4, 120, 87, 0.12);
     --amber: #ad5700;

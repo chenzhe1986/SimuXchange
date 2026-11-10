@@ -24,7 +24,7 @@
 //! 结束——即常见的空闲检测机制。
 
 use crate::capture::ConnRecorder;
-use crate::config::{CancelMode, PlatformConfig, StrategyConfig};
+use crate::config::{CancelMode, PlatformConfig, StrategyConfig, StrategyMode};
 use crate::event::{ConnInfo, EngineEvent};
 use crate::lua_engine;
 use crate::orderbook::{OrderBook, OrderEntry, OrderStatus, OrderUpdate};
@@ -70,7 +70,7 @@ pub struct SessionCtx {
     /// 运行时回报策略（模拟策略/回报延迟可热更新：网关运行中修改
     /// 后对后续委托实时生效；每次生成回报计划时加锁读取最新值）
     pub strategy: Arc<std::sync::RwLock<StrategyConfig>>,
-    /// Lua 回报脚本的编译缓存（"Lua 脚本回报"模式用，三套协议共用）：
+    /// Lua 回报脚本的编译缓存（"Lua 脚本回报"模式用，各网关共用）：
     /// 按脚本内容缓存已编译的 Lua 运行时，策略热更新后自动重新编译；
     /// 所有连接共享同一个缓存（Mutex 串行化访问）
     pub lua_cache: Arc<lua_engine::ScriptCache>,
@@ -80,6 +80,10 @@ pub struct SessionCtx {
     /// 遍历目录并重新读取解析（目录 mtime 未变时零扫描，见 pcf::PcfCache）；
     /// Arc 包裹供各连接 clone 共享（Mutex 串行化访问）
     pub pcf_cache: Arc<parking_lot::Mutex<crate::pcf::PcfCache>>,
+    /// ETF 申购持仓（界面“同步持仓数据”保存的那一份）：
+    /// 全局唯一、各网关/平台共享；深圳非交易处理平台与上海综合平台的
+    /// ETF 申购在生成回报计划时按它扣减可申赎数量
+    pub positions: Arc<crate::positions::PositionStore>,
     /// 平台统计计数器（委托数/成交数…），各连接共同累加
     pub stats: Arc<PlatformStats>,
     /// 当前存活连接表：连接建立时登记、断开时移除，供前端展示
@@ -111,7 +115,7 @@ impl SessionCtx {
         ));
     }
 
-    /// 为一个新连接创建报文记录器（三套会话共用）。
+    /// 为一个新连接创建报文记录器（各网关会话共用）。
     /// 仅当平台配置开启“展示收发报文”或“持久化到文件”任一开关时才创建；
     /// 开启持久化时报文追加写入
     /// <data_dir>/packets/<YYYYMMDD>/<网关名>_<平台名>/pkg_<接入时间>_ip-<IP>_port-<端口>.log
@@ -121,6 +125,32 @@ impl SessionCtx {
         &self,
         conn_id: u64,
         peer: &SocketAddr,
+    ) -> Option<Arc<ConnRecorder>> {
+        self.start_capture_inner(conn_id, &peer.to_string(), packet_file_name(peer))
+    }
+
+    /// 为非 TCP 网关（上海综合网关的数据库轮询任务）创建报文记录器。
+    /// 没有 SocketAddr，对端地址直接用“数据库主机:端口/库名”字符串；
+    /// 报文文件命名同样做非法字符清洗，保证能落盘。
+    pub(crate) fn start_capture_peer(
+        &self,
+        conn_id: u64,
+        peer: &str,
+    ) -> Option<Arc<ConnRecorder>> {
+        let name = format!(
+            "pkg_{}_db-{}.log",
+            chrono::Local::now().format("%H%M%S"),
+            sanitize_file_name(peer)
+        );
+        self.start_capture_inner(conn_id, peer, name)
+    }
+
+    /// 报文记录器创建的实际实现（TCP 与数据库网关共用）。
+    fn start_capture_inner(
+        &self,
+        conn_id: u64,
+        peer: &str,
+        file_name: String,
     ) -> Option<Arc<ConnRecorder>> {
         if !self.cfg.show_packets && !self.cfg.persist_packets {
             return None;
@@ -137,7 +167,7 @@ impl SessionCtx {
                         sanitize_file_name(&self.gateway_name),
                         sanitize_file_name(&self.cfg.name)
                     ))
-                    .join(packet_file_name(peer)),
+                    .join(file_name),
             )
         } else {
             None
@@ -636,7 +666,7 @@ pub async fn handle_conn(
 /// 按当前连接重新补号（会话序号，与回报记录号无关）。
 /// 未开启报文捕获时没有缓存，返回 0（重发功能随捕获开关一起关闭）。
 /// 跨平台隔离：ctx.recorders 只登记本平台的连接，别的平台的历史回报取不到。
-/// 三套协议共用（shjj/shbond 复用 sz::session 的 SessionCtx 与 ConnRecorder）。
+/// 各网关共用（shjj/shbond/shzh 复用 sz::session 的 SessionCtx 与 ConnRecorder）。
 pub(crate) async fn resend_reports_since(
     ctx: &SessionCtx,
     tx: &mpsc::Sender<Vec<u8>>,
@@ -756,9 +786,19 @@ async fn handle_new_order(
         let st = ctx.strategy.read().unwrap();
         // ETF 实时申购赎回（101201）：执行报告的“成份股明细”不在委托报文里，
         // 按平台配置的清单目录读取 PCF 文件填充（未配置/找不到时保持 0 只
-        // 成份股并推送告警）；在读锁块内做以拿到最新的目录配置（可热更新）
+        // 成份股并推送告警）；在读锁块内做以拿到最新的目录配置（可热更新）。
+        // 申购还会按“同步持仓数据”扣减可申赎数量；禁止现金替代的成份券
+        // 持仓不足时返回拒单原因，下面整笔改回拒单（不生成正常确认）
+        let mut etf_reject: Option<String> = None;
         if order.msg_type == msg_type::NEW_ORDER_ETF_SUB_RED {
-            fill_etf_delivery_details(ctx, &st.etf_pcf_dir, &mut order);
+            // 关闭自动回报/Lua 脚本/自动拒单不参与持仓扣减：
+            // 前两者不按固定剧本生成 ETF 明细，后者本来就不成交
+            let apply_positions = !matches!(
+                st.mode,
+                StrategyMode::NoAutoReply | StrategyMode::LuaScript | StrategyMode::Reject
+            );
+            etf_reject =
+                fill_etf_delivery_details(ctx, &st.etf_pcf_dir, &mut order, apply_positions);
         }
         // 柜台地址从连接表取（连接建立时登记），给 Lua 脚本的 ctx.PeerAddr 用
         let peer_str = ctx
@@ -776,13 +816,32 @@ async fn handle_new_order(
             peer: &peer_str,
             log: &|level, msg| ctx.log(level, msg),
         };
-        strategy::plan_reports(
-            &st,
-            ctx.cfg.partition_for(&order.common.security_id),
-            &order,
-            &ctx.stats,
-            &lua_env,
-        )
+        match etf_reject.as_deref() {
+            // 业务规则拒单：复用平台配置的拒单方式（执行报告/业务拒绝）
+            Some(reason) => {
+                ctx.log(
+                    "warn",
+                    format!(
+                        "ETF 申购持仓校验失败 ClOrdID={}，整笔拒单：{}",
+                        order.common.cl_ord_id, reason
+                    ),
+                );
+                strategy::plan_force_reject(
+                    &st,
+                    ctx.cfg.partition_for(&order.common.security_id),
+                    &order,
+                    &ctx.stats,
+                    reason,
+                )
+            }
+            None => strategy::plan_reports(
+                &st,
+                ctx.cfg.partition_for(&order.common.security_id),
+                &order,
+                &ctx.stats,
+                &lua_env,
+            ),
+        }
     };
     // 所有回报延迟都为 0 时可以当场发完；否则需要另起任务慢慢发
     let all_sync = plans.iter().all(|p| p.delay_ms == 0);
@@ -857,10 +916,19 @@ async fn handle_new_order(
 /// 目录未配置、目录无效或找不到对应代码的清单文件时**保持原样**
 /// （成份股记录数 0，与旧行为一致），并通过日志推送告警，
 /// 便于测试时定位清单数据缺失问题。
-fn fill_etf_delivery_details(ctx: &SessionCtx, dir: &str, order: &mut NewOrder) {
+///
+/// 申购（Side=D）且 `apply_positions` 为 true 时，先按界面“同步持仓数据”
+/// 保存的持仓调整清单（扣减可申赎数量、不足部分转现金替代）；禁止现金
+/// 替代的成份券持仓不足时返回拒单原因文本，由调用方整笔拒单。
+fn fill_etf_delivery_details(
+    ctx: &SessionCtx,
+    dir: &str,
+    order: &mut NewOrder,
+    apply_positions: bool,
+) -> Option<String> {
     let dir = dir.trim();
     if dir.is_empty() {
-        return; // 未配置清单目录：不启用该功能
+        return None; // 未配置清单目录：不启用该功能
     }
     let code = order.common.security_id.trim().to_string();
     // 走平台级缓存查找：目录 mtime 未变时零扫描，文件未变时复用已解析结果
@@ -868,34 +936,69 @@ fn fill_etf_delivery_details(ctx: &SessionCtx, dir: &str, order: &mut NewOrder) 
     let loaded = ctx.pcf_cache.lock().load(Path::new(dir), &code);
     match loaded {
         Ok(Some((path, pcf))) => {
-            let details = pcf_delivery_details(&pcf, order.common.side, order.common.order_qty);
+            // 只有“申购”按持仓扣减；赎回不改持仓，回报与旧行为一致
+            let is_creation = order.common.side == b'D';
+            let mut adjusted: Option<crate::pcf::PcfFile> = None;
+            if apply_positions && is_creation {
+                let shares = order.common.order_qty as f64 / 100.0;
+                match ctx.positions.adjust_creation_pcf(&pcf, shares) {
+                    Ok(p) => adjusted = Some(p),
+                    Err(reason) => {
+                        ctx.log(
+                            "warn",
+                            format!(
+                                "ETF 清单 [{}] 持仓校验未通过，本笔申购拒单：{}",
+                                path.display(),
+                                reason
+                            ),
+                        );
+                        return Some(reason);
+                    }
+                }
+            }
+            let details = match &adjusted {
+                Some(p) => pcf_delivery_details(p, order.common.side, order.common.order_qty),
+                None => pcf_delivery_details(&pcf, order.common.side, order.common.order_qty),
+            };
             let count = details.len();
             order.extend.underlying_securities = details;
             order.extend.no_security = count as u32;
             ctx.log(
                 "info",
                 format!(
-                    "ETF 申赎成份股明细：按清单文件 [{}] 填充 {} 只成份券（{}）",
+                    "ETF 申赎成份股明细：按清单文件 [{}] 填充 {} 只成份券（{}）{}",
                     path.display(),
                     count,
-                    if order.common.side == b'E' { "赎回" } else { "申购" }
+                    if is_creation { "申购" } else { "赎回" },
+                    if adjusted.is_some() && ctx.positions.is_synced() {
+                        "，申购已按同步持仓扣减/现金替代"
+                    } else {
+                        ""
+                    }
                 ),
             );
+            None
         }
-        Ok(None) => ctx.log(
-            "warn",
-            format!(
-                "ETF 清单目录 [{}] 中未找到代码 [{}] 的清单文件（应为 pcf_{}_<日期>.xml），本笔委托的执行报告按 0 只成份股回复",
-                dir, code, code
-            ),
-        ),
-        Err(e) => ctx.log(
-            "warn",
-            format!(
-                "ETF 清单目录 [{}] 不可用（{}），本笔委托的执行报告按 0 只成份股回复",
-                dir, e
-            ),
-        ),
+        Ok(None) => {
+            ctx.log(
+                "warn",
+                format!(
+                    "ETF 清单目录 [{}] 中未找到代码 [{}] 的清单文件（应为 pcf_{}_<日期>.xml），本笔委托的执行报告按 0 只成份股回复",
+                    dir, code, code
+                ),
+            );
+            None
+        }
+        Err(e) => {
+            ctx.log(
+                "warn",
+                format!(
+                    "ETF 清单目录 [{}] 不可用（{}），本笔委托的执行报告按 0 只成份股回复",
+                    dir, e
+                ),
+            );
+            None
+        }
     }
 }
 
@@ -1203,7 +1306,7 @@ async fn send_cancel_reject(
 
 /// 按撤单回报延迟发送一条回报：0 延迟立即投递；否则另起任务 sleep 后投递
 /// （任务登记到会话级 report_tasks，会话结束时统一 abort，防止持有发送端
-/// 阻塞 writer 退出）。撤单成功与撤单拒单回报统一走这里；三套协议共用。
+/// 阻塞 writer 退出）。撤单成功与撤单拒单回报统一走这里；各网关共用。
 pub(crate) async fn send_cancel_report(
     tx: &mpsc::Sender<Vec<u8>>,
     frame: Vec<u8>,

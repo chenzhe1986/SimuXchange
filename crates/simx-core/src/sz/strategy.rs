@@ -473,50 +473,15 @@ pub fn plan_reports(
 
     // ---- 拒单策略：只回一条拒绝，没有确认也没有成交 ----
     if st.mode == StrategyMode::Reject {
-        match st.reject_via {
-            // 方式一：用执行报告(2xxx02)拒单，在确认报文基础上
-            // 把执行类型/订单状态改成“已拒绝”并带上拒绝原因代码
-            RejectVia::ExecutionReport => {
-                let rpt = build_reject_rpt(partition_no, order, &biz, stats, &order_id, st.reject_reason);
-                plans.push(PlannedReport {
-                    delay_ms: st.ack_delay.sample(),
-                    kind: ReportKind::Reject,
-                    frame: rpt.encode(),
-                    desc: format!(
-                        "拒单回报({}) ClOrdID={} 原因代码={}",
-                        biz.ack_msg_type, order.common.cl_ord_id, st.reject_reason
-                    ),
-                    cl_ord_id: order.common.cl_ord_id.clone(),
-                    order_update: Some(OrderUpdate {
-                        order_id: order_id.clone(),
-                        cum_qty: 0.0,
-                        leaves_qty: 0.0,
-                        status: OrderStatus::Rejected,
-                    }),
-                });
-            }
-            // 方式二：用独立的业务拒绝消息(MsgType=4)，可携带文字说明
-            RejectVia::BusinessReject => {
-                let rej = build_business_reject_msg(order, &biz, st.reject_reason, &st.reject_text);
-                plans.push(PlannedReport {
-                    delay_ms: st.ack_delay.sample(),
-                    kind: ReportKind::BusinessReject,
-                    frame: rej.encode(),
-                    desc: format!(
-                        "业务拒绝(4) ClOrdID={} 原因={}",
-                        order.common.cl_ord_id, st.reject_text
-                    ),
-                    cl_ord_id: order.common.cl_ord_id.clone(),
-                    order_update: Some(OrderUpdate {
-                        order_id: String::new(), // 业务拒绝未分配交易所订单号
-                        cum_qty: 0.0,
-                        leaves_qty: 0.0,
-                        status: OrderStatus::Rejected,
-                    }),
-                });
-            }
-        }
-        return plans;
+        return build_reject_plan(
+            st,
+            partition_no,
+            order,
+            &biz,
+            stats,
+            &order_id,
+            &st.reject_text,
+        );
     }
 
     // ---- 确认回报：除拒单外所有策略都先发一条确认 ----
@@ -592,6 +557,79 @@ pub fn plan_reports(
     }
 
     plans
+}
+
+/// 业务规则强制拒单（当前用于 ETF 申购成份股持仓不足）：
+/// 复用平台配置的拒单方式（执行报告/业务拒绝）与拒单原因码，
+/// 文字说明使用调用方给出的具体原因（如“成份股 300122 可申赎数量不足”）。
+pub fn plan_force_reject(
+    st: &StrategyConfig,
+    partition_no: i32,
+    order: &NewOrder,
+    stats: &PlatformStats,
+    reason_text: &str,
+) -> Vec<PlannedReport> {
+    let biz = biz_info(order.msg_type);
+    let order_id = stats.next_order_id();
+    build_reject_plan(st, partition_no, order, &biz, stats, &order_id, reason_text)
+}
+
+/// 生成“只回一条拒单”的回报计划（配置的拒单模式与业务规则强制拒单共用）。
+/// `text` 为拒绝原因说明：业务拒绝消息直接携带；执行报告拒单由报文
+/// 原因码表达，文字写进日志描述便于排查。
+fn build_reject_plan(
+    st: &StrategyConfig,
+    partition_no: i32,
+    order: &NewOrder,
+    biz: &BizInfo,
+    stats: &PlatformStats,
+    order_id: &str,
+    text: &str,
+) -> Vec<PlannedReport> {
+    match st.reject_via {
+        // 方式一：用执行报告(2xxx02)拒单，在确认报文基础上
+        // 把执行类型/订单状态改成“已拒绝”并带上拒绝原因代码
+        RejectVia::ExecutionReport => {
+            let rpt =
+                build_reject_rpt(partition_no, order, biz, stats, order_id, st.reject_reason);
+            vec![PlannedReport {
+                delay_ms: st.ack_delay.sample(),
+                kind: ReportKind::Reject,
+                frame: rpt.encode(),
+                desc: format!(
+                    "拒单回报({}) ClOrdID={} 原因代码={} 说明={}",
+                    biz.ack_msg_type, order.common.cl_ord_id, st.reject_reason, text
+                ),
+                cl_ord_id: order.common.cl_ord_id.clone(),
+                order_update: Some(OrderUpdate {
+                    order_id: order_id.to_string(),
+                    cum_qty: 0.0,
+                    leaves_qty: 0.0,
+                    status: OrderStatus::Rejected,
+                }),
+            }]
+        }
+        // 方式二：用独立的业务拒绝消息(MsgType=4)，可携带文字说明
+        RejectVia::BusinessReject => {
+            let rej = build_business_reject_msg(order, biz, st.reject_reason, text);
+            vec![PlannedReport {
+                delay_ms: st.ack_delay.sample(),
+                kind: ReportKind::BusinessReject,
+                frame: rej.encode(),
+                desc: format!(
+                    "业务拒绝(4) ClOrdID={} 原因={}",
+                    order.common.cl_ord_id, text
+                ),
+                cl_ord_id: order.common.cl_ord_id.clone(),
+                order_update: Some(OrderUpdate {
+                    order_id: String::new(), // 业务拒绝未分配交易所订单号
+                    cum_qty: 0.0,
+                    leaves_qty: 0.0,
+                    status: OrderStatus::Rejected,
+                }),
+            }]
+        }
+    }
 }
 
 /// Lua 脚本模式（StrategyMode::LuaScript）的回报计划生成：

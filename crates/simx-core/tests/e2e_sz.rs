@@ -11,7 +11,9 @@
 
 use simx_core::config::{GatewayConfig, PlatformConfig, StrategyConfig, StrategyMode};
 use simx_core::engine::Engine;
-use simx_core::sz::protocol::{self as protocol, msg_type, BodyWriter, Logon};
+use simx_core::sz::protocol::{
+    self as protocol, exec_type, msg_type, ord_status, BodyWriter, Logon,
+};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -1381,6 +1383,185 @@ async fn test_etf_sub_red_pcf_components() {
     assert_eq!(mt, msg_type::EXEC_RPT_ETF_ACK);
     let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
     assert_eq!(rpt.extend.no_security, 0);
+
+    engine.stop_gateway(&gw.id).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ETF 持仓扣减测试清单：禁止现金替代（600001，每篮子 1000 股）+
+/// 允许现金替代（000001，每篮子 2000 股，每篮子替代金额 10000 元）+
+/// 必须现金替代（159900，申赎现金 5000 元）。
+const PCF_ETF_POS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<PCFFile xmlns="http://ts.szse.cn/Fund">
+  <Version>1.0</Version>
+  <SecurityID>159902</SecurityID>
+  <SecurityIDSource>102</SecurityIDSource>
+  <CreationRedemptionUnit>700000.00</CreationRedemptionUnit>
+  <Components>
+    <Component>
+      <UnderlyingSecurityID>600001</UnderlyingSecurityID>
+      <UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
+      <ComponentShare>1000.00</ComponentShare>
+      <SubstituteFlag>0</SubstituteFlag>
+    </Component>
+    <Component>
+      <UnderlyingSecurityID>000001</UnderlyingSecurityID>
+      <UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
+      <ComponentShare>2000.00</ComponentShare>
+      <SubstituteFlag>1</SubstituteFlag>
+      <CreationCashSubstitute>10000.0000</CreationCashSubstitute>
+    </Component>
+    <Component>
+      <UnderlyingSecurityID>159900</UnderlyingSecurityID>
+      <UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
+      <ComponentShare>0.00</ComponentShare>
+      <SubstituteFlag>2</SubstituteFlag>
+      <CreationCashSubstitute>5000.0000</CreationCashSubstitute>
+    </Component>
+  </Components>
+</PCFFile>"#;
+
+/// 测试十七：ETF 申购按“同步持仓数据”扣减可申赎数量。
+/// - 允许现金替代（000001）：持仓 500 / 需要 2000 → 过户 500，剩余 1500
+///   按比例现金替代（10000 × 1500/2000 = 7500 元/篮子）；下一笔持仓为 0，
+///   全部现金替代；
+/// - 禁止现金替代（600001）：持仓足够时按整篮子扣减，持仓不足时整笔拒单；
+/// - 必须现金替代（159900）：不扣持仓，金额固定。
+#[tokio::test]
+async fn test_etf_sub_red_position_deduction() {
+    use simx_core::positions::{OracleConnectConfig, PositionRow};
+
+    let dir = std::env::temp_dir().join(format!("simx_sz_etf_pos_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pcf_dir = dir.join("pcf");
+    std::fs::create_dir_all(&pcf_dir).unwrap();
+    std::fs::write(pcf_dir.join("pcf_159902_20260615.xml"), PCF_ETF_POS).unwrap();
+
+    let engine = Engine::new(dir.clone());
+    // 资金账号 60500052：600001 有 4000 股、000001 有 500 股
+    engine
+        .save_positions(
+            OracleConnectConfig::default(),
+            "60500052".into(),
+            vec![
+                PositionRow {
+                    security_id: "600001".into(),
+                    security_name: "测试证券A".into(),
+                    holding_qty: 4000.0,
+                    available_qty: 4000.0,
+                    creation_redemption_qty: 4000.0,
+                    frozen_qty: 0.0,
+                },
+                PositionRow {
+                    security_id: "000001".into(),
+                    security_name: "平安银行".into(),
+                    holding_qty: 500.0,
+                    available_qty: 500.0,
+                    creation_redemption_qty: 500.0,
+                    frozen_qty: 0.0,
+                },
+            ],
+        )
+        .await
+        .expect("保存持仓失败");
+
+    let gw = engine
+        .save_gateway(test_gateway(
+            18116,
+            3,
+            StrategyConfig {
+                etf_pcf_dir: pcf_dir.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("保存网关失败");
+    engine.start_gateway(&gw.id).await.expect("启动网关失败");
+    let mut stream = connect_and_logon(18116).await;
+
+    // 单 1：1 个篮子 → 600001 过户 1000；000001 过户 500 + 7500 元现金替代
+    stream
+        .write_all(&etf_sub_red_frame("ETFP000001", "159902", 700_000 * 100, b'D'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_ETF_ACK);
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.exec_type, exec_type::NEW, "持仓充足时应正常确认");
+    assert_eq!(rpt.extend.no_security, 3);
+    assert_eq!(rpt.extend.underlying_securities[0].security_id, "600001");
+    assert_eq!(rpt.extend.underlying_securities[0].delivery_qty, 1000 * 100);
+    assert_eq!(rpt.extend.underlying_securities[1].security_id, "000001");
+    assert_eq!(
+        rpt.extend.underlying_securities[1].delivery_qty,
+        500 * 100,
+        "允许现金替代的券优先扣减持仓"
+    );
+    assert_eq!(
+        rpt.extend.underlying_securities[1].subst_cash,
+        7500 * 10000,
+        "未覆盖的 1500 股按每篮子金额比例转现金替代"
+    );
+    assert_eq!(rpt.extend.underlying_securities[2].security_id, "159900");
+    assert_eq!(rpt.extend.underlying_securities[2].delivery_qty, 0);
+    assert_eq!(rpt.extend.underlying_securities[2].subst_cash, 5000 * 10000);
+
+    // 单 2：再 1 个篮子 → 000001 持仓已为 0，全部现金替代
+    stream
+        .write_all(&etf_sub_red_frame("ETFP000002", "159902", 700_000 * 100, b'D'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.extend.underlying_securities[1].delivery_qty, 0);
+    assert_eq!(
+        rpt.extend.underlying_securities[1].subst_cash,
+        10000 * 10000,
+        "第二笔 000001 全部现金替代"
+    );
+
+    // 单 3：2 个篮子 → 600001 需要 2000，剩余 2000 刚好够
+    stream
+        .write_all(&etf_sub_red_frame("ETFP000003", "159902", 1_400_000 * 100, b'D'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.exec_type, exec_type::NEW);
+    assert_eq!(rpt.extend.underlying_securities[0].delivery_qty, 2000 * 100);
+
+    // 单 4：再 1 个篮子 → 600001 持仓已为 0，禁止现金替代 → 整笔拒单
+    stream
+        .write_all(&etf_sub_red_frame("ETFP000004", "159902", 700_000 * 100, b'D'))
+        .await
+        .unwrap();
+    let (mt, body) = read_frame(&mut stream).await;
+    assert_eq!(mt, msg_type::EXEC_RPT_ETF_ACK, "拒单按执行报告形式返回");
+    let rpt = protocol::ExecRptAck::decode(mt, &body).unwrap();
+    assert_eq!(rpt.exec_type, exec_type::REJECT);
+    assert_eq!(rpt.ord_status, ord_status::REJECTED);
+
+    // 内存持仓已按两笔成功申购扣完
+    let snap = engine.position_state();
+    assert_eq!(snap.account_id, "60500052");
+    assert!(snap.synced);
+    assert_eq!(
+        snap.rows
+            .iter()
+            .find(|r| r.security_id == "600001")
+            .unwrap()
+            .creation_redemption_qty,
+        0.0
+    );
+    assert_eq!(
+        snap.rows
+            .iter()
+            .find(|r| r.security_id == "000001")
+            .unwrap()
+            .creation_redemption_qty,
+        0.0
+    );
 
     engine.stop_gateway(&gw.id).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);

@@ -1,6 +1,6 @@
 [package]
 name = "simx-server"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 
 [dependencies]
@@ -9,5 +9,3 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
-# 启动时检查更新用：轻量 HTTP 客户端（仅 http，不启用 TLS，内网更新服务器足够）
-ureq = { version = "2", default-features = false }

@@ -122,15 +122,38 @@ end
 
 > 深市 `Side` 判断示例：`if ord.Side == "1" then`（买）。
 
+### 3.3 上海综合网关（shzh，EzSTEP 数据库接口）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `ord.ReqID` | string | 业务类型（3 位，如 `EEC` ETF 现金申购、`PFP` 盘后固定价格、`CBT` 定向可转债转股） |
+| `ord.MsgType` | string | 消息类型（当前为 `"D"` 新委托） |
+| `ord.ClOrdID` | string | 客户订单编号 |
+| `ord.OrigClOrdID` | string | 原始订单编号（撤单用；新委托为空串） |
+| `ord.SecurityID` | string | 证券代码 |
+| `ord.Side` | string | 买卖方向：`"1"` 买、`"2"` 卖（部分非交易业务为空） |
+| `ord.OrdType` | string | 订单类别 |
+| `ord.OrderQty` | number | 委托数量 |
+| `ord.Price` | number | 委托价格（元） |
+| `ord.AccountID` | string | 证券账户 |
+| `ord.PBU` | string | 业务 PBU |
+| `ord.BranchID` | string | 营业部代码 |
+| `ord.Text` | string | 备注文本 |
+
+> 综合平台没有独立的“业务拒绝消息”：`via = "business"` 会被按执行报告拒绝发送；
+> 规范上无成交回报的业务（如 `CBT`）即使脚本写了 `kind = "trade"` 也会被忽略并告警。
+> **Lua 脚本模式不参与 ETF PCF 清单**（脚本接管回报）；需要按 PCF 生成成份券/现金替代时，
+> 请使用固定回报模式（全部成交/只回确认等）。
+
 ## 4. 输入变量 `ctx`（环境信息）
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `ctx.Category` | string | 网关分类：`"sz"` / `"shjj"` / `"shbond"` |
+| `ctx.Category` | string | 网关分类：`"sz"` / `"shjj"` / `"shbond"` / `"shzh"` |
 | `ctx.Gateway` | string | 网关名称 |
 | `ctx.Platform` | string | 平台名称 |
-| `ctx.PartitionNo` | number | 本笔委托命中的分区号（按证券代码哈希分配） |
-| `ctx.PeerAddr` | string | 柜台地址（`ip:port`） |
+| `ctx.PartitionNo` | number | 本笔委托命中的分区号（按证券代码哈希分配；综合平台恒 0） |
+| `ctx.PeerAddr` | string | 柜台地址（TCP 为 `ip:port`；综合平台为数据库地址 `host:port/库名`） |
 
 ## 5. 返回值（回报计划）
 
@@ -324,5 +347,5 @@ Lua 脚本模式要求脚本非空；新建/切换到该模式时会自动预填
 
 ---
 
-*本文档对应源码：`crates/simx-core/src/lua_engine.rs`（执行器）与三套协议
+*本文档对应源码：`crates/simx-core/src/lua_engine.rs`（执行器）与各网关
 `strategy.rs` 的 `plan_reports_lua`（回报计划落地）；发现文档与实现不符请提 issue。*

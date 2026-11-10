@@ -1,6 +1,6 @@
 [package]
 name = "simx-core"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 
 [dependencies]
@@ -12,3 +12,7 @@ chrono = { workspace = true }
 parking_lot = { workspace = true }
 mlua = { workspace = true }
 quick-xml = { workspace = true }
+tiberius = { workspace = true }
+tokio-util = { workspace = true }
+# Oracle 驱动（ETF 申购持仓同步查询用）：阻塞驱动，运行时动态加载 Oracle Client
+oracle = "0.6.3"

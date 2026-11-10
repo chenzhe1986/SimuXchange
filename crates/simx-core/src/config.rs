@@ -3,9 +3,9 @@
 //! # 层级关系
 //!
 //! ```text
-//! AppConfig（应用级：用本地引擎还是连远程后端）
+//! AppConfig（应用级：本地引擎/远程后端、更新服务器、AI 生成脚本的模型接口）
 //! GatewayConfig（交易网关，可建多个）
-//!   └─ PlatformConfig（平台，每个平台监听一个 TCP 端口）
+//!   └─ PlatformConfig（平台：TCP 网关为一个监听端口；上海综合网关为一套数据库连接）
 //!        └─ StrategyConfig（该平台收到委托后怎么回报）
 //! ```
 //!
@@ -31,6 +31,46 @@ pub struct AppConfig {
     pub backends: Vec<BackendEntry>,
     /// 更新服务器根地址（桌面端启动时自动检查新版本；留空则不检查）
     pub update_url: String,
+    /// “AI 生成脚本”的大模型接口配置：桌面端读取后交给前端 llm.ts 调用。
+    /// 旧配置文件没有该字段时按内置默认值加载（见 LlmConfig::default）
+    pub llm: LlmConfig,
+}
+
+/// “AI 生成脚本”使用的大模型接口配置（OpenAI 兼容的 chat/completions 协议）。
+///
+/// # 为什么放在应用配置里
+///
+/// 该调用完全由前端发起（模型接口没有 CORS 头，桌面端经 Tauri 壳 llm_chat
+/// 透传 HTTPS，模拟引擎不参与），配置原本写死在 src/llm.ts 顶部；
+/// 放到 simx.config.json 后，换模型/换服务商只需改配置文件，不用重新打包。
+/// 纯浏览器模式（无 Tauri 壳）读不到该文件，回退 llm.ts 里的同一份内置默认值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LlmConfig {
+    /// 接口根地址（写到版本号为止，前端自动拼 /chat/completions）
+    pub base_url: String,
+    /// 服务商鉴权密钥（请求头 Authorization: Bearer <apiKey>）
+    pub api_key: String,
+    /// 模型 id
+    pub model: String,
+    /// 采样温度：脚本生成要求稳定，取低值
+    pub temperature: f64,
+    /// 单次输出的 token 上限（脚本很短，8K 足够）
+    pub max_tokens: u32,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        // 默认接入 AMD Radeon 模型服务；在 simx.config.json 里写 llm 字段
+        // 即可覆盖（未写该字段时用这里的值）
+        Self {
+            base_url: "https://developer.amd.com.cn/radeon/v1".into(),
+            api_key: "rc-b824e20605e5c9f4a9ce7d3155f93fd00590b0958be59c2f".into(),
+            model: "MiMo-V2.6-Flash".into(),
+            temperature: 0.2,
+            max_tokens: 8192,
+        }
+    }
 }
 
 /// 一个已配置的后端：本地引擎（固定）或远程 simx-server
@@ -54,6 +94,7 @@ impl Default for AppConfig {
             remote_url: "ws://127.0.0.1:9800/ws".into(),
             backends: Vec::new(),
             update_url: String::new(),
+            llm: LlmConfig::default(),
         }
     }
 }
@@ -70,8 +111,12 @@ impl Default for BackendEntry {
 }
 
 /// 网关分类：决定网关下所有平台说哪套协议。
-/// serde 的 camelCase 重命名后，JSON 中分别是 "sz"、"shjj" 和 "shbond"；
+/// serde 的 camelCase 重命名后，JSON 中分别是 "sz"、"shjj"、"shbond" 和 "shzh"；
 /// 旧配置文件里没有这个字段时默认按深圳统一网关处理（向后兼容）。
+///
+/// 前三类是 TCP 直连网关；Shzh（上海综合网关）不走 TCP，而是通过
+/// SQL Server 接口表与柜台间接通信（STEP 消息存在 reqresp/execreport 表里），
+/// 因此它的平台配置用 db 字段而不是监听地址/端口。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GatewayCategory {
@@ -82,6 +127,8 @@ pub enum GatewayCategory {
     Shjj,
     /// 上海新债券网关（上交所新债券平台 Binary 1.90 协议）
     Shbond,
+    /// 上海综合网关（上交所综合业务平台 EzSTEP 数据库接口）
+    Shzh,
 }
 
 /// 网关分类名称（日志与界面展示用）
@@ -90,6 +137,7 @@ pub fn gateway_category_name(c: GatewayCategory) -> &'static str {
         GatewayCategory::Sz => "深圳统一网关",
         GatewayCategory::Shjj => "上海竞价网关",
         GatewayCategory::Shbond => "上海新债券网关",
+        GatewayCategory::Shzh => "上海综合网关",
     }
 }
 
@@ -165,7 +213,88 @@ impl Default for GatewayConfig {
     }
 }
 
-/// 平台配置（每个平台一个独立监听端口，柜台连到这个端口后登录、报单）
+/// 上海综合网关的 SQL Server 连接与接口表配置（EzSTEP 数据库接口）。
+///
+/// # 为什么单独一个结构体
+///
+/// 前三类网关的平台配置是“监听地址 + 端口”；上海综合网关没有 TCP，
+/// 通信完全依赖两张接口表，字段性质完全不同，放成嵌套对象后：
+/// - 旧配置（没有 db 字段）仍能正常加载（Option + default）；
+/// - 界面上按网关分类决定显示 TCP 字段还是数据库字段；
+/// - 表名可配置，方便柜台与网关共用同一个库但用不同表（不同操作员/测试环境）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DbConfig {
+    /// SQL Server 主机名或 IP（命名实例请填写实例实际监听端口，并在主机栏只写主机）
+    pub host: String,
+    /// SQL Server 端口（默认 1433）
+    pub port: u16,
+    /// 数据库名
+    pub database: String,
+    /// 登录账号（SQL Server 身份验证）
+    pub user: String,
+    /// 登录密码
+    pub password: String,
+    /// 委托表（请求及响应接口表）名称，默认 reqresp
+    pub req_resp_table: String,
+    /// 成交表（执行报告表）名称，默认 execreport
+    pub exec_report_table: String,
+    /// 轮询间隔（毫秒）：每隔多久查一次委托表里 ordstatus='R' 的新委托
+    pub poll_interval_ms: u64,
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".into(),
+            port: 1433,
+            database: String::new(),
+            user: "sa".into(),
+            password: String::new(),
+            req_resp_table: "reqresp".into(),
+            exec_report_table: "execreport".into(),
+            poll_interval_ms: 100,
+        }
+    }
+}
+
+impl DbConfig {
+    /// 配置是否完整到可以尝试连接（保存配置与启动网关时各校验一次）。
+    /// 表名只校验字符集，防止把 SQL 关键字/分隔符拼进动态 SQL：
+    /// 允许字母、数字、下划线、点（schema.table）与 #（临时表）。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.host.trim().is_empty() {
+            return Err("数据库主机不能为空".into());
+        }
+        if self.port == 0 {
+            return Err("数据库端口不能为 0".into());
+        }
+        if self.database.trim().is_empty() {
+            return Err("数据库名不能为空".into());
+        }
+        for (label, name) in [
+            ("委托表名", &self.req_resp_table),
+            ("成交表名", &self.exec_report_table),
+        ] {
+            let n = name.trim();
+            if n.is_empty() {
+                return Err(format!("{}不能为空", label));
+            }
+            if !n
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '#'))
+            {
+                return Err(format!(
+                    "{}「{}」只能包含字母、数字、下划线、点和 #",
+                    label, n
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 平台配置（TCP 网关：每个平台一个独立监听端口；上海综合网关：一套数据库连接与接口表）
 /// 派生 PartialEq 供引擎比较“平台内容是否变化”（判断修改时间是否刷新，
 /// 比较时需剔除两个时间字段，见 engine.rs save_gateway）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,10 +307,14 @@ pub struct PlatformConfig {
     /// 平台号：1=现货集中竞价 2=综合金融服务 3=非交易处理
     /// 4=衍生品集中竞价 5=国际市场互联 6=固定收益
     pub platform_type: u16,
-    /// 监听地址（0.0.0.0 表示接受任意网卡来的连接；127.0.0.1 仅限本机）
+    /// 监听地址（0.0.0.0 表示接受任意网卡来的连接；127.0.0.1 仅限本机）。
+    /// 上海综合网关不用该字段（走数据库）
     pub listen_host: String,
-    /// 监听端口
+    /// 监听端口（上海综合网关不用该字段）
     pub port: u16,
+    /// 上海综合网关的数据库配置（仅 category == Shzh 时使用；
+    /// 旧配置/其他分类为 None）
+    pub db: Option<DbConfig>,
     /// TGW 回复 Logon 时使用的 SenderCompID
     pub comp_id: String,
     /// 是否校验登录密码
@@ -219,6 +352,7 @@ impl Default for PlatformConfig {
             platform_type: 1,
             listen_host: "0.0.0.0".into(),
             port: 7001,
+            db: None,
             comp_id: "SIMX_TGW".into(),
             check_password: false,
             password: String::new(),
@@ -396,11 +530,12 @@ pub struct StrategyConfig {
     /// 保存时后端校验语法（engine 的 update_strategy / save_gateway），
     /// 运行时由 lua_engine 模块沙箱化编译执行
     pub lua_script: String,
-    /// ETF 清单文件目录（深交所非交易处理平台 ETF 实时申赎用；serde → etfPcfDir）。
-    /// 收到 ETF 申赎委托时从该目录按证券代码查找最新的申购赎回清单
-    /// （pcf_<代码>_<YYYYMMDD>.xml，见 pcf 模块）并把成份股明细填入执行报告；
-    /// 留空 = 不启用（执行报告成份股记录数为 0）。
-    /// 虽属数据源类配置，但随策略配置一起保存/热更新（运行中改目录即时生效）
+    /// ETF 清单文件目录（深圳非交易处理平台 / 上海综合平台用；serde → etfPcfDir）。
+    /// - 深圳：收到 ETF 实时申赎委托时从该目录按证券代码查找最新的
+    ///   `pcf_<代码>_<YYYYMMDD>.xml`，把成份股明细填入执行报告 201202；
+    /// - 上海综合：收到 EEC/EER/IEC/IER 申赎委托时查找
+    ///   `ssepcf_<代码>_<YYYYMMDD>.xml`，生成 1.51 规范的份券/资金替代回报；
+    /// 留空 = 不启用。随策略配置保存/热更新（运行中改目录即时生效）
     pub etf_pcf_dir: String,
 }
 
@@ -439,6 +574,30 @@ mod tests {
         assert_eq!(cfg.backend, "remote");
         assert_eq!(cfg.remote_url, "ws://192.168.1.10:9800/ws");
         assert!(cfg.backends.is_empty());
+        // 没有 llm 字段时按内置默认（AMD Radeon 模型服务）加载
+        assert_eq!(cfg.llm.model, "MiMo-V2.6-Flash");
+        assert!(cfg.llm.base_url.ends_with("/v1"));
+    }
+
+    /// llm 字段：显式配置覆盖默认值；只写部分字段时其余字段仍按默认补齐
+    /// （保证配置文件里只改模型名/地址也能正常工作）
+    #[test]
+    fn app_config_parses_llm_section() {
+        let raw = r#"{
+            "backend": "local",
+            "llm": {
+                "baseUrl": "https://example.com/v1",
+                "apiKey": "sk-test",
+                "model": "demo-model"
+            }
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(raw).expect("llm 配置可解析");
+        assert_eq!(cfg.llm.base_url, "https://example.com/v1");
+        assert_eq!(cfg.llm.api_key, "sk-test");
+        assert_eq!(cfg.llm.model, "demo-model");
+        // 未写的字段沿用默认值
+        assert_eq!(cfg.llm.temperature, LlmConfig::default().temperature);
+        assert_eq!(cfg.llm.max_tokens, LlmConfig::default().max_tokens);
     }
 
     /// 新格式（含多后端列表）序列化往返必须完整保留
@@ -462,6 +621,10 @@ mod tests {
                 },
             ],
             update_url: "http://192.168.1.10/update".into(),
+            llm: LlmConfig {
+                model: "custom-model".into(),
+                ..Default::default()
+            },
         };
         let json = serde_json::to_string(&cfg).expect("序列化");
         let back: AppConfig = serde_json::from_str(&json).expect("反序列化");
@@ -470,6 +633,9 @@ mod tests {
         assert_eq!(back.backends[1].name, "测试机房");
         assert_eq!(back.backends[1].url, "ws://192.168.1.10:9800/ws");
         assert_eq!(back.update_url, "http://192.168.1.10/update");
+        // llm 配置随应用配置一起往返
+        assert_eq!(back.llm.model, "custom-model");
+        assert_eq!(back.llm.base_url, LlmConfig::default().base_url);
     }
 
     /// 多分区号解析与按证券哈希分配：同一证券恒落同一分区；
@@ -501,5 +667,62 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(bad.partitions(), vec![7]);
+    }
+
+    /// 上海综合网关配置：category 序列化为 shzh，db 字段完整往返；
+    /// 旧平台配置（没有 db）仍按 None 加载
+    #[test]
+    fn shzh_category_and_db_config_roundtrip() {
+        // 旧版配置里的 trustCert 字段已废弃（连接固定信任服务器证书）：
+        // 保存在旧 gateways.json 里的该字段按未知字段忽略，不影响加载
+        let raw = r#"{
+            "id": "p1",
+            "name": "上海综合业务平台",
+            "platformType": 2,
+            "listenHost": "",
+            "port": 0,
+            "db": {
+                "host": "10.1.1.5",
+                "port": 1433,
+                "database": "ezstep",
+                "user": "sa",
+                "password": "pw",
+                "reqRespTable": "dbo.reqresp",
+                "execReportTable": "dbo.execreport",
+                "pollIntervalMs": 50,
+                "trustCert": false
+            },
+            "strategy": {}
+        }"#;
+        let p: PlatformConfig = serde_json::from_str(raw).expect("综合平台配置可解析");
+        let db = p.db.as_ref().expect("db 字段存在");
+        assert_eq!(db.database, "ezstep");
+        assert_eq!(db.req_resp_table, "dbo.reqresp");
+        assert_eq!(db.poll_interval_ms, 50);
+        assert!(db.validate().is_ok());
+
+        let gw = GatewayConfig {
+            category: GatewayCategory::Shzh,
+            platforms: vec![p],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&gw).expect("序列化");
+        assert!(json.contains("\"category\":\"shzh\""));
+
+        let old = r#"{"id":"p2","name":"老平台","port":10001,"strategy":{}}"#;
+        let p2: PlatformConfig = serde_json::from_str(old).expect("旧配置可解析");
+        assert!(p2.db.is_none());
+    }
+
+    /// 表名只允许安全字符，防止动态 SQL 拼接被注入
+    #[test]
+    fn db_config_rejects_unsafe_table_name() {
+        let mut db = DbConfig::default();
+        db.database = "ezstep".into();
+        assert!(db.validate().is_ok());
+        db.req_resp_table = "reqresp; DROP TABLE x".into();
+        assert!(db.validate().is_err());
+        db.req_resp_table = "dbo.reqresp".into();
+        assert!(db.validate().is_ok());
     }
 }

@@ -1,4 +1,4 @@
-//! lua_engine —— "Lua 脚本回报"模式的脚本执行器（三套协议共用）。
+//! lua_engine —— "Lua 脚本回报"模式的脚本执行器（各网关共用）。
 //!
 //! # 职责
 //! 用户在平台配置里选择"Lua 脚本回报"模式并编写一段 Lua 脚本，收到新委托时
@@ -121,7 +121,7 @@ impl ScriptEnv<'_> {
     }
 }
 
-/// 构建 ctx 表（运行环境信息，三套协议相同）
+/// 构建 ctx 表（运行环境信息，各网关相同）
 fn build_ctx_table(lua: &Lua, env: &ScriptEnv, partition_no: i32) -> Result<mlua::Table, mlua::Error> {
     let t = lua.create_table()?;
     t.set("Category", env.category)?;

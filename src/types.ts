@@ -15,6 +15,24 @@ export interface AppCfg {
     backends: BackendEntry[];
     /** 更新服务器根地址（启动时自动检查新版本；留空则不检查） */
     updateUrl: string;
+    /** “AI 生成脚本”的大模型接口配置；浏览器模式读不到配置文件时无此字段
+     *  （Rust 侧缺省时始终返回默认值，纯浏览器由 llm.ts 回退内置默认） */
+    llm?: LlmCfg;
+}
+
+/** “AI 生成脚本”的大模型接口配置（与 simx-core 的 LlmConfig 对应，
+ *  来自 simx.config.json 的 llm 字段，OpenAI 兼容的 chat/completions 协议） */
+export interface LlmCfg {
+    /** 接口根地址（写到版本号为止，前端自动拼 /chat/completions） */
+    baseUrl: string;
+    /** 服务商鉴权密钥（请求头 Authorization: Bearer <apiKey>） */
+    apiKey: string;
+    /** 模型 id */
+    model: string;
+    /** 采样温度（脚本生成要求稳定，取低值） */
+    temperature: number;
+    /** 单次输出的 token 上限 */
+    maxTokens: number;
 }
 
 /** 一个已配置的后端：本地引擎（固定）或远程 simx-server */
@@ -80,10 +98,70 @@ export interface StrategyConfig {
     /** Lua 回报脚本源码（仅 luaScript 模式使用；保存时后端校验语法，
      *  运行时沙箱化执行，详见 docs/Lua脚本回报编写说明.md） */
     luaScript: string;
-    /** ETF 清单文件目录（仅深圳非交易处理平台用）：收到 ETF 申赎委托时从该目录
-     *  按证券代码查找最新的清单文件（pcf_<代码>_<YYYYMMDD>.xml），把成份股明细
-     *  填入执行报告；留空 = 不启用（成份股数为 0） */
+    /** ETF 清单文件目录（深圳非交易处理平台 / 上海综合平台）：收到 ETF 申赎委托时
+     *  从该目录按证券代码查找最新的清单文件（深：pcf_<代码>_<YYYYMMDD>.xml；
+     *  沪：ssepcf_<代码>_<YYYYMMDD>.xml），生成执行报告的成份券/现金替代明细；
+     *  留空 = 不启用 */
     etfPcfDir: string;
+}
+
+/** 上海综合网关的 SQL Server 连接与接口表配置（与后端 config.rs 的 DbConfig 对应）。
+ *  综合业务平台不走 TCP，柜台与网关通过 reqresp（委托表）/ execreport（成交表）交换 STEP 消息 */
+export interface DbConfig {
+    /** SQL Server 主机名或 IP（命名实例请填实例实际监听端口） */
+    host: string;
+    /** SQL Server 端口，默认 1433 */
+    port: number;
+    /** 数据库名 */
+    database: string;
+    /** 登录账号（SQL Server 身份验证） */
+    user: string;
+    /** 登录密码 */
+    password: string;
+    /** 委托表（请求及响应接口表）名称，默认 reqresp */
+    reqRespTable: string;
+    /** 成交表（执行报告表）名称，默认 execreport */
+    execReportTable: string;
+    /** 轮询间隔（毫秒） */
+    pollIntervalMs: number;
+}
+
+/** Oracle 连接配置（“同步持仓数据”弹窗；与后端 positions.rs 的
+ *  OracleConnectConfig 对应）。仅用于从持仓库查询，不参与网关通信 */
+export interface OracleConnectConfig {
+    /** 环境名（仅界面标识，如 "qa环境"） */
+    envName: string;
+    /** EZConnect 连接串，如 "10.210.50.63:2151/spdtrderbak" */
+    connectString: string;
+    /** 登录用户名，如 QA_SPEEDTRADER */
+    user: string;
+    /** 登录密码（只存服务端进程内存，不落盘） */
+    password: string;
+}
+
+/** 一条 ETF 成份股持仓（查询 SQL 的六列；数量单位：股） */
+export interface PositionRow {
+    /** 证券代码 */
+    securityId: string;
+    /** 证券名称 */
+    securityName: string;
+    /** 持有数量 */
+    holdingQty: number;
+    /** 可用数量 */
+    availableQty: number;
+    /** 可申赎数量（ETF 申购扣减只认这个字段） */
+    creationRedemptionQty: number;
+    /** 冻结数量 */
+    frozenQty: number;
+}
+
+/** 服务端持仓快照（弹窗打开时拉取）：synced=false 表示尚未保存过持仓，
+ *  ETF 申购不按持仓扣减；rows 为内存中当前生效的唯一一份持仓 */
+export interface PositionSnapshot {
+    oracle: OracleConnectConfig;
+    accountId: string;
+    synced: boolean;
+    rows: PositionRow[];
 }
 
 /** 一个模拟交易平台（= 一个 TCP 监听端口）的配置 */
@@ -92,9 +170,11 @@ export interface PlatformConfig {
     name: string;
     /** 平台类型编号（见下方 PLATFORM_TYPES） */
     platformType: number;
-    /** 监听地址，0.0.0.0 = 所有网卡 */
+    /** 监听地址，0.0.0.0 = 所有网卡（上海综合网关不用） */
     listenHost: string;
     port: number;
+    /** 上海综合网关的数据库配置（仅 category === "shzh" 时存在） */
+    db?: DbConfig;
     /** 本网关在 Logon 回复中的发送方代码 */
     compId: string;
     /** 是否校验登录密码 */
@@ -122,8 +202,9 @@ export interface PlatformConfig {
 /** 网关分类（与后端 config.rs 的 GatewayCategory 对应）：
  *  sz = 深圳统一网关（深交所 Binary 协议）；
  *  shjj = 上海竞价网关（上交所竞价平台 Binary 0.54 协议）；
- *  shbond = 上海新债券网关（上交所新债券平台 Binary 1.90 协议） */
-export type GatewayCategory = "sz" | "shjj" | "shbond";
+ *  shbond = 上海新债券网关（上交所新债券平台 Binary 1.90 协议）；
+ *  shzh = 上海综合网关（上交所综合业务平台 EzSTEP 数据库接口） */
+export type GatewayCategory = "sz" | "shjj" | "shbond" | "shzh";
 
 /** 网关目录（侧栏里的文件夹，与后端 config.rs 的 DirConfig 对应）：
  *  目录最多嵌套两层——根级目录（parentId 为空）内可再建子目录，
@@ -186,6 +267,8 @@ export interface ConnInfo {
 export interface PlatformSnapshot {
     platformId: string;
     listening: boolean;
+    /** 上海综合网关：数据库当前是否连接成功（其他分类无此字段） */
+    dbConnected?: boolean;
     stats: StatsSnapshot;
     connections: ConnInfo[];
 }
@@ -359,17 +442,24 @@ export const PLATFORM_TYPES_SHBOND: { value: number; label: string }[] = [
     { value: 2, label: "新债券平台" },
 ];
 
+/** 上海综合网关平台类型对照表（综合业务平台；STEP 消息里不使用该编号） */
+export const PLATFORM_TYPES_SHZH: { value: number; label: string }[] = [
+    { value: 2, label: "上海综合业务平台" },
+];
+
 /** 网关分类下拉框选项（value 必须与后端枚举的 camelCase 名一致） */
 export const GATEWAY_CATEGORIES: { value: GatewayCategory; label: string }[] = [
     { value: "sz", label: "深圳统一网关" },
     { value: "shjj", label: "上海竞价网关" },
     { value: "shbond", label: "上海新债券网关" },
+    { value: "shzh", label: "上海综合网关" },
 ];
 
 /** 按网关分类返回对应的平台类型对照表 */
 export function platformTypesOf(category: GatewayCategory): { value: number; label: string }[] {
     if (category === "shjj") return PLATFORM_TYPES_SHJJ;
     if (category === "shbond") return PLATFORM_TYPES_SHBOND;
+    if (category === "shzh") return PLATFORM_TYPES_SHZH;
     return PLATFORM_TYPES;
 }
 
@@ -474,8 +564,29 @@ export function defaultStrategy(category: GatewayCategory = "sz"): StrategyConfi
     };
 }
 
+/** 上海综合网关的默认数据库配置（新建平台时预填） */
+export function defaultDbConfig(): DbConfig {
+    return {
+        host: "127.0.0.1",
+        port: 1433,
+        database: "",
+        user: "sa",
+        password: "",
+        reqRespTable: "reqresp",
+        execReportTable: "execreport",
+        pollIntervalMs: 100,
+    };
+}
+
+/** 平台地址摘要：TCP 网关为 IP:端口，上海综合网关为 数据库主机:端口/库名 */
+export function platformAddress(p: PlatformConfig): string {
+    if (p.db) return `${p.db.host}:${p.db.port}/${p.db.database}`;
+    return `${p.listenHost}:${p.port}`;
+}
+
 /** 分区号按平台类型给默认值； */
 export function defaultPartitionNos(platformType: number, category: GatewayCategory = "sz"): string {
+    if (category === "shzh") return "";
     if (category === "shjj") return "1,2,3,4,5,6";
     if (category === "shbond") return "801";
     if (category === "sz" && platformType === 1) return "115,116,117,118";
@@ -490,6 +601,27 @@ export function defaultPartitionNos(platformType: number, category: GatewayCateg
 /** 新建平台的默认配置（id 留空由后端生成；端口由调用方指定）。
  *  按网关分类给出不同默认值：上海竞价平台 PlatformID=0、无需密码校验。 */
 export function defaultPlatform(port: number, category: GatewayCategory = "sz"): PlatformConfig {
+    if (category === "shzh") {
+        return {
+            id: "",
+            name: "上海综合业务平台",
+            platformType: 2,
+            listenHost: "",
+            port: 0,
+            db: defaultDbConfig(),
+            compId: "",
+            checkPassword: false,
+            password: "",
+            partitionNo: 0,
+            partitionNos: "",
+            showPackets: true,
+            persistPackets: true,
+            cacheOrders: true,
+            createdAt: "",
+            updatedAt: "",
+            strategy: defaultStrategy(category),
+        };
+    }
     if (category === "shjj") {
         return {
             id: "",

@@ -18,8 +18,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import type { Backend } from "./backend";
 import { createBackend } from "./backend";
-import type { AppCfg, BackendEntry, DirConfig, GatewayCategory, GatewayConfig, GatewaySnapshot, LogEvent, PlatformConfig, Snapshot } from "./types";
-import { defaultPlatform, emptyStats, GATEWAY_CATEGORIES, gatewayCategoryLabel } from "./types";
+import type { AppCfg, BackendEntry, DirConfig, GatewayCategory, GatewayConfig, GatewaySnapshot, LlmCfg, LogEvent, PlatformConfig, Snapshot } from "./types";
+import { defaultPlatform, emptyStats, GATEWAY_CATEGORIES, gatewayCategoryLabel, platformAddress } from "./types";
 import { APP_VERSION, CHANGELOG, GITHUB_URL, GITEE_URL } from "./changelog";
 import { checkForUpdate, type UpdateInfo, type UpdateManifest } from "./updater";
 import PlatformCard from "./components/PlatformCard.vue";
@@ -280,7 +280,7 @@ function inputCtxMenu(e: MouseEvent, el: HTMLInputElement | HTMLTextAreaElement)
 }
 
 /** 全局按键：按 Esc 关闭右键菜单、主题选择与所有弹窗
- * （平台编辑/订单/报文/新建网关/删除确认/后端设置/赞赏/关于/更新提示）。
+ * （平台编辑/订单/报文/新建网关/删除确认/后端设置/赞赏/关于）。
  * 同一时刻一般只有一个弹窗打开，全部置 false 简化处理；
  * 子组件弹窗（平台编辑/订单/报文）的显隐由本组件状态控制，一并关闭 */
 function onGlobalKeydown(e: KeyboardEvent) {
@@ -303,7 +303,6 @@ function onGlobalKeydown(e: KeyboardEvent) {
         if (backendSettings.show) backendSettings.show = false;
         if (confirmBox.show) confirmBox.show = false;
         if (scriptErrorBox.show) scriptErrorBox.show = false;
-        if (updateBox.show) updateBox.show = false;
         showReward.value = false;
         showAbout.value = false;
     }
@@ -333,13 +332,20 @@ const backendSettings = reactive({
 /** 更新服务器根地址（如 http://192.168.1.10/update）；留空表示不检查更新 */
 const updateUrl = ref("");
 
+/** 模型接口配置（simx.config.json 的 llm 字段，供“AI 生成脚本”使用）：
+ *  界面不编辑它，但保存后端设置时会把整份 AppConfig 写回文件——这里缓存
+ *  启动时读到的值并原样回传，避免用后端缺省值覆盖用户自定义的模型配置 */
+let appCfgLlm: LlmCfg | undefined;
+
 // ---------- 关于与更新 ----------
 /** 关于弹窗是否显示（顶栏“ⓘ 关于”按钮触发） */
 const showAbout = ref(false);
 /** 当前版本号：Tauri 环境取应用真实版本，纯浏览器回退到内置常量 */
 const currentVersion = ref(APP_VERSION);
-/** 检查更新弹窗：发现新版本时弹出，携带服务器上的版本信息 */
-const updateBox = reactive({ show: false, info: null as UpdateInfo | null, busy: false, msg: "" });
+/** 后台下载新版本中（顶栏“关于”按钮显示“下载中”，全程不弹窗、不阻塞操作） */
+const updateDownloading = ref(false);
+/** 正在后台下载的版本号（按钮标题与关于弹窗提示用） */
+const downloadingVersion = ref("");
 /**
  * 更新已下载完成、等待"重启以更新"（顶栏关于按钮变红提示）。
  * 下载完成后或启动时发现磁盘有待应用更新（pending.json）都会置真；
@@ -376,8 +382,23 @@ async function openExternalUrl(url: string) {
     }
 }
 
-/** 执行一次更新检查：silent 为 true 时只有"发现新版"才弹窗（启动自动检查用） */
+/**
+ * 执行一次更新检查（全程不弹模态框）：
+ * - silent=true：启动 3 秒后的自动检查；
+ * - silent=false：关于弹窗里的“检查更新”按钮。
+ * 发现新版本后自动转入后台下载，只在顶栏“关于”按钮上显示“下载中”；
+ * 下载完成后按钮变红“重启以更新”（与原有行为一致）。
+ */
 async function runUpdateCheck(silent: boolean) {
+    // 已有待重启更新或正在下载时不再重复检查
+    if (updateReady.value) {
+        if (!silent) showToast(`新版本 v${updateVersion.value} 已下载，点右上角「↻ 重启以更新」`);
+        return;
+    }
+    if (updateDownloading.value) {
+        if (!silent) showToast(`新版本 v${downloadingVersion.value} 正在后台下载`);
+        return;
+    }
     const url = updateUrl.value.trim();
     if (!url) {
         if (!silent) showToast("未配置更新服务器地址", true);
@@ -401,13 +422,19 @@ async function runUpdateCheck(silent: boolean) {
         // 浏览器环境：直接 fetch（仅调试用途，桌面端请用 exe）
         info = await checkForUpdate(url, currentVersion.value);
     }
-    if (info) {
-        updateBox.info = info;
-        updateBox.msg = "";
-        updateBox.show = true;
-    } else if (!silent) {
-        showToast("当前已是最新版本");
+    if (!info) {
+        if (!silent) showToast("当前已是最新版本");
+        return;
     }
+    if (!isTauri) {
+        showToast(`发现新版本 v${info.manifest.version}，浏览器环境不支持自动更新`, true);
+        return;
+    }
+    // 像 VS Code 一样自动后台下载：不弹窗、不打断操作；
+    // 手动从关于弹窗触发时先收起弹窗，进度统一看顶栏关于按钮
+    showAbout.value = false;
+    showToast(`发现新版本 v${info.manifest.version}，正在后台下载…`);
+    void downloadUpdate(info.manifest);
 }
 
 /** 点击顶栏"关于"按钮：有待应用的更新时走"重启并更新"，否则打开关于弹窗 */
@@ -425,32 +452,27 @@ async function onAboutClick() {
     }
 }
 
-/** 下载服务器发布目录里的全部文件（"发现新版本"弹窗的"下载更新"按钮触发） */
-async function downloadUpdate() {
-    const info = updateBox.info;
-    if (!info || updateBox.busy) return;
-    if (!isTauri) {
-        // 浏览器环境没有文件系统权限，无法整目录更新
-        showToast("浏览器环境不支持更新，请在桌面版（exe）中操作", true);
-        return;
-    }
-    const { invoke } = await import("@tauri-apps/api/core");
-    updateBox.busy = true;
-    updateBox.msg = "正在下载更新文件…";
+/** 后台下载新版本的全部文件（发现新版后自动触发；完成后顶栏“关于”变红提示重启） */
+async function downloadUpdate(manifest: UpdateManifest) {
+    // 先置状态再 await：防止并发检查同时触发两次下载
+    if (updateDownloading.value || updateReady.value) return;
+    updateDownloading.value = true;
+    downloadingVersion.value = manifest.version;
     try {
+        const { invoke } = await import("@tauri-apps/api/core");
         // 整目录下载到临时区（Rust 侧主 exe 最后下载 + 逐文件校验）
         const pending = (await invoke("download_update_files", {
             url: updateUrl.value.trim(),
-            manifest: info.manifest,
+            manifest,
         })) as { version: string };
         updateVersion.value = pending.version;
         updateReady.value = true;
-        updateBox.show = false;
         showToast(`新版本 v${pending.version} 已下载完成，点右上角「↻ 重启以更新」，或关闭程序后下次启动生效`);
     } catch (e) {
-        updateBox.msg = `下载失败：${e}`;
+        showToast(`更新下载失败：${e}`, true);
     } finally {
-        updateBox.busy = false;
+        updateDownloading.value = false;
+        downloadingVersion.value = "";
     }
 }
 
@@ -683,15 +705,19 @@ function toggleDir(id: string) {
  * 树结构在前端“拍平”成一行一个元素的数组，模板里单层 v-for 即可渲染，
  * 避免目录/网关两套嵌套模板重复编写；折叠只影响拍平结果（折叠的目录
  * 不输出内部行），渲染逻辑本身不用关心层级。
+ * depth：目录行 0=一级、1=二级；网关行 0=根层级、1=一级目录下、2=二级目录下，
+ * 用于缩进与按层级着色（一级蓝、二级紫、网关青）。
  */
 type SidebarRow =
     | { kind: "dir"; dir: DirConfig; depth: number; count: number }
-    | { kind: "gw"; gw: GatewaySnapshot };
+    | { kind: "gw"; gw: GatewaySnapshot; depth: number };
 
 /** 把快照里的目录+网关组装成侧栏行列表（顺序：根级网关 → 各目录[子目录 → 网关]）。
- *  标签筛选激活时：网关行只输出通过的；目录行只统计过滤后可见的网关数，
- *  一个可见网关都没有的目录（含其子目录）整棵树隐藏 */
+ *  未筛选时目录行全部输出——空目录也显示（计数为 0），否则新建目录后侧栏
+ *  看不到它、无从拖入网关；标签筛选激活时：网关行只输出通过的，目录行只统计
+ *  过滤后可见的网关数，一个可见网关都没有的目录（含其子目录）整棵树隐藏 */
 const sidebarRows = computed<SidebarRow[]>(() => {
+    const filtering = !!tagFilter.value;
     const inDir = (dirId: string) =>
         snapshot.value.gateways.filter((g) => g.config.dirId === dirId && gwPassTagFilter(g));
     const knownDirIds = new Set(snapshot.value.dirs.map((d) => d.id));
@@ -699,7 +725,7 @@ const sidebarRows = computed<SidebarRow[]>(() => {
     // 根层级网关：dirId 为空，或指向的目录已被删除（防御性兜底，正常流程不会出现）
     for (const gw of snapshot.value.gateways) {
         if ((!gw.config.dirId || !knownDirIds.has(gw.config.dirId)) && gwPassTagFilter(gw)) {
-            rows.push({ kind: "gw", gw });
+            rows.push({ kind: "gw", gw, depth: 0 });
         }
     }
     // 目录区块：子目录排在网关前面（与文件管理器“文件夹优先”的习惯一致）
@@ -708,17 +734,17 @@ const sidebarRows = computed<SidebarRow[]>(() => {
         const subs = snapshot.value.dirs.filter((s) => s.parentId === d.id);
         // 目录行上的网关数 = 目录直属 + 子目录直属（给用户一个“里面有多少”的预期）
         const count = inDir(d.id).length + subs.reduce((n, s) => n + inDir(s.id).length, 0);
-        if (!count) continue; // 没有可见网关的目录整棵隐藏（含其子目录）
+        if (filtering && !count) continue; // 仅筛选时隐藏无匹配的目录；平时空目录也要展示
         rows.push({ kind: "dir", dir: d, depth: 0, count });
         if (collapsedDirs.value[d.id]) continue; // 折叠的目录不输出内部行
         for (const s of subs) {
             const subCount = inDir(s.id).length;
-            if (!subCount) continue;
+            if (filtering && !subCount) continue;
             rows.push({ kind: "dir", dir: s, depth: 1, count: subCount });
             if (collapsedDirs.value[s.id]) continue;
-            for (const gw of inDir(s.id)) rows.push({ kind: "gw", gw });
+            for (const gw of inDir(s.id)) rows.push({ kind: "gw", gw, depth: 2 });
         }
-        for (const gw of inDir(d.id)) rows.push({ kind: "gw", gw });
+        for (const gw of inDir(d.id)) rows.push({ kind: "gw", gw, depth: 1 });
     }
     return rows;
 });
@@ -737,8 +763,8 @@ const delDirBox = reactive({
     withGateways: false,
 });
 
-/** 移动网关弹窗：列出根层级与全部目录，点选目标即移动 */
-const moveGwBox = reactive({ show: false, gatewayId: "", gatewayName: "" });
+/** 移动网关弹窗：先点选目标位置（targetDirId 空 = 根层级），点「确定」后才真正移动 */
+const moveGwBox = reactive({ show: false, gatewayId: "", gatewayName: "", targetDirId: "" });
 
 // ---------- 网关/平台“详情”弹窗（右键菜单入口） ----------
 // 展示创建/修改时间等后端维护的信息。网关详情里标签与备注可编辑（走
@@ -911,31 +937,60 @@ async function runDeleteDir() {
     }
 }
 
-/** 打开“移动网关到目录”弹窗（网关右键菜单触发） */
+/** 打开“移动网关到目录”弹窗（网关右键菜单触发）：默认选中当前位置 */
 function openMoveGateway(gw: GatewaySnapshot) {
     moveGwBox.gatewayId = gw.config.id;
     moveGwBox.gatewayName = gw.config.name;
+    moveGwBox.targetDirId = gw.config.dirId ?? "";
     moveGwBox.show = true;
 }
 
-/** 移动网关到指定目录（dirId 空 = 移回根层级；运行中网关也允许移动） */
-async function moveGatewayTo(dirId: string) {
-    const cur = snapshot.value.gateways.find((g) => g.config.id === moveGwBox.gatewayId)?.config.dirId ?? "";
-    if (cur === dirId) {
-        moveGwBox.show = false; // 目标就是当前位置，无需移动，直接关弹窗
+/** 执行“移动网关”命令（弹窗确认与拖拽共用）。move_gateway 成功时响应 data
+ *  为空，统一封装 call() 会把“成功但无数据”和失败都折叠成 null，无法区分
+ *  成败；这里直接看 resp.ok。返回是否移动成功 */
+async function moveGatewayTo(id: string, dirId: string, doneText: string): Promise<boolean> {
+    const resp = await backend?.dispatch({ cmd: "move_gateway", id, dirId });
+    if (resp?.ok) {
+        await refresh();
+        showToast(doneText);
+        return true;
+    }
+    if (resp) showToast(resp.error ?? "移动失败", true);
+    return false;
+}
+
+/** 确认移动：把网关移到弹窗里选中的目标位置（dirId 空 = 根层级；运行中网关也允许移动） */
+async function confirmMoveGateway() {
+    const target = moveGwBox.targetDirId;
+    if (target === gwCurrentDirId()) {
+        moveGwBox.show = false; // 目标就是当前位置（按钮已禁用，这里只作兜底）
         return;
     }
-    const res = await call({ cmd: "move_gateway", id: moveGwBox.gatewayId, dirId });
-    if (res !== null) {
+    if (await moveGatewayTo(moveGwBox.gatewayId, target, "网关已移动")) {
         moveGwBox.show = false;
-        await refresh();
-        showToast("网关已移动");
     }
 }
 
 /** 查“移动网关”弹窗里那个网关当前所属的目录 id（空 = 根层级，弹窗里标“当前”用） */
 function gwCurrentDirId(): string {
     return snapshot.value.gateways.find((g) => g.config.id === moveGwBox.gatewayId)?.config.dirId ?? "";
+}
+
+/** 根层级（不属于任何目录）的网关数（“移动到目录”弹窗的“根层级”行展示用） */
+function rootLevelGwCount(): number {
+    const known = new Set(snapshot.value.dirs.map((d) => d.id));
+    return snapshot.value.gateways.filter((g) => !g.config.dirId || !known.has(g.config.dirId)).length;
+}
+
+/** 目录及其全部子目录下的网关总数（“移动到目录”弹窗展示用，不受标签筛选影响） */
+function dirSubtreeGwCount(dirId: string): number {
+    let n = snapshot.value.gateways.filter((g) => g.config.dirId === dirId).length;
+    // 目录最多两级，这里的递归对当前模型等价于“直属 + 子目录”，
+    // 写成递归是为了将来放宽层级限制时不用改计数逻辑
+    for (const s of snapshot.value.dirs) {
+        if (s.parentId === dirId) n += dirSubtreeGwCount(s.id);
+    }
+    return n;
 }
 
 /** 网关行开始拖拽：记录网关 id；setData 是 Firefox 的要求（不设则不允许拖动） */
@@ -972,18 +1027,14 @@ function dragGwIdOf(e: DragEvent): string {
     return e.dataTransfer?.getData("text/plain") || dragGwId.value || "";
 }
 
-/** 放置到目录行：把拖拽的网关移入该目录 */
+/** 放置到目录行：把拖拽的网关移入该目录（一级目录与子目录行共用） */
 async function onDirDrop(e: DragEvent, dirId: string) {
     e.preventDefault();
     const id = dragGwIdOf(e);
     dragGwId.value = "";
     dropTargetDir.value = "";
     if (!id) return;
-    const res = await call({ cmd: "move_gateway", id, dirId });
-    if (res !== null) {
-        await refresh();
-        showToast("网关已移动");
-    }
+    await moveGatewayTo(id, dirId, "网关已移入目录");
 }
 
 /** 拖拽悬停网关列表空白区：允许放置（移回根层级用） */
@@ -1002,11 +1053,7 @@ async function onListDrop(e: DragEvent) {
     dragGwId.value = "";
     dropTargetDir.value = "";
     if (!id) return;
-    const res = await call({ cmd: "move_gateway", id, dirId: "" });
-    if (res !== null) {
-        await refresh();
-        showToast("网关已移至根层级");
-    }
+    await moveGatewayTo(id, "", "网关已移至根层级");
 }
 
 // ---------- 后端调用 ----------
@@ -1092,6 +1139,8 @@ async function persistAppCfg() {
             backendSettings.list.find((b) => b.id === backendSettings.currentId)?.url ?? "",
         backends: backendSettings.list,
         updateUrl: updateUrl.value,
+        // 原样回传启动时读到的模型配置（见 appCfgLlm 的说明）
+        llm: appCfgLlm,
     };
     if (isTauri) {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -1369,7 +1418,7 @@ function openOrderViewer(p: PlatformConfig) {
     ovViewer.gatewayId = selectedGw.value.config.id;
     ovViewer.platformId = p.id;
     ovViewer.platformName = p.name;
-    ovViewer.listenAddr = `${p.listenHost}:${p.port}`;
+    ovViewer.listenAddr = platformAddress(p);
     ovViewer.show = true;
 }
 
@@ -1439,10 +1488,10 @@ function platformCtxMenu(e: MouseEvent, p: PlatformConfig) {
         // 详情弹窗：只读展示创建/修改时间（时间由后端维护，不支持直接改）
         { label: "详情", action: () => openPfInfo(selectedGw.value?.config.name ?? "", p) },
         {
-            label: "复制监听地址",
+            label: "复制平台地址",
             action: () => {
-                navigator.clipboard.writeText(`${p.listenHost}:${p.port}`);
-                showToast("已复制监听地址");
+                navigator.clipboard.writeText(platformAddress(p));
+                showToast("已复制平台地址");
             },
         },
         { label: "", divider: true },
@@ -1504,6 +1553,8 @@ onMounted(async () => {
             // 配置损坏按默认处理
         }
     }
+    // 缓存模型接口配置：保存后端设置时原样回写（见 appCfgLlm 的说明）
+    appCfgLlm = appCfg.llm;
     const norm = normalizeBackends(appCfg);
     backendSettings.list = norm.list;
     backendSettings.currentId = norm.currentId;
@@ -1594,11 +1645,17 @@ onBeforeUnmount(() => {
                 <button class="reward-btn" title="赞赏作者" @click="showReward = true">♥ 赞赏</button>
                 <button
                     class="about-btn"
-                    :class="{ 'update-ready': updateReady }"
-                    :title="updateReady ? '新版本 v' + updateVersion + ' 已下载，点击重启并更新' : '版本信息与更新'"
+                    :class="{ 'update-ready': updateReady, 'update-downloading': !updateReady && updateDownloading }"
+                    :title="
+                        updateReady
+                            ? '新版本 v' + updateVersion + ' 已下载，点击重启并更新'
+                            : updateDownloading
+                              ? '正在后台下载新版本 v' + downloadingVersion + '，完成后可重启更新'
+                              : '版本信息与更新'
+                    "
                     @click="onAboutClick"
                 >
-                    {{ updateReady ? "↻ 重启以更新" : "ⓘ 关于" }}
+                    {{ updateReady ? "↻ 重启以更新" : updateDownloading ? "⇣ 下载中" : "ⓘ 关于" }}
                 </button>
                 <!-- 配色主题按钮：点击展开/收起选择面板 -->
                 <button class="win-btn theme-btn" title="界面配色" @click="showThemePicker = !showThemePicker">◐</button>
@@ -1654,13 +1711,22 @@ onBeforeUnmount(() => {
                         >
                             <span class="dir-arrow" :class="{ open: !collapsedDirs[row.dir.id] }">▶</span>
                             <span class="dir-name">{{ row.dir.name }}</span>
-                            <span class="dir-count">{{ row.count }}</span>
+                            <!-- 计数含该目录下所有子目录的网关（“共”字明确它是子树总数） -->
+                            <span
+                                class="dir-count"
+                                :title="`该目录及子目录共 ${row.count} 个网关`"
+                            >共 {{ row.count }}</span>
                         </div>
-                        <!-- 网关行（可拖拽到目录行完成归类） -->
+                        <!-- 网关行（可拖拽到目录行完成归类）；按所属层级缩进并着色 -->
                         <div
                             v-else
                             class="gw-item"
-                            :class="{ active: row.gw.config.id === selectedGwId }"
+                            :class="{
+                                active: row.gw.config.id === selectedGwId,
+                                'lvl-1': row.depth === 1,
+                                'lvl-2': row.depth === 2,
+                            }"
+                            :style="{ paddingLeft: 10 + row.depth * 16 + 'px' }"
                             draggable="true"
                             @dragstart="onGwDragStart($event, row.gw)"
                             @dragend="onGwDragEnd"
@@ -1839,7 +1905,7 @@ onBeforeUnmount(() => {
             </div>
         </div>
 
-        <!-- 移动网关到目录弹窗：点选目标位置即移动 -->
+        <!-- 移动网关到目录弹窗：先点选目标位置（高亮选中），点「确定」后才执行移动 -->
         <div v-if="moveGwBox.show" class="modal-mask" @mousedown.self="moveGwBox.show = false">
             <div class="modal" style="width: 360px">
                 <div class="modal-head">
@@ -1848,18 +1914,33 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="modal-body">
                     <div class="move-list">
-                        <div class="move-item" :class="{ current: gwCurrentDirId() === '' }" @click="moveGatewayTo('')">
-                            根层级<span v-if="gwCurrentDirId() === ''" class="move-cur">当前</span>
+                        <div
+                            class="move-item"
+                            :class="{ selected: moveGwBox.targetDirId === '' }"
+                            @click="moveGwBox.targetDirId = ''"
+                        >
+                            <span class="move-name">根层级</span>
+                            <span v-if="gwCurrentDirId() === ''" class="move-cur">当前</span>
+                            <span class="move-count" title="根层级（不属于任何目录）的网关数">
+                                共 {{ rootLevelGwCount() }}
+                            </span>
                         </div>
                         <div
                             v-for="d in snapshot.dirs"
                             :key="d.id"
                             class="move-item"
-                            :class="{ sub: !!d.parentId, current: gwCurrentDirId() === d.id }"
+                            :class="{ sub: !!d.parentId, selected: moveGwBox.targetDirId === d.id }"
                             :style="{ paddingLeft: d.parentId ? '26px' : '10px' }"
-                            @click="moveGatewayTo(d.id)"
+                            @click="moveGwBox.targetDirId = d.id"
                         >
-                            {{ d.name }}<span v-if="gwCurrentDirId() === d.id" class="move-cur">当前</span>
+                            <span class="move-name">{{ d.name }}</span>
+                            <span v-if="gwCurrentDirId() === d.id" class="move-cur">当前</span>
+                            <span
+                                class="move-count"
+                                :title="`该目录及子目录共 ${dirSubtreeGwCount(d.id)} 个网关`"
+                            >
+                                共 {{ dirSubtreeGwCount(d.id) }}
+                            </span>
                         </div>
                         <div v-if="!snapshot.dirs.length" class="gw-empty" style="padding: 16px 6px">
                             还没有目录<br />可在侧栏空白处右键「新建目录」
@@ -1868,6 +1949,13 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="modal-foot">
                     <button class="btn" @click="moveGwBox.show = false">取消</button>
+                    <button
+                        class="btn primary"
+                        :disabled="moveGwBox.targetDirId === gwCurrentDirId()"
+                        @click="confirmMoveGateway"
+                    >
+                        确定
+                    </button>
                 </div>
             </div>
         </div>
@@ -1953,7 +2041,10 @@ onBeforeUnmount(() => {
                     <div class="info-grid">
                         <div class="info-row"><span class="info-label">所属网关</span><span>{{ pfInfo.gwName || "—" }}</span></div>
                         <div class="info-row"><span class="info-label">名称</span><span>{{ pfInfo.platform?.name ?? "—" }}</span></div>
-                        <div class="info-row"><span class="info-label">监听地址</span><span>{{ pfInfo.platform?.listenHost }}:{{ pfInfo.platform?.port }}</span></div>
+                        <div class="info-row">
+                            <span class="info-label">{{ pfInfo.platform?.db ? "数据库" : "监听地址" }}</span>
+                            <span>{{ pfInfo.platform ? platformAddress(pfInfo.platform) : "—" }}</span>
+                        </div>
                         <div class="info-row"><span class="info-label">创建时间</span><span>{{ pfInfo.platform?.createdAt || "—" }}</span></div>
                         <div class="info-row"><span class="info-label">修改时间</span><span>{{ pfInfo.platform?.updatedAt || "—" }}</span></div>
                     </div>
@@ -2047,7 +2138,7 @@ onBeforeUnmount(() => {
                     <label class="be-sec-label">更新服务器地址（可选）</label>
                     <input
                         v-model="updateUrl"
-                        placeholder="如 http://192.168.1.10/update（留空不检查更新）"
+                        placeholder="如 http://192.168.1.10:9860/update（留空不检查更新）"
                         @change="saveUpdateUrl"
                         @keyup.enter="saveUpdateUrl"
                     />
@@ -2131,6 +2222,11 @@ onBeforeUnmount(() => {
                     <div class="about-logo">◆</div>
                     <div class="about-name">SimuXchange · 模拟撮合网关</div>
                     <div class="about-ver">版本 v{{ currentVersion }}</div>
+                    <!-- 更新状态：后台下载中 / 已下载待重启（与顶栏关于按钮状态一致） -->
+                    <div v-if="updateDownloading" class="about-upd">正在后台下载新版本 v{{ downloadingVersion }}…</div>
+                    <div v-else-if="updateReady" class="about-upd ready">
+                        新版本 v{{ updateVersion }} 已下载，点右上角「↻ 重启以更新」
+                    </div>
                     <div class="about-sec">更新说明</div>
                     <ul class="about-notes">
                         <li v-for="(n, i) in CHANGELOG[0]?.notes ?? []" :key="i">{{ n }}</li>
@@ -2145,32 +2241,6 @@ onBeforeUnmount(() => {
                 <div class="modal-foot">
                     <button class="btn ghost" @click="showAbout = false">关闭</button>
                     <button class="btn primary" @click="runUpdateCheck(false)">检查更新</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- 发现新版本弹窗：版本号 + 下载更新 -->
-        <div v-if="updateBox.show" class="modal-mask" @mousedown.self="updateBox.show = false">
-            <div class="modal" style="width: 420px">
-                <div class="modal-head">
-                    <span>发现新版本 v{{ updateBox.info?.manifest.version }}</span>
-                    <button class="modal-close" @click="updateBox.show = false">✕</button>
-                </div>
-                <div class="modal-body">
-                    <p class="hint" style="margin-bottom: 8px">当前版本 v{{ currentVersion }}</p>
-                    <p v-if="updateBox.msg" class="update-msg">{{ updateBox.msg }}</p>
-                </div>
-                <div class="modal-foot">
-                    <button class="btn" :disabled="updateBox.busy" @click="updateBox.show = false">
-                        以后再说
-                    </button>
-                    <button
-                        class="btn primary"
-                        :disabled="updateBox.busy || !updateBox.info?.manifest.files?.length"
-                        @click="downloadUpdate"
-                    >
-                        {{ updateBox.busy ? "下载更新中…" : "下载更新" }}
-                    </button>
                 </div>
             </div>
         </div>
@@ -2352,6 +2422,23 @@ onBeforeUnmount(() => {
     border-color: #c82e2e;
 }
 
+/* "后台下载中"状态：主题色描边 + 呼吸效果，提示进度但不遮挡任何操作 */
+.about-btn.update-downloading {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    animation: update-breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes update-breathe {
+    0%,
+    100% {
+        opacity: 0.6;
+    }
+    50% {
+        opacity: 1;
+    }
+}
+
 @keyframes update-pulse {
     0%, 100% {
         box-shadow: 0 0 0 0 rgba(224, 54, 54, 0.45);
@@ -2437,11 +2524,15 @@ onBeforeUnmount(() => {
     color: var(--on-accent);
 }
 
-/* 更新弹窗里的下载状态提示 */
-.update-msg {
+/* 关于弹窗里的更新状态（后台下载中 / 已下载待重启） */
+.about-upd {
     font-size: 12px;
     color: var(--accent);
-    margin-top: 10px;
+    margin-top: 6px;
+}
+
+.about-upd.ready {
+    color: #e03636;
 }
 
 .win-controls {
@@ -2788,6 +2879,7 @@ onBeforeUnmount(() => {
 }
 
 .gw-item {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 9px;
@@ -2798,8 +2890,11 @@ onBeforeUnmount(() => {
     transition: background 0.12s;
 }
 
-/* 目录行：可点击折叠/展开，也可作为网关拖拽的放置目标 */
+/* 目录行：可点击折叠/展开，也可作为网关拖拽的放置目标。
+   一级目录用蓝色系、二级目录用紫色系（文字/箭头/计数/左侧色条同色），
+   与青色的网关行形成三级视觉区分 */
 .dir-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 7px;
@@ -2808,9 +2903,21 @@ onBeforeUnmount(() => {
     cursor: pointer;
     font-size: 13px;
     font-weight: 600;
-    color: var(--text-dim);
+    color: var(--dir1);
     transition: background 0.12s;
     user-select: none;
+}
+
+/* 目录行左侧的层级色条：一眼区分一级（蓝）与二级（紫）目录 */
+.dir-row::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 4px;
+    bottom: 4px;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--dir1);
 }
 
 .dir-row:hover {
@@ -2820,6 +2927,11 @@ onBeforeUnmount(() => {
 /* 子目录行整体缩进（行内 paddingLeft 也按层级递增，双保险） */
 .dir-row.sub {
     font-weight: 500;
+    color: var(--dir2);
+}
+
+.dir-row.sub::before {
+    background: var(--dir2);
 }
 
 /* 网关拖到目录行悬停时的高亮：提示“松手就放进这个目录” */
@@ -2828,10 +2940,10 @@ onBeforeUnmount(() => {
     box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-/* 折叠箭头：折叠时朝右、展开时旋转 90° 朝下 */
+/* 折叠箭头：折叠时朝右、展开时旋转 90° 朝下；颜色跟随所属目录层级 */
 .dir-arrow {
     font-size: 10px;
-    color: var(--text-faint);
+    color: inherit;
     transition: transform 0.15s;
     flex-shrink: 0;
 }
@@ -2849,14 +2961,43 @@ onBeforeUnmount(() => {
     text-overflow: ellipsis;
 }
 
+/* 目录计数徽标：底色/文字跟随目录层级色，弱化但仍能看出归属 */
 .dir-count {
     font-size: 11px;
     font-weight: 500;
-    color: var(--text-faint);
-    background: var(--panel);
+    color: var(--dir1);
+    background: var(--dir1-soft);
     border-radius: 8px;
     padding: 1px 7px;
     flex-shrink: 0;
+}
+
+.dir-row.sub .dir-count {
+    color: var(--dir2);
+    background: var(--dir2-soft);
+}
+
+/* 网关行左侧青色条：网关类型色，与蓝色/紫色目录行区分 */
+.gw-item::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--gw);
+    opacity: 0.85;
+}
+
+/* 目录下的网关：行内缩进（模板按 depth 设置 paddingLeft）+ 所属目录层级色的
+   渐变底色（左浓右淡），这样一级目录下与二级目录下的网关也能一眼区分 */
+.gw-item.lvl-1 {
+    background: linear-gradient(90deg, var(--dir1-soft) 0%, transparent 65%);
+}
+
+.gw-item.lvl-2 {
+    background: linear-gradient(90deg, var(--dir2-soft) 0%, transparent 65%);
 }
 
 .gw-item:hover {
@@ -3097,13 +3238,34 @@ onBeforeUnmount(() => {
     background: var(--panel);
 }
 
-.move-item.current {
-    color: var(--text-faint);
-    cursor: default;
+/* 选中态：与侧栏拖拽悬停一致的高亮描边，提示“点确定后移到这里” */
+.move-item.selected {
+    background: var(--panel-2);
+    box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-.move-item.current:hover {
-    background: transparent;
+.move-item.selected:hover {
+    background: var(--panel-2);
+}
+
+/* 目录名占满剩余宽度，计数徽标靠右对齐（超长目录名省略号截断） */
+.move-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* 目录及其子目录的网关总数（与侧栏“共 N”语义一致） */
+.move-count {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-faint);
+    background: var(--panel);
+    border-radius: 8px;
+    padding: 1px 7px;
+    flex-shrink: 0;
 }
 
 .move-cur {

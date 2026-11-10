@@ -1,6 +1,6 @@
 [package]
 name = "simx-cli"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 description = "SimuXchange 命令行控制工具（自动化测试用）：经 WebSocket 控制 simx-server 的回报策略与手动回报"
 license = "MIT"

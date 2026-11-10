@@ -1,4 +1,19 @@
 {
-    "backend": "local",
-    "remoteUrl": "ws://127.0.0.1:9800/ws"
+  "backend": "b-mth0ry8a1duo",
+  "remoteUrl": "ws://10.210.50.44:9800/ws",
+  "backends": [
+    {
+      "id": "local",
+      "name": "本地引擎",
+      "kind": "local",
+      "url": ""
+    },
+    {
+      "id": "b-mth0ry8a1duo",
+      "name": "44服务器",
+      "kind": "remote",
+      "url": "ws://10.210.50.44:9800/ws"
+    }
+  ],
+  "updateUrl": "http://10.210.50.44:9860/update"
 }

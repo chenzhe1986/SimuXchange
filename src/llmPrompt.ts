@@ -57,12 +57,26 @@ ord 上海竞价 shjj / 新债券 shbond（两套同构）：
 - BranchID string 营业部代码
 - UserInfo string 用户私有信息
 - 沪市扩展字段：Custodian / DividendSelect / DestSecurity（仅转托管/分红/转换类业务携带）
+ord 上海综合 shzh（EzSTEP 数据库接口）：
+- ReqID string 业务类型（3 位，如 EEC/PFP/CBT）
+- MsgType string 消息类型："D" 新委托
+- ClOrdID string 客户订单编号
+- OrigClOrdID string 原始订单编号（撤单用，新委托为空）
+- SecurityID string 证券代码
+- Side string 买卖方向："1" 买、"2" 卖（部分非交易业务为空）
+- OrdType string 订单类别
+- OrderQty number 委托数量
+- Price number 委托价格（元）
+- AccountID string 证券账户
+- PBU string 业务 PBU
+- BranchID string 营业部代码
+- Text string 备注文本
 ctx 环境信息：
-- ctx.Category string 网关分类："sz" / "shjj" / "shbond"
+- ctx.Category string 网关分类："sz" / "shjj" / "shbond" / "shzh"
 - ctx.Gateway string 网关名称
 - ctx.Platform string 平台名称
-- ctx.PartitionNo number 本笔委托命中的分区号
-- ctx.PeerAddr string 柜台地址（ip:port，如 "192.168.1.100:8080"）
+- ctx.PartitionNo number 本笔委托命中的分区号（综合平台恒 0）
+- ctx.PeerAddr string 柜台地址（TCP 为 ip:port；综合平台为数据库主机:端口/库名）
 
 # 三、回报计划（脚本 return 的值）
 1. 字符串快捷方式：
@@ -79,7 +93,7 @@ ctx 环境信息：
    - qty 成交股数（向下取整）；缺省 = 剩余全部数量
    - price 成交价（元）；缺省 = 委托价
    - delayMs 本项相对上一条的等待毫秒；缺省 0 同步发出（Lua 模式的延迟只能由本字段控制，界面延迟配置不参与）；全部 0 时严格保序同步发送
-   - via 拒单方式："execution" 执行报告回绝（缺省）/ "business" 业务拒单（深市 MsgType=4、沪市 204；仅深市业务拒单携带 text）
+   - via 拒单方式："execution" 执行报告回绝（缺省）/ "business" 业务拒单（深市 MsgType=4、沪市 204；仅深市业务拒单携带 text；综合平台无独立业务拒绝消息，会按执行报告拒绝发送）
    - reason 拒单原因码；缺省取平台"拒单原因码"配置
    - text 拒单说明文本（仅深市业务拒单携带）
 3. return nil、return {} 或不写 return = 不回报（订单仍进订单列表）。

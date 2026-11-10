@@ -102,7 +102,8 @@ async fn dispatch(
 ///
 /// 为什么要桌面壳代发：模型接口不返回 CORS 头，WebView 里的前端 fetch 会被
 /// 浏览器拦截。本 command 只做一次 HTTPS 转发——url / 请求头 / 请求体都由
-/// 前端拼好（模型配置在 src/llm.ts 里维护），壳不理解任何业务语义；
+/// 前端拼好（模型配置来自 simx.config.json 的 llm 字段，读取逻辑在 src/llm.ts），
+/// 壳不理解任何业务语义；
 /// 模拟引擎（simx-core / Linux 后端）完全不参与该功能。
 ///
 /// TLS 注意：ureq 的 native-tls 特性只编译实现、不会作为默认后端启用
@@ -352,7 +353,8 @@ fn main() {
 //   cargo test --manifest-path src-tauri/Cargo.toml tls_native_smoke -- --ignored --nocapture
 // 场景正是 llm_chat 依赖的 HTTPS 通道：TLS 后端没接上时 ureq 会报
 // "no TLS backend is configured"（踩过的坑，见 llm_chat 注释）；
-// 接上后向模型接口发一次无鉴权 GET，服务端应回 HTTP 400（缺 model 参数）。
+// 接上后向模型接口发一次无鉴权 GET：服务端回任意 HTTP 状态码（如 401/404）
+// 都说明 TLS 握手与 HTTPS 请求已打通。
 #[cfg(test)]
 mod tests {
 
@@ -365,11 +367,11 @@ mod tests {
             .timeout(std::time::Duration::from_secs(30))
             .build();
         let result = agent
-            .get("https://chatapi.weixin.qq.com/openai/v1/models")
+            .get("https://developer.amd.com.cn/radeon/v1/models")
             .call();
         match result {
-            // 服务端拒绝缺 model 参数的请求：说明 TLS 握手与 HTTPS 请求已打通
-            Err(ureq::Error::Status(code, _)) => assert_eq!(code, 400, "TLS 通了但响应异常"),
+            // 能收到 HTTP 状态码即说明 TLS 与 HTTPS 链路正常（状态码本身无所谓）
+            Err(ureq::Error::Status(code, _)) => println!("TLS 链路正常，服务端返回 HTTP {}", code),
             other => panic!("TLS 链路未打通（后端没挂上或网络不通）：{:?}", other.map(|_| ())),
         }
     }

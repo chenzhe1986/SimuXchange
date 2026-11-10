@@ -13,6 +13,7 @@
 
 use crate::config::{DirConfig, GatewayConfig, StrategyConfig};
 use crate::engine::Engine;
+use crate::positions::{OracleConnectConfig, PositionRow};
 use crate::sz::session::ManualReportKind;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -109,6 +110,24 @@ pub enum Command {
     /// 按钮即时反馈；保存时的强制校验在 update_strategy / save_gateway 内部。
     /// 无状态只读，不记操作日志（避免编辑过程中频繁检查刷屏）
     ValidateLuaScript { script: String },
+    /// 拉取服务端持仓快照（“同步持仓数据”弹窗初始化：回填上次连接信息/
+    /// 资金账号，并展示内存中当前的持仓）。只读命令，不记操作日志
+    GetPositionState,
+    /// 从 Oracle 查询资金账号的全部持仓（结果只返回前端展示，
+    /// 用户点“保存”后才写入内存）。查询在 blocking 线程池执行，不阻塞网关
+    #[serde(rename_all = "camelCase")]
+    QueryPositions {
+        oracle: OracleConnectConfig,
+        account_id: String,
+    },
+    /// 保存持仓数据：整份替换服务端内存中唯一的一份持仓，
+    /// 下一次 ETF 申购按新数据扣减
+    #[serde(rename_all = "camelCase")]
+    SavePositions {
+        oracle: OracleConnectConfig,
+        account_id: String,
+        rows: Vec<PositionRow>,
+    },
 }
 
 /// 拼“成功”响应
@@ -344,5 +363,50 @@ pub async fn dispatch(engine: &Engine, payload: Value, client_ip: &str) -> Value
             Ok(()) => ok(json!({ "message": "脚本语法正确" })),
             Err(e) => err(e),
         },
+        Command::GetPositionState => match serde_json::to_value(engine.position_state()) {
+            Ok(v) => ok(v),
+            Err(e) => err(e.to_string()),
+        },
+        Command::QueryPositions { oracle, account_id } => {
+            // 只记录环境名与资金账号，绝不记录密码/连接串细节
+            engine.log_op(
+                client_ip,
+                &format!(
+                    "查询 Oracle 持仓（环境 {} / 资金账号 {}）",
+                    if oracle.env_name.trim().is_empty() {
+                        "未命名"
+                    } else {
+                        oracle.env_name.trim()
+                    },
+                    account_id.trim()
+                ),
+            );
+            match engine.query_positions(oracle, account_id).await {
+                Ok(rows) => match serde_json::to_value(rows) {
+                    Ok(v) => ok(v),
+                    Err(e) => err(e.to_string()),
+                },
+                Err(e) => err(e),
+            }
+        }
+        Command::SavePositions {
+            oracle,
+            account_id,
+            rows,
+        } => {
+            let count = rows.len();
+            engine.log_op(
+                client_ip,
+                &format!(
+                    "保存持仓数据 {} 条（资金账号 {}），作为 ETF 申购成份股库存",
+                    count,
+                    account_id.trim()
+                ),
+            );
+            match engine.save_positions(oracle, account_id, rows).await {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            }
+        }
     }
 }

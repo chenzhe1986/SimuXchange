@@ -24,6 +24,13 @@ parking_lot = "0.12"
 mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
 # XML 解析（深交所 ETF 实时申购赎回清单 pcf_*.xml 的读取）
 quick-xml = "0.41"
+# SQL Server 异步驱动（上海综合网关 EzSTEP 数据库接口用）：
+# - 纯 Rust TDS 协议实现，不依赖 ODBC/msodbcsql，Windows/Linux/musl 均可编译；
+# - 固定 0.12.x：其 rustls 依赖 rustls 0.21 + ring（纯 Rust/汇编，交叉编译友好）；
+#   0.13 会拉入 aws-lc-rs（需要 CMake/NASM），会让 Linux musl 打包变复杂
+tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls", "tokio"] }
+# tokio 与 tiberius 的 I/O 适配（TokioAsyncWriteCompatExt）
+tokio-util = { version = "0.7", features = ["compat"] }
 
 [profile.release]
 opt-level = 2

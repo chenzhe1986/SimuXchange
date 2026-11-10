@@ -15,7 +15,7 @@
 //! id 的作用：WebSocket 是双向自由收发的，响应不一定紧跟请求，
 //! 前端靠 id 把响应对回到发起的那次请求上。
 //!
-//! 用法：simx-server [--listen 0.0.0.0:9800] [--auto-start] [--update-url <地址>] [-V|--version]
+//! 用法：simx-server [--listen 0.0.0.0:9800] [--auto-start] [-V|--version]
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
@@ -40,8 +40,6 @@ async fn main() {
         .unwrap_or_else(|| PathBuf::from("."));
     // --auto-start：进程启动后自动恢复上次运行中的网关（无需界面手动启动）
     let mut auto_start = false;
-    // --update-url：更新服务器根地址（启动时检查一次新版本，仅打印提示不自升级）
-    let mut update_url: Option<String> = None;
 
     // 手写的简易命令行解析：需求只有几个参数，不值得引入解析库
     let args: Vec<String> = std::env::args().collect();
@@ -56,16 +54,11 @@ async fn main() {
                 auto_start = true;
                 i += 1;
             }
-            "--update-url" if i + 1 < args.len() => {
-                update_url = Some(args[i + 1].clone());
-                i += 2;
-            }
             "-h" | "--help" => {
-                println!("用法: simx-server [--listen 0.0.0.0:9800] [--auto-start] [--update-url <地址>] [-V|--version]");
+                println!("用法: simx-server [--listen 0.0.0.0:9800] [--auto-start] [-V|--version]");
                 return;
             }
-            // 打印版本号后退出（版本号来自本 crate 的 Cargo.toml，随发版同步更新；
-            // 与 --update-url 的版本比较共用同一来源，两者恒一致）
+            // 打印版本号后退出（版本号来自本 crate 的 Cargo.toml，随发版同步更新）
             "-V" | "--version" => {
                 println!("simx-server {}", env!("CARGO_PKG_VERSION"));
                 return;
@@ -86,11 +79,6 @@ async fn main() {
     println!("SimuXchange 后端已启动 v{}", env!("CARGO_PKG_VERSION"));
     println!("  控制接口 : ws://{}/ws", listen);
     println!("  数据目录 : {}", data_dir.display());
-
-    // --update-url：启动时向更新服务器检查一次新版本（只提示，不自动替换）
-    if let Some(url) = &update_url {
-        check_update(url);
-    }
 
     // --auto-start：恢复上次运行中的网关（失败逐个列出，不影响服务启动）
     if auto_start {
@@ -120,48 +108,6 @@ async fn main() {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .unwrap();
-}
-
-/// 启动时向更新服务器检查一次新版本（供 --update-url 参数调用）。
-///
-/// 只打印提示，不自动下载替换：后端进程长时间驻留，替换运行中的二进制
-/// 容易出错，交给运维按提示手动更新。
-fn check_update(update_url: &str) {
-    let current = env!("CARGO_PKG_VERSION");
-    let url = format!("{}/version.json", update_url.trim_end_matches('/'));
-    match ureq::get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .call()
-    {
-        Ok(resp) => {
-            // into_string 是 ureq 核心 API（不依赖 json feature，默认 features 已关闭）
-            let text = resp.into_string().unwrap_or_default();
-            let manifest: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-            let latest = manifest.get("version").and_then(|v| v.as_str()).unwrap_or("");
-            if !latest.is_empty() && version_cmp(latest, current) == std::cmp::Ordering::Greater {
-                println!("  发现新版本 {}（当前 {}），请到更新服务器下载部署", latest, current);
-            } else if latest.is_empty() {
-                println!("  检查更新：服务器上的 version.json 格式无效");
-            } else {
-                println!("  已是最新版本 {}", current);
-            }
-        }
-        Err(e) => println!("  检查更新失败（服务器不可达）: {}", e),
-    }
-}
-
-/// 比较两个版本号（"1.0.0" 式数字点分），供 check_update 判断大小
-fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let pa: Vec<u32> = a.split('.').map(|s| s.parse().unwrap_or(0)).collect();
-    let pb: Vec<u32> = b.split('.').map(|s| s.parse().unwrap_or(0)).collect();
-    for i in 0..pa.len().max(pb.len()) {
-        let x = pa.get(i).copied().unwrap_or(0);
-        let y = pb.get(i).copied().unwrap_or(0);
-        if x != y {
-            return x.cmp(&y);
-        }
-    }
-    std::cmp::Ordering::Equal
 }
 
 /// HTTP 请求升级为 WebSocket 连接（浏览器/客户端发起握手时触发）

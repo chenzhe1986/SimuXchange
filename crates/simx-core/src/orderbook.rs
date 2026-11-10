@@ -72,7 +72,7 @@ pub struct OrderEntry {
     pub status: OrderStatus,
     /// 委托类型（协议原值，撤单成功回报回填用）
     pub ord_type: u8,
-    /// 证券账户（撤单成功回报回填用；三套协议委托里都有）
+    /// 证券账户（撤单成功回报回填用；各网关委托里都有）
     pub account: String,
     /// 营业部代码（撤单成功回报回填用；深市委托里有）
     pub branch: String,

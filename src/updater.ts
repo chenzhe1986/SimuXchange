@@ -1,8 +1,7 @@
 // 检查更新：从配置的"更新服务器"拉取 version.json，判断是否有新版本。
 //
-// 服务器（crates/simx-update-server）只需发布一个目录 + 一个版本号文件
-// （release.txt 或 release.json，见服务器注释），version.json 由服务器
-// 自动扫描目录生成，内容为：
+// 服务器（crates/simx-update-server）只需 release.txt（内容仅一行版本号，与程序同目录）
+// 和同名版本目录（如 2.1.0/，放发布文件）；version.json 由服务器自动扫描生成，内容为：
 //   {
 //     "version": "1.3.0",            ← 发布版本号（用户在版本文件里写）
 //     "files": [                       ← 发布目录里的全部文件（服务器自动扫描，
@@ -60,7 +59,7 @@ export function joinUrl(base: string, name: string): string {
 /**
  * 向更新服务器检查是否有新版本（浏览器环境直接 fetch 的备用路径，
  * 桌面端由 Rust 壳的 check_update_server 完成，见 App.vue）。
- * @param updateUrl 更新服务器根地址（如 http://192.168.1.10:8080，留空直接返回 null）
+ * @param updateUrl 更新服务器地址（如 http://192.168.1.10:9860/update，留空直接返回 null）
  * @param currentVersion 当前版本号（传入以方便测试与复用）
  * @returns 有新版时返回更新信息；已是最新、服务器不可达或清单无效时返回 null
  */

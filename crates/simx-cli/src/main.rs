@@ -342,7 +342,18 @@ struct PlatformConfig {
     id: String,
     name: String,
     port: u16,
+    #[serde(default)]
+    db: Option<CliDbConfig>,
     strategy: StrategyConfig,
+}
+
+/// 上海综合网关的数据库配置（CLI 只用于展示地址，不修改）
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CliDbConfig {
+    host: String,
+    port: u16,
+    database: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -839,25 +850,38 @@ async fn cmd_snapshot(cli: &Cli, a: &SnapshotCmd) -> i32 {
             "sz" => "深圳",
             "shjj" => "上海竞价",
             "shbond" => "上海新债券",
+            "shzh" => "上海综合",
             _ => "未知",
         };
         let state = if gw.running { "运行中" } else { "已停止" };
         println!("网关: {} [{}] id={} {}", gw.config.name, cat, gw.config.id, state);
         for p in &gw.platforms {
-            // 平台名称与端口要从 config 里找（PlatformSnapshot 只有 id/状态/统计）
-            let (pname, port) = gw
+            // 平台名称与地址要从 config 里找（PlatformSnapshot 只有 id/状态/统计）
+            let (pname, addr, is_db) = gw
                 .config
                 .platforms
                 .iter()
                 .find(|c| c.id == p.platform_id)
-                .map(|c| (c.name.clone(), c.port))
-                .unwrap_or_else(|| ("?".to_string(), 0));
-            let st = if p.listening { "监听中" } else { "未监听" };
+                .map(|c| {
+                    let addr = match &c.db {
+                        Some(db) => format!("{}:{}/{}", db.host, db.port, db.database),
+                        None => format!("端口:{}", c.port),
+                    };
+                    (c.name.clone(), addr, c.db.is_some())
+                })
+                .unwrap_or_else(|| ("?".to_string(), "?".to_string(), false));
+            let st = if p.listening {
+                if is_db { "运行中" } else { "监听中" }
+            } else if is_db {
+                "未运行"
+            } else {
+                "未监听"
+            };
             println!(
-                "  平台 {} [id={}] 端口:{} {} | 委托 {} 确认 {} 成交 {} 拒单 {} 撤单 {} 连接 {}",
+                "  平台 {} [id={}] {} {} | 委托 {} 确认 {} 成交 {} 拒单 {} 撤单 {} 连接 {}",
                 pname,
                 p.platform_id,
-                port,
+                addr,
                 st,
                 p.stats.orders,
                 p.stats.acks,
@@ -1363,6 +1387,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             port: 10001,
+            db: None,
             strategy: strat(),
         }
     }

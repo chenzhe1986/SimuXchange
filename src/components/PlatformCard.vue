@@ -44,6 +44,15 @@ const loggedOnCount = computed(() => conns.value.filter((c) => c.loggedOn).lengt
 const showPackets = computed(() => props.platform.showPackets);
 /** 平台是否开启订单缓存（决定是否显示“订单”按钮） */
 const cacheOrders = computed(() => props.platform.cacheOrders);
+/** 上海综合网关：走数据库，不显示监听地址/端口 */
+const isDb = computed(() => props.category === "shzh");
+/** 数据库地址摘要（未配置 db 的旧数据给个兜底文本） */
+const dbLabel = computed(() => {
+    const db = props.platform.db;
+    return db ? `${db.host}:${db.port}/${db.database}` : "未配置数据库";
+});
+/** 数据库当前是否连接成功（仅综合网关快照里有该字段） */
+const dbConnected = computed(() => props.snapshot?.dbConnected ?? false);
 
 /** 五个统计格子的数据（拒单 = 执行报告拒绝 + 业务拒绝之和），
  *  拼成数组后模板里用 v-for 一次性生成，不用写五段重复 HTML */
@@ -58,11 +67,11 @@ const statItems = computed(() => [
 
 <template>
     <!-- listening 时加 live 类：边框变绿，一眼看出哪些平台在监听 -->
-    <div class="pcard" :class="{ live: listening }">
+    <div class="pcard" :class="{ live: listening && (!isDb || dbConnected) }">
         <!-- 头部：状态圆点 + 平台名 + 悬停才显现的编辑/删除按钮 -->
         <div class="pcard-head">
             <div class="pcard-title">
-                <span class="dot" :class="listening ? 'on pulse' : 'off'"></span>
+                <span class="dot" :class="listening && (!isDb || dbConnected) ? 'on pulse' : 'off'"></span>
                 <span class="name">{{ platform.name }}</span>
             </div>
             <div class="pcard-actions">
@@ -71,11 +80,20 @@ const statItems = computed(() => [
             </div>
         </div>
 
-        <!-- 配置摘要：平台类型 / 监听地址 / 监听状态 -->
+        <!-- 配置摘要：TCP 网关显示平台类型/监听地址/监听状态；
+             上海综合网关显示数据库地址与连接状态 -->
         <div class="pcard-meta">
             <span class="badge blue">{{ platformTypeLabel(platform.platformType, category) }}</span>
-            <span class="badge gray num">{{ platform.listenHost }}:{{ platform.port }}</span>
-            <span class="badge" :class="listening ? 'green' : 'gray'">{{ listening ? "监听中" : "未启动" }}</span>
+            <template v-if="isDb">
+                <span class="badge gray num">{{ dbLabel }}</span>
+                <span class="badge" :class="dbConnected ? 'green' : 'gray'">
+                    {{ dbConnected ? "数据库已连接" : "数据库未连接" }}
+                </span>
+            </template>
+            <template v-else>
+                <span class="badge gray num">{{ platform.listenHost }}:{{ platform.port }}</span>
+                <span class="badge" :class="listening ? 'green' : 'gray'">{{ listening ? "监听中" : "未启动" }}</span>
+            </template>
         </div>
 
         <!-- 策略摘要：回报模式 + 确认/成交延迟（Lua 模式的延迟由脚本控制，不显示界面配置值） -->
@@ -99,7 +117,9 @@ const statItems = computed(() => [
         <div class="pcard-conns" @click="showConns = !showConns">
             <span class="conn-summary">
                 <span class="dot" :class="conns.length ? 'on' : 'off'"></span>
-                连接 {{ conns.length }}（已登录 {{ loggedOnCount }}）· 累计 {{ stats.totalConnections }}
+                <template v-if="isDb">数据库 {{ conns.length }}（已连接 {{ loggedOnCount }}）</template>
+                <template v-else>连接 {{ conns.length }}（已登录 {{ loggedOnCount }}）</template>
+                · 累计 {{ stats.totalConnections }}
             </span>
             <span class="conn-side">
                 <!-- 订单按钮：开启缓存订单时显示，点击弹窗查看全部缓存订单 -->

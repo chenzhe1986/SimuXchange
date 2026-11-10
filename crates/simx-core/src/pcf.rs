@@ -1,25 +1,29 @@
-//! 深交所 ETF 实时申购赎回清单（PCF）文件解析。
+//! 深交所 / 上交所 ETF 申购赎回清单（PCF）文件解析。
 //!
 //! # 背景与职责
 //!
-//! ETF 实时申购赎回业务（ApplID=120）的执行报告（201202）扩展字段携带
-//! “成份股明细”重复组：每只成份券的交付数量（DeliveryQty）与现金替代
-//! 金额（SubstCash）。真实交易所按每日发布的申购赎回清单（PCF 文件，
-//! 文件名 `pcf_<ETF代码>_<YYYYMMDD>.xml`，格式定义见深交所《ETF实时申购
-//! 赎回业务参考信息 pcf 文件内容定义》表 3-10）生成该明细。
+//! ETF 实时申购赎回业务的执行报告会携带“成份股/成份券明细”：
+//! - 深交所（ApplID=120）执行报告 201202 的关联字段 `Security[i].DeliveryQty /
+//!   SubstCash`，清单文件名 `pcf_<ETF代码>_<YYYYMMDD>.xml`；
+//! - 上交所综合业务平台（EzSTEP）ETF 现金/实物申赎的执行报告用
+//!   `TradeReportType=2`（成份券成交）与 `TradeReportType=3`（资金替代成交）
+//!   记录描述明细，清单文件名 `ssepcf_<ETF代码>_<YYYYMMDD>.xml`。
 //!
 //! 模拟器不接交易所行情，因此按用户配置的清单目录读取本地 PCF 文件：
-//! 1. [`find_latest_pcf`]：在目录中按 ETF 代码查找**日期最新**的清单文件
-//!    （目录下一般存有所有 ETF 代码多日的文件，取文件名日期最大者）；
-//! 2. [`parse_pcf`]：解析清单 XML，取出最小申赎单位与全部成份券
-//!    （代码 / 代码源 / 每篮子数量 / 替代标志 / 申购替代金额 / 赎回替代金额）；
+//! 1. [`find_latest_pcf`] / [`find_latest_sse_pcf`]：在目录中按 ETF 代码查找
+//!    **日期最新**的清单文件（目录下一般存有所有 ETF 代码多日的文件，取文件名
+//!    日期最大者）；
+//! 2. [`parse_pcf`] / [`parse_sse_pcf`]：解析各自格式的 XML，取出最小申赎单位
+//!    与全部成份券（代码 / 代码源 / 每篮子数量 / 替代标志 / 替代金额；
+//!    上交所还包含申购溢价比例与赎回折价比例）；
 //! 3. [`PcfCache`]：查找/解析结果缓存（会话级）。清单目录可能非常大
 //!    （所有 ETF 代码 × 多日），逐笔委托全量扫描目录会拖慢收单路径，
-//!    缓存按 (目录, 代码) 记忆：目录 mtime 未变时零扫描，文件未变时
+//!    缓存按 (目录, 代码, 市场) 记忆：目录 mtime 未变时零扫描，文件未变时
 //!    复用已解析结果（细节见 `PcfCache` 文档）。
 //!
-//! 换算成回报明细（按委托份额折算篮子数后缩放）由调用方
-//! （sz/session.rs 的 handle_new_order）完成，本模块只做“找文件 + 解析”。
+//! 换算成回报明细（按委托份额折算篮子数后缩放）由调用方完成：
+//! 深交所见 sz/session.rs，上交所综合平台见 shzh/strategy.rs。
+//! 本模块只做“找文件 + 解析”。
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -35,6 +39,9 @@ pub struct PcfFile {
     pub security_id: String,
     /// 最小申购赎回单位（一个篮子对应的 ETF 份数，文件中为正整数，如 2000000）
     pub creation_redemption_unit: f64,
+    /// 申赎模式（仅上交所 PCF 文件有：0/1/2/3，见 IS118 规格；
+    /// 深交所文件恒为 0，表示按普通 PCF 处理）
+    pub mechanism: u8,
     /// 成份券列表（按文件中的先后顺序，含“申赎现金”虚拟券）
     pub components: Vec<PcfComponent>,
 }
@@ -55,6 +62,12 @@ pub struct PcfComponent {
     pub creation_cash_substitute: f64,
     /// 赎回替代金额（替代标志为 2 时该证券赎回返还的总金额）
     pub redemption_cash_substitute: f64,
+    /// 申购溢价比例（上交所 PCF：替代标志为 1 时现金替代金额的加价比例，
+    /// 例如 0.1 表示 10%；深交所 PCF 无此字段，恒为 0）
+    pub creation_premium_rate: f64,
+    /// 赎回折价比例（上交所 PCF：替代标志为 1 时现金替代金额的减价比例，
+    /// 例如 0.1 表示 10%；深交所 PCF 无此字段，恒为 0）
+    pub redemption_discount_rate: f64,
 }
 
 /// 解析 PCF 清单 XML 文本。
@@ -138,10 +151,94 @@ pub fn parse_pcf(xml: &str) -> Result<PcfFile, String> {
     Ok(out)
 }
 
+/// 解析上交所 ETF 定义文件（SSEPortfolioCompositionFile，`ssepcf_*.xml`）。
+///
+/// 字段定义见 IS118《基金公司卷》2.3.3.1“ETF 定义文件 xml 版”。与深交所
+/// PCF 的差异：
+/// - 根节点是 `SSEPortfolioCompositionFile`，基金代码字段叫 `FundInstrumentID`；
+/// - 成份券代码/数量/替代标志在 `InstrumentID / Quantity / SubstitutionFlag`；
+/// - 现金替代金额只有一个 `SubstitutionCashAmount`（申赎共用），另有
+///   `CreationPremiumRate / RedemptionDiscountRate` 两个比例；
+/// - `UnderlyingSecurityID` 是市场 ID（101 沪 / 102 深 / 103 港 / 105 外汇 /
+///   106 北交所 / 9999 其他），对应深交所 PCF 的 `UnderlyingSecurityIDSource`。
+///
+/// 解析失败/数值字段脏读的处理与 [`parse_pcf`] 一致：数值失败按 0，
+/// XML 结构损坏返回 Err。
+pub fn parse_sse_pcf(xml: &str) -> Result<PcfFile, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut out = PcfFile::default();
+    let mut cur: Option<PcfComponent> = None;
+    let mut tag = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref());
+                if name == "Component" {
+                    cur = Some(PcfComponent::default());
+                }
+                tag = name;
+            }
+            Ok(Event::Empty(_)) => tag.clear(),
+            Ok(Event::End(e)) => {
+                let name = local_name(e.name().as_ref());
+                if name == "Component" {
+                    if let Some(c) = cur.take() {
+                        out.components.push(c);
+                    }
+                }
+                tag.clear();
+            }
+            Ok(Event::Text(t)) => {
+                let text = t
+                    .decode()
+                    .map_err(|e| format!("文本解码失败（位置 {}）: {}", reader.buffer_position(), e))?
+                    .into_owned();
+                match cur.as_mut() {
+                    Some(c) => match tag.as_str() {
+                        "InstrumentID" => c.security_id = text.trim().to_string(),
+                        "Quantity" => c.component_share = parse_num(&text),
+                        "SubstitutionFlag" => c.substitute_flag = text.trim().parse().unwrap_or(0),
+                        "CreationPremiumRate" => c.creation_premium_rate = parse_num(&text),
+                        "RedemptionDiscountRate" => c.redemption_discount_rate = parse_num(&text),
+                        "SubstitutionCashAmount" => {
+                            let v = parse_num(&text);
+                            c.creation_cash_substitute = v;
+                            c.redemption_cash_substitute = v;
+                        }
+                        "UnderlyingSecurityID" => {
+                            c.security_id_source = text.trim().to_string()
+                        }
+                        _ => {}
+                    },
+                    None => match tag.as_str() {
+                        "FundInstrumentID" => out.security_id = text.trim().to_string(),
+                        "CreationRedemptionUnit" => {
+                            out.creation_redemption_unit = parse_num(&text)
+                        }
+                        "CreationRedemptionMechanism" => {
+                            out.mechanism = text.trim().parse().unwrap_or(0)
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(format!("XML 解析失败（位置 {}）: {}", reader.buffer_position(), e))
+            }
+            _ => {}
+        }
+    }
+    if cur.is_some() {
+        return Err("XML 不完整：Component 节点未闭合".into());
+    }
+    Ok(out)
+}
+
 /// 取标签的本地名（忽略命名空间前缀；PCF 文件用默认命名空间
 /// `xmlns="http://ts.szse.cn/Fund"`，元素名本身无前缀）。
-fn local_name(raw: &[u8]) -> String {
-    let s = String::from_utf8_lossy(raw);
+fn local_name(raw: &[u8]) -> String {    let s = String::from_utf8_lossy(raw);
     match s.rsplit_once(':') {
         Some((_, local)) => local.to_string(),
         None => s.into_owned(),
@@ -169,14 +266,41 @@ fn parse_num(s: &str) -> f64 {
 /// 返回 `Ok(Some(路径))` = 找到；`Ok(None)` = 目录可读但没有该代码的
 /// 清单文件；`Err` = 目录不存在/不可读（调用方据此推送不同告警）。
 pub fn find_latest_pcf(dir: &Path, security_id: &str) -> Result<Option<PathBuf>, String> {
+    find_latest_with_prefix(dir, security_id, b"pcf_")
+}
+
+/// 在目录中查找指定 ETF 代码**日期最新**的上交所清单文件。
+/// 文件名须匹配 `ssepcf_<代码>_<YYYYMMDD>.xml`（大小写不敏感）。
+pub fn find_latest_sse_pcf(dir: &Path, security_id: &str) -> Result<Option<PathBuf>, String> {
+    find_latest_with_prefix(dir, security_id, b"ssepcf_")
+}
+
+/// 按文件名前缀查找日期最新的清单文件（深/沪共用）。
+///
+/// 文件名形态：`<prefix><代码>_<YYYYMMDD>.xml`；日期是定长 YYYYMMDD，
+/// 直接转数值比较取最大。`read_dir` 是“列出目录全部条目”的系统调用
+/// （POSIX 无按前缀枚举的接口），通配符/正则只是用户态过滤、省不了 I/O，
+/// 因此单次扫描已尽量便宜：先按**期望长度**预检（长度不符的条目一次比较
+/// 即排除），再用字节切片 `eq_ignore_ascii_case` 比较（零拷贝零分配，
+/// 文件名合法 UTF-8 时 `to_string_lossy` 也是借用）。重复调用应走
+/// [`PcfCache`]，避免每笔委托都全量遍历大目录。
+///
+/// 返回 `Ok(Some(路径))` = 找到；`Ok(None)` = 目录可读但没有该代码的
+/// 清单文件；`Err` = 目录不存在/不可读（调用方据此推送不同告警）。
+fn find_latest_with_prefix(
+    dir: &Path,
+    security_id: &str,
+    prefix: &[u8],
+) -> Result<Option<PathBuf>, String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("读取目录失败: {}", e))?;
     let code = security_id.trim();
     if code.is_empty() {
         return Ok(None);
     }
-    // 期望文件名形态："pcf_" + 代码 + "_" + 8 位日期 + ".xml"
-    let need = 4 + code.len() + 1 + 8 + 4;
+    // 期望文件名形态：前缀 + 代码 + "_" + 8 位日期 + ".xml"
     let code_b = code.as_bytes();
+    let need = prefix.len() + code_b.len() + 1 + 8 + 4;
+    let date_start = prefix.len() + code_b.len() + 1;
     let mut best: Option<(u64, PathBuf)> = None; // (日期数值, 路径)，数值序 = 时间序
     for ent in entries.flatten() {
         let name = ent.file_name();
@@ -184,16 +308,16 @@ pub fn find_latest_pcf(dir: &Path, security_id: &str) -> Result<Option<PathBuf>,
         let name = name.to_string_lossy();
         let b = name.as_bytes();
         if b.len() != need
-            || !b[..4].eq_ignore_ascii_case(b"pcf_")
-            || !b[4..4 + code_b.len()].eq_ignore_ascii_case(code_b)
-            || b[4 + code_b.len()] != b'_'
-            || !b[5 + code_b.len()..need - 4].iter().all(|c| c.is_ascii_digit())
+            || !b[..prefix.len()].eq_ignore_ascii_case(prefix)
+            || !b[prefix.len()..prefix.len() + code_b.len()].eq_ignore_ascii_case(code_b)
+            || b[prefix.len() + code_b.len()] != b'_'
+            || !b[date_start..need - 4].iter().all(|c| c.is_ascii_digit())
             || !b[need - 4..].eq_ignore_ascii_case(b".xml")
         {
             continue;
         }
         // 8 位数字直接折成数值（最大 99999999，不会溢出）
-        let date = b[5 + code_b.len()..need - 4]
+        let date = b[date_start..need - 4]
             .iter()
             .fold(0u64, |acc, c| acc * 10 + u64::from(*c - b'0'));
         if best.as_ref().is_none_or(|(d, _)| *d < date) {
@@ -203,13 +327,18 @@ pub fn find_latest_pcf(dir: &Path, security_id: &str) -> Result<Option<PathBuf>,
     Ok(best.map(|(_, p)| p))
 }
 
-/// 读取并解析一份清单文件（[`load_latest_pcf`] 与 [`PcfCache`] 共用）。
-fn read_and_parse(path: &Path) -> Result<PcfFile, String> {
+/// 读取并解析一份清单文件（上交所格式由 `sse` 指定）。
+fn read_and_parse_with(path: &Path, sse: bool) -> Result<PcfFile, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))?;
-    parse_pcf(&content).map_err(|e| format!("{}: {}", path.display(), e))
+    let parsed = if sse {
+        parse_sse_pcf(&content)
+    } else {
+        parse_pcf(&content)
+    };
+    parsed.map_err(|e| format!("{}: {}", path.display(), e))
 }
 
-/// 查找并解析指定 ETF 代码最新的清单文件（**无缓存**版本；
+/// 查找并解析指定 ETF 代码最新的深交所清单文件（**无缓存**版本；
 /// 会话收单路径应使用 [`PcfCache::load`]，本函数保留给测试与一次性调用）。
 ///
 /// 返回 `Ok(Some((路径, 解析结果)))` = 成功（路径用于日志展示用了哪份清单）；
@@ -219,7 +348,19 @@ pub fn load_latest_pcf(dir: &Path, security_id: &str) -> Result<Option<(PathBuf,
     let Some(path) = find_latest_pcf(dir, security_id)? else {
         return Ok(None);
     };
-    let pcf = read_and_parse(&path)?;
+    let pcf = read_and_parse_with(&path, false)?;
+    Ok(Some((path, pcf)))
+}
+
+/// 查找并解析指定 ETF 代码最新的上交所清单文件（无缓存版本）。
+pub fn load_latest_sse_pcf(
+    dir: &Path,
+    security_id: &str,
+) -> Result<Option<(PathBuf, PcfFile)>, String> {
+    let Some(path) = find_latest_sse_pcf(dir, security_id)? else {
+        return Ok(None);
+    };
+    let pcf = read_and_parse_with(&path, true)?;
     Ok(Some((path, pcf)))
 }
 
@@ -227,6 +368,12 @@ pub fn load_latest_pcf(dir: &Path, security_id: &str) -> Result<Option<(PathBuf,
 /// FUSE/网络盘）目录 mtime 更新可能不及时，超过该时长强制重扫一次，
 /// 保证新增清单文件最迟 30 秒内被发现；本地 ext4/xfs 几乎不触发。
 const RESCAN_BACKSTOP: Duration = Duration::from_secs(30);
+
+/// 负缓存有效期：某代码暂时没有清单文件时缓存 1 秒即过期重扫。
+/// Windows 上目录 mtime 的时间精度较粗，同一秒内新增文件可能看不到
+/// mtime 变化；1 秒后强制重扫可保证“盘中新放清单文件”很快被发现，
+/// 同时避免每笔委托都全量扫描大目录。
+const NEGATIVE_TTL: Duration = Duration::from_secs(1);
 
 /// 一个 (目录, 代码) 的缓存条目。
 struct CachedPcf {
@@ -248,13 +395,15 @@ struct FoundPcf {
     pcf: Arc<PcfFile>,
 }
 
-/// PCF 清单查找/解析缓存（按 (目录, 代码) 记忆）。
+/// PCF 清单查找/解析缓存（按 (目录, 代码, 市场) 记忆）。
+/// 市场标志区分深交所 `pcf_*` 与上交所 `ssepcf_*`，避免同目录同代码串用。
 ///
 /// 挂在 `SessionCtx`（每个平台一份，网关重启自然清空），避免每笔 ETF
 /// 申赎委托都对清单目录做全量扫描并重新读取解析——清单目录里可能有
 /// 所有 ETF 代码多日的文件，全量遍历会很慢：
 /// - **目录 mtime 未变**且距上次扫描未超兜底时长 → 直接复用缓存结果
-///   （负缓存同样命中：该代码没有清单文件时也不再重复扫描）；
+///   （负缓存同样命中，但仅 1 秒：Windows 目录 mtime 精度较粗，过期后
+///   强制重扫，保证盘中新放清单文件尽快生效）；
 /// - **目录变化**（新增/删除文件）→ 重扫一次目录；若解析出的文件未变
 ///   （同路径且 mtime/大小一致，例如只是别人加了其他代码的文件）仍复用
 ///   已解析结果，不重读不重解析；新增清单文件下一笔委托即时生效；
@@ -265,7 +414,8 @@ struct FoundPcf {
 /// 无文件读取、无 XML 解析。
 #[derive(Default)]
 pub struct PcfCache {
-    entries: HashMap<(String, String), CachedPcf>,
+    /// key = (目录, 代码, 是否上交所)；bool 区分两种文件格式/前缀
+    entries: HashMap<(String, String, bool), CachedPcf>,
 }
 
 impl PcfCache {
@@ -273,18 +423,36 @@ impl PcfCache {
         Self::default()
     }
 
-    /// 取指定代码日期最新的清单文件（带缓存），语义与
+    /// 取指定代码日期最新的**深交所**清单文件（带缓存），语义与
     /// [`load_latest_pcf`] 一致，但命中缓存时不访问目录/不重新解析。
     pub fn load(
         &mut self,
         dir: &Path,
         security_id: &str,
     ) -> Result<Option<(PathBuf, Arc<PcfFile>)>, String> {
+        self.load_with(dir, security_id, false)
+    }
+
+    /// 取指定代码日期最新的**上交所**清单文件（`ssepcf_*`，带缓存）。
+    pub fn load_sse(
+        &mut self,
+        dir: &Path,
+        security_id: &str,
+    ) -> Result<Option<(PathBuf, Arc<PcfFile>)>, String> {
+        self.load_with(dir, security_id, true)
+    }
+
+    fn load_with(
+        &mut self,
+        dir: &Path,
+        security_id: &str,
+        sse: bool,
+    ) -> Result<Option<(PathBuf, Arc<PcfFile>)>, String> {
         let code = security_id.trim();
         if code.is_empty() {
             return Ok(None);
         }
-        let key = (dir.to_string_lossy().into_owned(), code.to_string());
+        let key = (dir.to_string_lossy().into_owned(), code.to_string(), sse);
         // 目录本身必须可读（与无缓存版同样的错误语义：目录不存在/不可读报错）
         let dir_mtime = std::fs::metadata(dir)
             .map_err(|e| format!("读取目录失败: {}", e))?
@@ -292,8 +460,12 @@ impl PcfCache {
             .ok();
 
         // ---- 1) 快速路径：目录 mtime 未变且未超兜底时长 → 直接复用缓存 ----
+        // 负缓存额外限制 1 秒（Windows 目录 mtime 精度较粗，避免新文件
+        // 在同一秒内落盘时长时间看不到）
         let fresh = self.entries.get(&key).is_some_and(|c| {
-            c.dir_mtime == dir_mtime && c.scanned_at.elapsed() < RESCAN_BACKSTOP
+            c.dir_mtime == dir_mtime
+                && c.scanned_at.elapsed() < RESCAN_BACKSTOP
+                && (c.found.is_some() || c.scanned_at.elapsed() < NEGATIVE_TTL)
         });
         let found_path = if fresh {
             match &self.entries[&key].found {
@@ -302,7 +474,12 @@ impl PcfCache {
             }
         } else {
             // ---- 2) 失效：重扫目录，找该代码日期最新的文件 ----
-            match find_latest_pcf(dir, code)? {
+            let found = if sse {
+                find_latest_sse_pcf(dir, code)?
+            } else {
+                find_latest_pcf(dir, code)?
+            };
+            match found {
                 None => {
                     // 负缓存：目录内容没再变之前不必重复扫描
                     self.entries.insert(
@@ -335,7 +512,7 @@ impl PcfCache {
         }
 
         // ---- 4) 读文件 + 解析并写入缓存 ----
-        let pcf = Arc::new(read_and_parse(&found_path)?);
+        let pcf = Arc::new(read_and_parse_with(&found_path, sse)?);
         self.entries.insert(
             key,
             CachedPcf {
@@ -404,6 +581,106 @@ mod tests {
     </Component>
   </Components>
 </PCFFile>"#;
+
+    /// 上交所 ETF 定义文件示例（字段名按 IS118 基金公司卷 2.3.3.1）
+    const SSE_SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<SSEPortfolioCompositionFile>
+  <FundInstrumentID>510300</FundInstrumentID>
+  <CreationRedemptionUnit>900000</CreationRedemptionUnit>
+  <CreationRedemptionMechanism>1</CreationRedemptionMechanism>
+  <RecordNumber>3</RecordNumber>
+  <ComponentList>
+    <Component>
+      <InstrumentID>000001</InstrumentID>
+      <InstrumentName>平安银行</InstrumentName>
+      <Quantity>1600</Quantity>
+      <SubstitutionFlag>1</SubstitutionFlag>
+      <CreationPremiumRate>0.1</CreationPremiumRate>
+      <RedemptionDiscountRate>0.1</RedemptionDiscountRate>
+      <SubstitutionCashAmount>17408</SubstitutionCashAmount>
+      <UnderlyingSecurityID>102</UnderlyingSecurityID>
+    </Component>
+    <Component>
+      <InstrumentID>600000</InstrumentID>
+      <InstrumentName>浦发银行</InstrumentName>
+      <Quantity>0</Quantity>
+      <SubstitutionFlag>2</SubstitutionFlag>
+      <SubstitutionCashAmount>4950</SubstitutionCashAmount>
+      <UnderlyingSecurityID>101</UnderlyingSecurityID>
+    </Component>
+    <Component>
+      <InstrumentID>000002</InstrumentID>
+      <InstrumentName>万科A</InstrumentName>
+      <Quantity>1100</Quantity>
+      <SubstitutionFlag>0</SubstitutionFlag>
+      <UnderlyingSecurityID>102</UnderlyingSecurityID>
+    </Component>
+  </ComponentList>
+</SSEPortfolioCompositionFile>"#;
+
+    #[test]
+    fn parse_sse_sample() {
+        let pcf = parse_sse_pcf(SSE_SAMPLE).expect("上交所清单必须能解析");
+        assert_eq!(pcf.security_id, "510300");
+        assert_eq!(pcf.creation_redemption_unit, 900000.0);
+        assert_eq!(pcf.mechanism, 1);
+        assert_eq!(pcf.components.len(), 3);
+        let c1 = &pcf.components[0];
+        assert_eq!(c1.security_id, "000001");
+        assert_eq!(c1.security_id_source, "102");
+        assert_eq!(c1.component_share, 1600.0);
+        assert_eq!(c1.substitute_flag, 1);
+        assert_eq!(c1.creation_premium_rate, 0.1);
+        assert_eq!(c1.redemption_discount_rate, 0.1);
+        assert_eq!(c1.creation_cash_substitute, 17408.0);
+        assert_eq!(c1.redemption_cash_substitute, 17408.0);
+        let c2 = &pcf.components[1];
+        assert_eq!(c2.substitute_flag, 2);
+        assert_eq!(c2.component_share, 0.0);
+        assert_eq!(c2.creation_premium_rate, 0.0);
+        let c3 = &pcf.components[2];
+        assert_eq!(c3.substitute_flag, 0);
+        assert_eq!(c3.creation_cash_substitute, 0.0);
+    }
+
+    #[test]
+    fn find_latest_sse_picks_max_date() {
+        let dir = std::env::temp_dir().join(format!("simx_sse_pcf_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "ssepcf_510300_20261109.xml",
+            "ssepcf_510300_20261106.xml",
+            "ssepcf_510500_20261109.xml",
+            "ssepcf_510300_2026110.xml",
+            "pcf_510300_20261109.xml",
+            "readme.txt",
+        ] {
+            std::fs::write(dir.join(name), "<x/>").unwrap();
+        }
+        let found = find_latest_sse_pcf(&dir, "510300").unwrap().expect("应找到上交所清单");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "ssepcf_510300_20261109.xml"
+        );
+        assert!(find_latest_sse_pcf(&dir, "510500").unwrap().is_some());
+        assert!(find_latest_sse_pcf(&dir, "999999").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_latest_sse_parses_file() {
+        let dir = std::env::temp_dir().join(format!("simx_sse_load_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ssepcf_510300_20261109.xml"), SSE_SAMPLE).unwrap();
+        let (path, pcf) = load_latest_sse_pcf(&dir, "510300")
+            .unwrap()
+            .expect("应找到并解析上交所清单");
+        assert!(path.ends_with("ssepcf_510300_20261109.xml"));
+        assert_eq!(pcf.components.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parse_sample_pcf() {
@@ -513,7 +790,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 负缓存：无清单文件时返回 None，文件出现后（目录 mtime 变化）立即找到
+    /// 负缓存：无清单文件时返回 None；负缓存 1 秒过期后重扫，文件出现即找到
     #[test]
     fn cache_negative_then_file_appears() {
         let dir = std::env::temp_dir().join(format!("simx_pcf_cache_neg_{}", std::process::id()));
@@ -522,6 +799,8 @@ mod tests {
 
         let mut cache = PcfCache::new();
         assert!(cache.load(&dir, "159920").unwrap().is_none(), "无清单文件应为 None");
+        // Windows 目录 mtime 精度较粗：等负缓存 1 秒过期后重扫
+        std::thread::sleep(Duration::from_millis(1100));
         std::fs::write(dir.join("pcf_159920_20260615.xml"), SAMPLE).unwrap();
         let (path, _) = cache.load(&dir, "159920").unwrap().expect("新增文件后应找到");
         assert!(path.ends_with("pcf_159920_20260615.xml"));

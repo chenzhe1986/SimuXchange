@@ -24,9 +24,14 @@ use crate::config::{
 use crate::event::{ConnInfo, EngineEvent};
 use crate::oplog::OpLog;
 use crate::orderbook::{OrderBook, OrderEntry};
-// 三个网关目录的会话模块（类别名保持不变，分派代码无需感知目录）
+use crate::positions::{
+    OracleConnectConfig, PositionRow, PositionSnapshot, PositionStore,
+};
+// 三个 TCP 网关目录的会话模块（类别名保持不变，分派代码无需感知目录）
 use crate::shbond::session as session_shbond;
 use crate::shjj::session as session_shjj;
+use crate::shzh::db::DbHandle;
+use crate::shzh::session as session_shzh;
 use crate::sz::session::{self as session_sz, ManualReportKind, SessionCtx};
 use crate::stats::{PlatformStats, StatsSnapshot};
 use serde::{Deserialize, Serialize};
@@ -58,6 +63,9 @@ struct RunningPlatform {
     conn_tx: Arc<StdMutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>,
     /// 订单缓存（平台开启“缓存订单”时创建；界面查看订单列表、撤单判断用）
     orders: Option<Arc<OrderBook>>,
+    /// 上海综合网关的数据库句柄（其他分类为 None）。
+    /// 手动回复、快照里的数据库连接状态都从这里取
+    db: Option<Arc<DbHandle>>,
 }
 
 /// 运行中的网关：持有停止信号的发送端，drop 或 send(true) 即可让
@@ -80,6 +88,9 @@ struct Inner {
     running: Mutex<HashMap<String, RunningGateway>>,
     /// 前端操作日志（带前端 IP，按日期存 log/ 目录）
     oplog: OpLog,
+    /// ETF 申购持仓（Oracle 同步）：全局唯一一份，所有网关/平台共用。
+    /// 与具体网关无关——同步后的持仓作为“成分股库存”供各类 ETF 申购扣减
+    positions: Arc<PositionStore>,
     /// 日志事件广播通道（容量 4096，满了会丢弃最旧的）
     events: broadcast::Sender<EngineEvent>,
 }
@@ -109,6 +120,7 @@ impl Engine {
                 dirs: Mutex::new(store.dirs),
                 running: Mutex::new(HashMap::new()),
                 oplog: OpLog::new(data_dir),
+                positions: Arc::new(PositionStore::new()),
                 events,
             }),
         }
@@ -159,6 +171,56 @@ impl Engine {
         Some((gw.name.clone(), plat.name.clone()))
     }
 
+    /// 当前服务端保存的持仓快照（界面“同步持仓数据”弹窗初始化用）：
+    /// 含最后一次使用的 Oracle 连接信息、资金账号与内存中的持仓。
+    pub fn position_state(&self) -> PositionSnapshot {
+        self.inner.positions.snapshot()
+    }
+
+    /// 从 Oracle 查询资金账号持仓（供界面弹窗展示，尚未写入内存）。
+    ///
+    /// 查询本身是阻塞的同步驱动，放进 tokio 的 blocking 线程池执行：
+    /// - 不占用异步工作线程，数据库慢/不可达时不影响网关收发与前端轮询；
+    /// - 20 秒超时只让界面请求失败，blocking 线程会由驱动自身超时后退出。
+    pub async fn query_positions(
+        &self,
+        oracle: OracleConnectConfig,
+        account_id: String,
+    ) -> Result<Vec<PositionRow>, String> {
+        let account = account_id.trim().to_string();
+        if account.is_empty() {
+            return Err("资金账号不能为空".into());
+        }
+        let cfg = oracle.clone();
+        let acct = account.clone();
+        let rows = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio::task::spawn_blocking(move || crate::positions::query_oracle(&cfg, &acct)),
+        )
+        .await
+        .map_err(|_| "查询持仓超时（20 秒），请检查连接串/网络".to_string())?
+        .map_err(|e| format!("查询线程异常：{}", e))??;
+        // 查询成功才记住连接信息与账号（密码仅保存在进程内存，不落盘/不记日志）
+        self.inner.positions.remember_query(&oracle, &account);
+        Ok(rows)
+    }
+
+    /// 保存（整份替换）内存中的持仓数据：下一次 ETF 申购以新数据为准。
+    pub async fn save_positions(
+        &self,
+        oracle: OracleConnectConfig,
+        account_id: String,
+        rows: Vec<PositionRow>,
+    ) -> Result<(), String> {
+        if account_id.trim().is_empty() {
+            return Err("资金账号不能为空".into());
+        }
+        self.inner
+            .positions
+            .replace(oracle, account_id.trim().to_string(), rows);
+        Ok(())
+    }
+
     /// 校验 Lua 回报脚本（mode == LuaScript 的平台在保存时调用）：
     /// 脚本不能为空 + 语法必须编译通过。错误信息带平台名，直接展示给用户。
     fn validate_lua_script(platform_name: &str, strategy: &StrategyConfig) -> Result<(), String> {
@@ -197,13 +259,23 @@ impl Engine {
             // Lua 脚本回报模式：保存时校验脚本（非空 + 语法），错误则整体失败，
             // 保证落盘的配置里的脚本都是可执行的
             Self::validate_lua_script(&p.name, &p.strategy)?;
+            // 上海综合网关走数据库：校验连接信息与表名（其他分类不要求 db）
+            if gw.category == GatewayCategory::Shzh {
+                let db = p.db.as_ref().ok_or_else(|| {
+                    format!("平台 [{}] 缺少数据库配置（上海综合网关必须配置）", p.name)
+                })?;
+                db.validate()
+                    .map_err(|e| format!("平台 [{}]：{}", p.name, e))?;
+            }
         }
-        // 校验同一网关内端口不重复
-        let mut ports: Vec<u16> = gw.platforms.iter().map(|p| p.port).collect();
-        ports.sort_unstable();
-        ports.dedup();
-        if ports.len() != gw.platforms.len() {
-            return Err("同一网关下平台监听端口不能重复".into());
+        // 校验同一网关内端口不重复（仅 TCP 网关；上海综合网关没有监听端口）
+        if gw.category != GatewayCategory::Shzh {
+            let mut ports: Vec<u16> = gw.platforms.iter().map(|p| p.port).collect();
+            ports.sort_unstable();
+            ports.dedup();
+            if ports.len() != gw.platforms.len() {
+                return Err("同一网关下平台监听端口不能重复".into());
+            }
         }
 
         // ---- 创建/修改时间维护 ----
@@ -432,6 +504,10 @@ impl Engine {
         if gw.platforms.is_empty() {
             return Err("网关下没有配置平台，请先添加平台".into());
         }
+        // 上海综合网关没有 TCP 监听，走独立的数据库轮询启动路径
+        if gw.category == GatewayCategory::Shzh {
+            return self.start_db_gateway(gw).await;
+        }
 
         // 先完成所有端口绑定，任一失败则整体回退
         let mut listeners: Vec<(PlatformConfig, TcpListener)> = Vec::new();
@@ -480,6 +556,8 @@ impl Engine {
                 // ETF 申赎清单缓存：平台生命周期内共享（网关重启自然清空），
                 // 避免每笔委托全量扫描清单目录（见 pcf::PcfCache）
                 pcf_cache: Arc::new(parking_lot::Mutex::new(crate::pcf::PcfCache::new())),
+                // ETF 申购持仓：全局唯一一份，各平台共享同一个 Arc
+                positions: self.inner.positions.clone(),
                 stats: stats.clone(),
                 connections: connections.clone(),
                 recorders: recorders.clone(),
@@ -538,6 +616,8 @@ impl Engine {
                                     GatewayCategory::Shbond => {
                                         tokio::spawn(session_shbond::handle_conn(ctx, stream, peer, conn_shutdown));
                                     }
+                                    // 上海综合网关在 start_gateway 开头已分流到 start_db_gateway
+                                    GatewayCategory::Shzh => unreachable!(),
                                 }
                             }
                             Err(e) => {
@@ -560,6 +640,7 @@ impl Engine {
                 recorders,
                 conn_tx,
                 orders,
+                db: None,
             });
         }
 
@@ -573,6 +654,103 @@ impl Engine {
         self.emit("info", id, format!("网关 [{}] 已启动", gw.name));
         // 记住“上次运行状态”：下次带 --auto-start 启动时恢复本网关
         self.set_gateway_state(id, true).await;
+        Ok(())
+    }
+
+    /// 启动上海综合网关：不绑定端口，每个平台起一个数据库轮询任务。
+    ///
+    /// 启动只做配置校验和任务创建，不等待数据库连接成功（数据库暂时不可用
+    /// 时平台仍显示运行中、dbConnected=false，轮询任务会自动重试）。
+    async fn start_db_gateway(&self, gw: GatewayConfig) -> Result<(), String> {
+        for p in &gw.platforms {
+            let db = p.db.as_ref().ok_or_else(|| {
+                format!("平台 [{}] 缺少数据库配置（上海综合网关必须配置）", p.name)
+            })?;
+            db.validate()
+                .map_err(|e| format!("平台 [{}]：{}", p.name, e))?;
+        }
+
+        let (shutdown_tx, _) = watch::channel(false);
+        let mut running_platforms = Vec::new();
+        let data_dir = Arc::new(self.inner.data_dir.clone());
+        for pcfg in &gw.platforms {
+            let stats = Arc::new(PlatformStats::default());
+            let connections: Arc<StdMutex<HashMap<u64, ConnInfo>>> =
+                Arc::new(StdMutex::new(HashMap::new()));
+            let recorders: Arc<StdMutex<HashMap<u64, Arc<ConnRecorder>>>> =
+                Arc::new(StdMutex::new(HashMap::new()));
+            // 数据库平台没有 TCP 发送通道，conn_tx 保持空表（手动回复走 db 分支）
+            let conn_tx: Arc<StdMutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>> =
+                Arc::new(StdMutex::new(HashMap::new()));
+            let capture_seq = Arc::new(AtomicU64::new(0));
+            let strategy = Arc::new(StdRwLock::new(pcfg.strategy.clone()));
+            let orders = pcfg.cache_orders.then(|| Arc::new(OrderBook::new()));
+            let cfg = Arc::new(pcfg.clone());
+            let db = Arc::new(DbHandle::new(
+                pcfg.db.clone().expect("启动前已校验 db 存在"),
+            ));
+            let ctx = SessionCtx {
+                gateway_id: gw.id.clone(),
+                gateway_name: gw.name.clone(),
+                cfg: cfg.clone(),
+                strategy: strategy.clone(),
+                lua_cache: Arc::new(crate::lua_engine::ScriptCache::new()),
+                pcf_cache: Arc::new(parking_lot::Mutex::new(crate::pcf::PcfCache::new())),
+                positions: self.inner.positions.clone(),
+                stats: stats.clone(),
+                connections: connections.clone(),
+                recorders: recorders.clone(),
+                conn_tx: conn_tx.clone(),
+                orders: orders.clone(),
+                data_dir: data_dir.clone(),
+                capture_seq: capture_seq.clone(),
+                events: self.inner.events.clone(),
+            };
+            let shutdown_rx = shutdown_tx.subscribe();
+            {
+                let db_cfg = db.config();
+                self.emit(
+                    "info",
+                    &gw.id,
+                    format!(
+                        "[{}/{}] 启动数据库轮询：{}:{}/{}（委托表 {} / 成交表 {}）",
+                        gw.name,
+                        cfg.name,
+                        db_cfg.host,
+                        db_cfg.port,
+                        db_cfg.database,
+                        db_cfg.req_resp_table,
+                        db_cfg.exec_report_table
+                    ),
+                );
+            }
+            let db_for_task = db.clone();
+            tokio::spawn(async move {
+                session_shzh::run_platform(ctx, db_for_task, shutdown_rx).await;
+            });
+            running_platforms.push(RunningPlatform {
+                cfg_id: cfg.id.clone(),
+                category: GatewayCategory::Shzh,
+                cfg,
+                strategy,
+                stats,
+                connections,
+                recorders,
+                conn_tx,
+                orders,
+                db: Some(db),
+            });
+        }
+
+        self.inner.running.lock().await.insert(
+            gw.id.clone(),
+            RunningGateway {
+                shutdown: shutdown_tx,
+                platforms: running_platforms,
+            },
+        );
+        self.emit("info", &gw.id, format!("网关 [{}] 已启动", gw.name));
+        self.set_gateway_state(&gw.id, true).await;
         Ok(())
     }
 
@@ -820,6 +998,47 @@ impl Engine {
         if kind == ManualReportKind::Trade && qty.is_some_and(|q| q <= 0.0) {
             return Err("成交数量必须大于 0".into());
         }
+        // ---- 上海综合网关：手动回复也是写数据库（不是 TCP 发送） ----
+        if rp.category == GatewayCategory::Shzh {
+            // 关键：数据库写入可能很慢（连接超时最长 12 秒），不能持有全局
+            // 运行表锁跨 await——否则快照轮询、其它网关启停都会被卡住。
+            // 这里把需要的 Arc/值克隆出来，显式释放 running 锁后再写库。
+            let db = rp.db.clone().ok_or("该平台没有数据库连接句柄")?;
+            let stats = rp.stats.clone();
+            let ob = ob.clone();
+            let platform_name = rp.cfg.name.clone();
+            let recorder = rp
+                .recorders
+                .lock()
+                .unwrap()
+                .get(&session_shzh::DB_CONN_ID)
+                .cloned();
+            drop(running);
+            let (desc, update) = session_shzh::manual_report(
+                db.as_ref(),
+                &stats,
+                &entry,
+                kind,
+                qty,
+                price,
+                reason,
+                recorder.as_ref(),
+            )
+            .await?;
+            match kind {
+                ManualReportKind::Ack => stats.acks.fetch_add(1, Ordering::Relaxed),
+                ManualReportKind::Trade => stats.trades.fetch_add(1, Ordering::Relaxed),
+                ManualReportKind::Reject => stats.order_rejects.fetch_add(1, Ordering::Relaxed),
+                ManualReportKind::Cancel => 0,
+            };
+            ob.apply(cl_ord_id, &update);
+            self.emit(
+                "info",
+                gateway_id,
+                format!("[{}] {}", platform_name, desc),
+            );
+            return Ok(desc);
+        }
         // 按网关分类调用对应协议的回报构造器（frame/desc/订单状态更新）；
         // 深市按业务特征返回 Result（无成交回报的业务不允许手动成交）
         let (frame, desc, update) = match rp.category {
@@ -835,6 +1054,10 @@ impl Engine {
                 &rp.cfg, &rp.stats, &entry, kind, qty, price, reason, front_reject,
             )
             .map_err(|e| e)?,
+            // 综合平台已在上面的数据库分支返回，不应走到这里
+            GatewayCategory::Shzh => {
+                return Err("内部错误：上海综合网关不应走 TCP 回报路径".into())
+            }
         };
         // 回报统一从“当前活动连接”发出：平台同一时刻只服务一个柜台连接，
         // 历史订单可能来自已断开的旧连接，手动回复也走当前连接
@@ -887,6 +1110,7 @@ impl Engine {
                             Some(rp) => PlatformSnapshot {
                                 platform_id: p.id.clone(),
                                 listening: true,
+                                db_connected: rp.db.as_ref().map(|d| d.is_connected()),
                                 stats: rp.stats.snapshot(),
                                 connections: rp
                                     .connections
@@ -899,6 +1123,7 @@ impl Engine {
                             None => PlatformSnapshot {
                                 platform_id: p.id.clone(),
                                 listening: false,
+                                db_connected: None,
                                 stats: StatsSnapshot::default(),
                                 connections: Vec::new(),
                             },
@@ -940,8 +1165,11 @@ pub struct GatewaySnapshot {
 pub struct PlatformSnapshot {
     /// 对应 PlatformConfig.id
     pub platform_id: String,
-    /// 是否正在监听端口
+    /// 是否正在监听端口（上海综合网关为“数据库轮询任务是否在运行”）
     pub listening: bool,
+    /// 上海综合网关：数据库当前是否连接成功（其他分类为 None，不序列化）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_connected: Option<bool>,
     /// 委托/确认/成交等计数
     pub stats: StatsSnapshot,
     /// 当前柜台连接列表

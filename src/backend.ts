@@ -163,16 +163,19 @@ class RemoteBackend implements Backend {
             return Promise.resolve({ ok: false, error: "远程后端未连接" });
         }
         const id = this.nextId++;
+        // 超时保护：默认 10 秒没回复就按失败处理，避免 Promise 永久挂起。
+        // Oracle 持仓查询由服务端 blocking 线程执行（服务端上限 20 秒），
+        // 远程模式给它 25 秒，避免客户端先超时、把仍在进行的查询误报为失败
+        const timeoutMs = payload.cmd === "query_positions" ? 25000 : 10000;
         return new Promise((resolve) => {
             this.pending.set(id, resolve);
             this.ws!.send(JSON.stringify({ id, payload }));
-            // 超时保护：10 秒没回复就按失败处理，避免 Promise 永久挂起
             setTimeout(() => {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
                     resolve({ ok: false, error: "请求超时" });
                 }
-            }, 10000);
+            }, timeoutMs);
         });
     }
 
